@@ -46,6 +46,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read   # the commit -> PR lookup below
+    # Two release merges close together would both bump the same main and race on the
+    # push. Queue them instead: the second checks out main only once the first has
+    # pushed its bump, so it bumps from there.
+    concurrency:
+      group: release-bump
+      cancel-in-progress: false
     outputs:
       bump: ${{ steps.pr.outputs.bump }}
       tag: ${{ steps.bump.outputs.tag }}
@@ -56,8 +63,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # A failed lookup fails the job: swallowing it would read as "no PR" and
+          # drop a labelled merge's release without a trace.
           pr_json=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls \
-            --jq '.[0] // empty' 2>/dev/null || true)
+            --jq '.[0] // empty')
           if [ -z "$pr_json" ]; then
             echo "No PR associated with this push -- nothing to release"
             echo "bump=none" >> "$GITHUB_OUTPUT"
