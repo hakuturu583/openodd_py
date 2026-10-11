@@ -547,7 +547,7 @@ class OddDefinition:
         """*values* with every derived attribute worked out."""
         out = self._core.complete(_core_values(values))
         for a in self._code_derived:
-            out[a.name] = read_probe(a.probe.from_values, out)
+            out[a.name] = read_probe(getattr(a.probe, "from_values"), out)
         return out
 
     # -- buckets inside and outside --------------------------------------------
