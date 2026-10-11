@@ -1,0 +1,7 @@
+openodd_py
+Copyright 2026 Masaya Kataoka
+
+The OpenODD reader, the ODD model and the cover items are a port to Rust of the
+``odd`` and ``coverage`` packages of autoware_carla_scenario
+(https://github.com/autowarefoundation/autoware_carla_scenario), licensed under
+the Apache License, Version 2.0.

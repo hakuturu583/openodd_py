@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "openodd-py"
+description = "ASAM OpenODD 1.0 for Python: read, evaluate, version and sample ODDs (Rust core)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "Masaya Kataoka", email = "ms.kataoka@gmail.com" }]
+dynamic = ["version"]
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Repository = "https://github.com/hakuturu583/openodd_py"
+
+[dependency-groups]
+dev = ["pytest>=8", "hypothesis>=6", "pyyaml>=6", "maturin>=1.7,<2"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "openodd._core"
+features = ["python"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
