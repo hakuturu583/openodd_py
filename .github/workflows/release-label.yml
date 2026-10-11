@@ -1,0 +1,72 @@
+name: Release label
+
+# The release workflow reads `release:major|minor|patch` off a PR once it is merged
+# into main. This checks the same thing while the PR is still open, so a mistake shows
+# up as a red check rather than as a failed (or missing) release after the merge:
+#
+#   - the three labels exist in the repository, and are created if they do not;
+#   - the PR carries at most one of them (the release job refuses more than one);
+#   - the job summary says which bump the merge will cut, or that it cuts none.
+#
+# Its own workflow rather than a job in ci.yml, so that adding or removing a label
+# re-runs this check and not the whole build.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+  issues: write         # create a missing release label
+  pull-requests: read
+
+jobs:
+  release-label:
+    name: release label
+    runs-on: ubuntu-latest
+    steps:
+      - name: the release labels exist in the repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/$REPO/labels" --paginate --jq '.[].name')
+          for spec in "major:d73a4a:Merging this PR cuts a major release" \
+                      "minor:fbca04:Merging this PR cuts a minor release" \
+                      "patch:0e8a16:Merging this PR cuts a patch release"; do
+            IFS=: read -r lvl color desc <<< "$spec"
+            name="release:$lvl"
+            if grep -qxF "$name" <<< "$existing"; then
+              echo "$name exists"
+              continue
+            fi
+            # A PR from a fork gets a read-only token, so creating can fail; say what
+            # is missing instead of an opaque API error.
+            if gh api "repos/$REPO/labels" -f name="$name" -f color="$color" \
+                 -f description="$desc" > /dev/null; then
+              echo "created $name"
+            else
+              echo "::error::label $name does not exist and could not be created"
+              exit 1
+            fi
+          done
+
+      - name: at most one release label on this PR
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          found=$(jq -r '.[] | select(test("^release:(major|minor|patch)$"))' <<< "$LABELS")
+          count=$(grep -c . <<< "$found" || true)
+          if [ "$count" -gt 1 ]; then
+            echo "::error::More than one release label on the PR ($(paste -sd, <<< "$found")) -- pick exactly one"
+            exit 1
+          fi
+          if [ "$count" -eq 1 ]; then
+            msg="Merging this PR cuts a **${found#release:}** release."
+          else
+            msg="No release label: merging this PR cuts no release."
+          fi
+          echo "$msg"
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
