@@ -1241,6 +1241,7 @@ struct Sampler {
 impl Sampler {
     #[new]
     #[pyo3(signature = (odd, knobs, *, seed="0", strategy="uniform", coverage=None, max_tries=200, drawn=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         odd: &Odd,
