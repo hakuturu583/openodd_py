@@ -30,3 +30,20 @@ uv venv && uv pip install maturin pytest hypothesis pyyaml
 maturin develop
 cargo test && pytest
 ```
+
+## Releasing
+
+Releases are cut by labels, as in simple_lanelet2. Put exactly one of
+`release:major`, `release:minor` or `release:patch` on a PR; when it is merged into
+`main`, the [release workflow](.github/workflows/release.yml) bumps the version in
+`Cargo.toml` and `Cargo.lock` with `tools/bump_version.py`, commits
+`chore(release): vX.Y.Z` and tags it, runs the tests again, builds the wheels (Linux
+x86_64/aarch64, macOS universal2) and the sdist, tests each wheel, and attaches them to a
+GitHub release with generated notes. Publishing to PyPI (Trusted Publishing) also runs
+once the repository variable `PUBLISH_PYPI` is `true`. A PR without a label releases
+nothing. The [release label check](.github/workflows/release-label.yml) runs on every PR:
+it creates any missing `release:*` label, fails if the PR carries more than one, and
+says in its summary which release the merge will cut.
+
+A hand-pushed `v*` tag is built and published the same way (its version must match
+`Cargo.toml`), and running the workflow by hand builds everything without publishing.
