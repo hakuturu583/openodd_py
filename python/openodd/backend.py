@@ -134,6 +134,11 @@ class Backend:
             knob = self.knob_for(attribute, controls)
             if knob is not None:
                 return knob
+        # Read by one of the backend's readers (``measure: gap_m``): the run's
+        # controls say which of its settings sets that, keyed alike.
+        kind, spec = getattr(attribute, "source", ("", ""))
+        if kind in self.readers and spec in controls:
+            return controls[spec]
         try:
             return self.knobs.get(attribute.probe)
         except TypeError:  # an unhashable probe has no knob

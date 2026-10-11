@@ -922,6 +922,32 @@ impl Odd {
         self.complete_except(values, None, false);
     }
 
+    /// The derived attributes left open (or absent) worked out from the
+    /// others; one unknown stays open. What the sampler judges a draw by.
+    pub fn complete_open(&self, values: &mut Values) {
+        let items = self.items();
+        for a in &self.attributes {
+            let Probe::Derived(rules) = &a.probe else {
+                continue;
+            };
+            if values.get(&a.name).is_some_and(|v| *v != Value::Open) {
+                continue;
+            }
+            let mut value = Value::Open;
+            for (literal, condition) in rules {
+                match condition.evaluate(values, &HashMap::new(), &items) {
+                    Truth::Unknown => break,
+                    Truth::False => continue,
+                    Truth::True | Truth::Inactive => {
+                        value = Value::Str(literal.clone());
+                        break;
+                    }
+                }
+            }
+            values.insert(a.name.clone(), value);
+        }
+    }
+
     fn complete_except(&self, values: &mut Values, given: Option<&str>, open_if_unknown: bool) {
         let items = self.items();
         for a in &self.attributes {

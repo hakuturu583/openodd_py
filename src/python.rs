@@ -942,6 +942,368 @@ fn value_label(value: &Bound<'_, PyAny>) -> PyResult<String> {
     Ok(to_value(value)?.label())
 }
 
+// ---------------------------------------------------------------------------
+// Coverage reports
+// ---------------------------------------------------------------------------
+
+/// An item or a cross merged over runs.
+#[pyclass(frozen, module = "openodd._core")]
+#[derive(Clone)]
+struct MergedEntry {
+    inner: crate::report::MergedEntry,
+}
+
+#[pymethods]
+impl MergedEntry {
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+    #[getter]
+    fn group(&self) -> String {
+        self.inner.group.clone()
+    }
+    #[getter]
+    fn kind(&self) -> String {
+        self.inner.kind.clone()
+    }
+    #[getter]
+    fn event(&self) -> String {
+        self.inner.event.clone()
+    }
+    #[getter]
+    fn text(&self) -> String {
+        self.inner.text.clone()
+    }
+    #[getter]
+    fn target(&self) -> f64 {
+        self.inner.target
+    }
+    #[getter]
+    fn buckets(&self) -> Vec<String> {
+        self.inner.buckets.clone()
+    }
+    #[getter]
+    fn unit(&self) -> String {
+        self.inner.unit.clone()
+    }
+    #[getter]
+    fn items(&self) -> Vec<String> {
+        self.inner.items.clone()
+    }
+    #[getter]
+    fn hits(&self) -> HashMap<String, i64> {
+        self.inner.hits.clone().into_iter().collect()
+    }
+    #[getter]
+    fn runs(&self) -> HashMap<String, i64> {
+        self.inner.runs.clone().into_iter().collect()
+    }
+    #[getter]
+    fn hit_by(&self) -> HashMap<String, Vec<usize>> {
+        self.inner.hit_by.clone().into_iter().collect()
+    }
+    #[getter]
+    fn out_of_range(&self) -> HashMap<String, i64> {
+        self.inner.out_of_range.clone().into_iter().collect()
+    }
+    #[getter]
+    fn samples(&self) -> i64 {
+        self.inner.samples
+    }
+    #[getter]
+    fn ignored(&self) -> i64 {
+        self.inner.ignored
+    }
+    #[getter]
+    fn outside(&self) -> Vec<String> {
+        self.inner.outside.clone()
+    }
+    #[getter]
+    fn cover_by(&self) -> String {
+        self.inner.cover_by.clone()
+    }
+    #[getter]
+    fn min_stay(&self) -> Option<f64> {
+        self.inner.min_stay
+    }
+    #[getter]
+    fn targets(&self) -> Vec<String> {
+        self.inner.targets()
+    }
+    #[getter]
+    fn covered(&self) -> Vec<String> {
+        self.inner.covered()
+    }
+    #[getter]
+    fn holes(&self) -> Vec<String> {
+        self.inner.holes()
+    }
+    #[getter]
+    fn grade(&self) -> f64 {
+        self.inner.grade()
+    }
+    fn amount(&self, bucket: &str) -> f64 {
+        self.inner.amount(bucket)
+    }
+    fn is_covered(&self, bucket: &str) -> bool {
+        self.inner.is_covered(bucket)
+    }
+    fn exposure_of(&self, bucket: &str) -> HashMap<String, Option<f64>> {
+        self.inner.exposure_of(bucket).into_iter().collect()
+    }
+    fn to_json(&self) -> String {
+        self.inner.to_json().to_string()
+    }
+    fn __repr__(&self) -> String {
+        format!("MergedEntry({:?})", self.inner.name)
+    }
+}
+
+/// Coverage merged over a number of runs.
+#[pyclass(frozen, module = "openodd._core")]
+#[derive(Clone)]
+struct CoverageReport {
+    inner: crate::report::CoverageReport,
+}
+
+#[pymethods]
+impl CoverageReport {
+    #[getter]
+    fn runs(&self) -> i64 {
+        self.inner.runs
+    }
+    #[getter]
+    fn scenarios(&self) -> HashMap<String, i64> {
+        self.inner.scenarios.clone().into_iter().collect()
+    }
+    #[getter]
+    fn entries(&self) -> Vec<MergedEntry> {
+        self.inner
+            .entries
+            .iter()
+            .cloned()
+            .map(|inner| MergedEntry { inner })
+            .collect()
+    }
+    fn groups(&self) -> Vec<String> {
+        self.inner.groups()
+    }
+    fn group_grade(&self, group: &str) -> f64 {
+        self.inner.group_grade(group)
+    }
+    /// ODD name -> its exposure, as JSON.
+    fn odds_json(&self) -> String {
+        serde_json::Value::Object(
+            self.inner
+                .odds
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_json()))
+                .collect(),
+        )
+        .to_string()
+    }
+    fn to_json(&self) -> String {
+        self.inner.to_json().to_string()
+    }
+    #[pyo3(signature = (max_holes=20))]
+    fn to_markdown(&self, max_holes: usize) -> String {
+        self.inner.to_markdown(max_holes)
+    }
+}
+
+/// Merge coverage documents (a JSON list of the files' contents).
+#[pyfunction]
+fn merge_coverage(documents_json: &str) -> PyResult<CoverageReport> {
+    let docs: Vec<serde_json::Value> =
+        serde_json::from_str(documents_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(CoverageReport {
+        inner: crate::report::merge_coverage(&docs).map_err(err)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sampling
+// ---------------------------------------------------------------------------
+
+/// How a run sets an ODD attribute.
+#[pyclass(frozen, module = "openodd._core")]
+#[derive(Clone)]
+struct Knob {
+    inner: crate::sampler::Knob,
+}
+
+#[pymethods]
+impl Knob {
+    /// `values`: bucket label -> a value, or `(low, high)` to draw it from.
+    #[new]
+    #[pyo3(signature = (key, values=None, *, scale=1.0, offset=0.0, integer=false, range=None, limits=None))]
+    fn new(
+        key: String,
+        values: Option<&Bound<'_, PyDict>>,
+        scale: f64,
+        offset: f64,
+        integer: bool,
+        range: Option<(f64, f64)>,
+        limits: Option<(f64, f64)>,
+    ) -> PyResult<Self> {
+        let mut inner = crate::sampler::Knob::new(key);
+        for (label, v) in values.into_iter().flat_map(|d| d.iter()) {
+            let value = match v.extract::<(f64, f64)>() {
+                Ok((low, high)) if !v.is_instance_of::<pyo3::types::PyString>() => {
+                    crate::sampler::KnobValue::Range(low, high)
+                }
+                _ => crate::sampler::KnobValue::Value(to_value(&v)?),
+            };
+            inner.values.insert(label.str()?.to_string(), value);
+        }
+        inner.scale = scale;
+        inner.offset = offset;
+        inner.integer = integer;
+        inner.range = range;
+        inner.limits = limits;
+        inner.check().map_err(err)?;
+        Ok(Knob { inner })
+    }
+
+    /// `range` within what `limits` lets be written, in the attribute's unit.
+    #[getter]
+    fn reach(&self) -> Option<(f64, f64)> {
+        self.inner.reach()
+    }
+}
+
+/// One concrete case the sampler drew.
+#[pyclass(frozen, module = "openodd._core")]
+#[derive(Clone)]
+struct Sample {
+    inner: crate::sampler::Sample,
+}
+
+#[pymethods]
+impl Sample {
+    #[new]
+    #[pyo3(signature = (index, overrides, buckets, values, situation=None))]
+    fn new(
+        index: usize,
+        overrides: Vec<String>,
+        buckets: Vec<(String, String)>,
+        values: &Bound<'_, PyDict>,
+        situation: Option<String>,
+    ) -> PyResult<Self> {
+        let mut vals = indexmap::IndexMap::new();
+        for (k, v) in values.iter() {
+            vals.insert(k.str()?.to_string(), to_value(&v)?);
+        }
+        Ok(Sample {
+            inner: crate::sampler::Sample {
+                index,
+                overrides,
+                buckets: buckets.into_iter().collect(),
+                values: vals,
+                situation,
+            },
+        })
+    }
+    #[getter]
+    fn index(&self) -> usize {
+        self.inner.index
+    }
+    #[getter]
+    fn overrides(&self) -> Vec<String> {
+        self.inner.overrides.clone()
+    }
+    #[getter]
+    fn buckets(&self) -> Vec<(String, String)> {
+        self.inner.buckets.clone().into_iter().collect()
+    }
+    #[getter]
+    fn values(&self, py: Python<'_>) -> PyResult<Vec<(String, PyObject)>> {
+        self.inner
+            .values
+            .iter()
+            .map(|(k, v)| Ok((k.clone(), from_value(py, v)?)))
+            .collect()
+    }
+    #[getter]
+    fn situation(&self) -> Option<String> {
+        self.inner.situation.clone()
+    }
+}
+
+/// Draws concrete cases inside an ODD.
+#[pyclass(module = "openodd._core")]
+struct Sampler {
+    inner: crate::sampler::Sampler,
+}
+
+#[pymethods]
+impl Sampler {
+    #[new]
+    #[pyo3(signature = (odd, knobs, *, seed="0", strategy="uniform", coverage=None, max_tries=200, drawn=None))]
+    fn new(
+        py: Python<'_>,
+        odd: &Odd,
+        knobs: Vec<(String, Py<Knob>)>,
+        seed: &str,
+        strategy: &str,
+        coverage: Option<Py<CoverageReport>>,
+        max_tries: usize,
+        drawn: Option<Vec<Py<Sample>>>,
+    ) -> PyResult<Self> {
+        let knobs: indexmap::IndexMap<String, crate::sampler::Knob> = knobs
+            .into_iter()
+            .map(|(k, v)| (k, v.borrow(py).inner.clone()))
+            .collect();
+        let drawn: Vec<crate::sampler::Sample> = drawn
+            .unwrap_or_default()
+            .iter()
+            .map(|s| s.borrow(py).inner.clone())
+            .collect();
+        let coverage = coverage.map(|c| c.borrow(py).inner.clone());
+        let strategy = crate::sampler::Strategy::parse(strategy).map_err(err)?;
+        let inner = crate::sampler::Sampler::new(
+            &odd.inner,
+            &knobs,
+            seed,
+            strategy,
+            coverage.as_ref(),
+            max_tries,
+            &drawn,
+        )
+        .map_err(err)?;
+        Ok(Sampler { inner })
+    }
+    #[getter]
+    fn attributes(&self) -> Vec<String> {
+        self.inner.attributes()
+    }
+    #[getter]
+    fn situation_holes(&self) -> Vec<String> {
+        self.inner.situation_holes()
+    }
+    /// Warnings since the last call (situations given up on).
+    fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.inner.warnings)
+    }
+    #[pyo3(signature = (index=0, situation=None))]
+    fn draw(&mut self, index: usize, situation: Option<&str>) -> PyResult<Sample> {
+        self.inner
+            .draw(index, situation)
+            .map(|inner| Sample { inner })
+            .map_err(err)
+    }
+    fn sample(&mut self, count: usize) -> PyResult<Vec<Sample>> {
+        Ok(self
+            .inner
+            .sample(count)
+            .map_err(err)?
+            .into_iter()
+            .map(|inner| Sample { inner })
+            .collect())
+    }
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -955,6 +1317,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Attribute>()?;
     m.add_class::<Module>()?;
     m.add_class::<Odd>()?;
+    m.add_class::<MergedEntry>()?;
+    m.add_class::<CoverageReport>()?;
+    m.add_class::<Knob>()?;
+    m.add_class::<Sample>()?;
+    m.add_class::<Sampler>()?;
     for f in [
         wrap_pyfunction!(is_in, m)?,
         wrap_pyfunction!(equals, m)?,
@@ -971,6 +1338,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(convert, m)?,
         wrap_pyfunction!(normalize_unit, m)?,
         wrap_pyfunction!(value_label, m)?,
+        wrap_pyfunction!(merge_coverage, m)?,
     ] {
         m.add_function(f)?;
     }

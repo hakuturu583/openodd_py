@@ -14,6 +14,8 @@ pub mod error;
 pub mod items;
 pub mod loader;
 pub mod model;
+pub mod report;
+pub mod sampler;
 pub mod sources;
 pub mod transmission;
 pub mod units;

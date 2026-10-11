@@ -180,6 +180,13 @@ class OddAttribute:
         return self._core.name
 
     @property
+    def source(self) -> tuple[str, str]:
+        """What the binding named to read it: ``("probe", "speed_kph")``,
+        ``("measure", "gap_m")``, ``("derived", "")``, ``("code", name)`` or
+        ``("missing", "")``."""
+        return self._core.probe
+
+    @property
     def unit(self) -> str:
         return self._core.unit
 

@@ -39,6 +39,16 @@ from .loader import (
     load_openodd,
     read_archive_manifest,
 )
+from .report import (
+    COVERAGE_SCHEMA,
+    CoverageReport,
+    MergedEntry,
+    find_coverage_files,
+    load_and_merge,
+    load_coverage_files,
+    merge_coverage,
+)
+from .sampler import OddDraws, OddKnob, OddSample, OddSampler, knobs_from_mapping
 from .model import (
     INACTIVE,
     UNDECIDED,
@@ -54,6 +64,18 @@ from .model import (
 )
 
 __all__ = [
+    "COVERAGE_SCHEMA",
+    "CoverageReport",
+    "MergedEntry",
+    "OddDraws",
+    "OddKnob",
+    "OddSample",
+    "OddSampler",
+    "find_coverage_files",
+    "knobs_from_mapping",
+    "load_and_merge",
+    "load_coverage_files",
+    "merge_coverage",
     "ABOVE_RANGE",
     "BELOW_RANGE",
     "COVER_MEASURES",
