@@ -20,6 +20,7 @@ import json
 import logging
 import sys
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,6 +32,7 @@ __all__ = [
     "COVERAGE_SCHEMAS",
     "CoverageReport",
     "MergedEntry",
+    "OddExposure",
     "find_coverage_files",
     "load_and_merge",
     "load_coverage_files",
@@ -47,6 +49,31 @@ COVERAGE_SCHEMAS = (COVERAGE_SCHEMA, "autoware_carla_scenario.coverage/1")
 COVERAGE_FILE_GLOB = "*_coverage.json"
 
 MergedEntry = _core.MergedEntry
+
+
+@dataclass
+class OddExposure:
+    """How long the runs of one ODD spent inside and outside it."""
+
+    name: str
+    text: str = ""
+    runs: int = 0
+    #: Runs that left the ODD at least once.
+    runs_outside: int = 0
+    #: Inside, inside only because values were missing, and outside.
+    ticks: dict[str, int] = field(default_factory=dict)
+    seconds: dict[str, float] = field(default_factory=dict)
+    #: Module -> ticks it failed, and ticks its verdict rested on missing values.
+    module_ticks: dict[str, dict[str, int]] = field(default_factory=dict)
+    unmeasured: list[str] = field(default_factory=list)
+    #: The git sources the ODD was read from.
+    sources: list[dict[str, Any]] = field(default_factory=list)
+    #: The revisions of the ODD the runs measured (more than one: different ODDs).
+    revisions: list[str] = field(default_factory=list)
+    excursions: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {k: getattr(self, k) for k in self.__dataclass_fields__}
 
 
 class CoverageReport:
@@ -68,9 +95,9 @@ class CoverageReport:
         return self._core.entries
 
     @property
-    def odds(self) -> dict[str, dict[str, Any]]:
+    def odds(self) -> dict[str, OddExposure]:
         """ODD name -> how the runs measured against it fared."""
-        return json.loads(self._core.odds_json())
+        return {name: OddExposure(**raw) for name, raw in json.loads(self._core.odds_json()).items()}
 
     def entry(self, name: str) -> Optional[MergedEntry]:
         return next((e for e in self.entries if e.name == name), None)

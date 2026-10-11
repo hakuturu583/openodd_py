@@ -231,12 +231,27 @@ pub fn fetch(url: &str, rev: &str) -> Result<Checkout> {
     result
 }
 
+/// `path` with `.` and `..` worked out without the file system (it may not exist).
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// The file `source` names, and the checkout it is in.
 pub fn checkout(source: &GitSource) -> Result<(PathBuf, Checkout)> {
     let co = fetch(&source.url, &source.rev)?;
     let root = co.root.canonicalize()?;
     let path = root.join(&source.path);
-    let resolved = path.canonicalize().unwrap_or(path.clone());
+    let resolved = path.canonicalize().unwrap_or_else(|_| lexical(&path));
     if !resolved.starts_with(&root) {
         return Err(Error::GitSource(format!(
             "git source {}: {} leaves the repository",

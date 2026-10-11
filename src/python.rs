@@ -87,6 +87,15 @@ fn to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     Ok(Value::Str(obj.str()?.to_string()))
 }
 
+static UNDECIDED: pyo3::sync::GILOnceCell<Py<Undecided>> = pyo3::sync::GILOnceCell::new();
+
+fn undecided(py: Python<'_>) -> PyResult<PyObject> {
+    Ok(UNDECIDED
+        .get_or_try_init(py, || Py::new(py, Undecided))?
+        .clone_ref(py)
+        .into_any())
+}
+
 fn from_value(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
     Ok(match v {
         Value::Missing => py.None(),
@@ -94,11 +103,9 @@ fn from_value(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
         Value::Int(i) => i.into_pyobject(py)?.into_any().unbind(),
         Value::Float(x) => x.into_pyobject(py)?.into_any().unbind(),
         Value::Str(s) => s.into_pyobject(py)?.into_any().unbind(),
-        Value::Open => Py::new(py, Undecided)?.into_any(),
-        Value::Bucket(i) => format!("<bucket {i}>")
-            .into_pyobject(py)?
-            .into_any()
-            .unbind(),
+        Value::Open => undecided(py)?,
+        // A bucket stands for every value in it: not a value a probe could read.
+        Value::Bucket(i) => ("bucket", *i).into_pyobject(py)?.into_any().unbind(),
     })
 }
 
@@ -108,6 +115,10 @@ fn to_values(values: &Bound<'_, PyDict>) -> PyResult<model::Values> {
         out.insert(k.str()?.to_string(), to_value(&v)?);
     }
     Ok(out)
+}
+
+fn truth_obj(py: Python<'_>, t: Truth) -> PyResult<PyObject> {
+    truth(py, t)
 }
 
 fn truth(py: Python<'_>, t: Truth) -> PyResult<PyObject> {
@@ -268,12 +279,51 @@ fn conditions(items: Option<Vec<Py<Condition>>>, py: Python<'_>) -> Vec<CoreCond
 
 #[pymethods]
 impl Condition {
+    /// Conditions are built from an attribute (`speed.between(0, 60)`) or
+    /// from others (`all_of`, `any_of`, `module_holds`), not directly.
+    #[new]
+    #[pyo3(text_signature = "()")]
+    fn py_new() -> PyResult<Self> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "OddCondition: build one from an OddAttribute (is_in, between, ...) or with all_of, any_of, module_holds",
+        ))
+    }
+
     fn describe(&self) -> String {
         self.inner.describe()
     }
     fn __repr__(&self) -> String {
         format!("<OddCondition {}>", self.inner.describe())
     }
+    /// Whether it holds for `values` (by attribute name): `True`, `False`,
+    /// `None` when a value it needs is missing, or `"inactive"`. `truth` holds
+    /// the verdicts of the modules and labels it refers to.
+    #[pyo3(signature = (values, truth=None))]
+    fn evaluate(
+        &self,
+        py: Python<'_>,
+        values: &Bound<'_, PyDict>,
+        truth: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyObject> {
+        let values = to_values(values)?;
+        let mut t = HashMap::new();
+        for (k, v) in truth.into_iter().flat_map(|d| d.iter()) {
+            let verdict = if v.is_none() {
+                Truth::Unknown
+            } else if let Ok(b) = v.extract::<bool>() {
+                if b {
+                    Truth::True
+                } else {
+                    Truth::False
+                }
+            } else {
+                Truth::Inactive
+            };
+            t.insert(k.str()?.to_string(), verdict);
+        }
+        truth_obj(py, self.inner.evaluate_plain(&values, &t))
+    }
+
     /// The attributes it tests.
     fn attributes(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -474,6 +524,79 @@ impl Attribute {
     fn item(&self) -> Option<Bucketing> {
         self.inner.item.clone().map(|inner| Bucketing { inner })
     }
+    /// The attributes a derived attribute is worked out from (empty otherwise).
+    #[getter]
+    fn derived_from(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Probe::Derived(rules) = &self.inner.probe {
+            for (_, c) in rules {
+                c.attributes(&mut out);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|a| seen.insert(a.clone()));
+        out
+    }
+}
+
+/// A table of units: the built-in ones, and those added.
+#[pyclass(module = "openodd._core")]
+struct Units {
+    inner: crate::units::Units,
+}
+
+#[pymethods]
+impl Units {
+    #[new]
+    fn new() -> Self {
+        Units {
+            inner: crate::units::Units::new(),
+        }
+    }
+    /// Add an OpenODD `conversion:` block: `{type: {from: {to: {scale, offset}}}}`.
+    fn add_conversions(&mut self, conversion: &Bound<'_, PyDict>) -> PyResult<()> {
+        let mut out = Vec::new();
+        for (unit_type, sources) in conversion.iter() {
+            let Ok(sources) = sources.downcast::<PyDict>() else {
+                continue;
+            };
+            for (src, targets) in sources.iter() {
+                let Ok(targets) = targets.downcast::<PyDict>() else {
+                    continue;
+                };
+                for (dst, spec) in targets.iter() {
+                    let get = |k: &str, d: f64| -> PyResult<f64> {
+                        match spec
+                            .downcast::<PyDict>()
+                            .ok()
+                            .and_then(|m| m.get_item(k).ok().flatten())
+                        {
+                            Some(v) => v.extract(),
+                            None => Ok(d),
+                        }
+                    };
+                    out.push(crate::units::Conversion {
+                        unit_type: unit_type.str()?.to_string(),
+                        from: src.str()?.to_string(),
+                        to: dst.str()?.to_string(),
+                        scale: get("scale", 1.0)?,
+                        offset: get("offset", 0.0)?,
+                    });
+                }
+            }
+        }
+        self.inner.add_conversions(&out);
+        Ok(())
+    }
+    fn unit_type(&self, unit: &str) -> Option<String> {
+        self.inner.unit_type(unit).map(String::from)
+    }
+    fn convert(&self, value: f64, from_unit: &str, to_unit: &str) -> PyResult<f64> {
+        self.inner.convert(value, from_unit, to_unit).map_err(err)
+    }
+    fn check_type(&self, unit: &str, unit_type: &str) -> PyResult<()> {
+        self.inner.check_type(unit, unit_type).map_err(err)
+    }
 }
 
 /// A named rule of an ODD.
@@ -592,6 +715,10 @@ impl Module {
     #[getter]
     fn active(&self) -> bool {
         self.inner.active
+    }
+    #[setter]
+    fn set_active(&mut self, active: bool) {
+        self.inner.active = active;
     }
     #[getter]
     fn text(&self) -> String {
@@ -926,6 +1053,19 @@ fn archive_manifest(archive: &[u8]) -> PyResult<String> {
     Ok(serde_json::to_string(&t.manifest()).expect("JSON"))
 }
 
+/// The files of `url` at `rev`, fetched into the cache if need be: `(root, commit)`.
+#[pyfunction]
+fn fetch(url: &str, rev: &str) -> PyResult<(PathBuf, String)> {
+    let co = crate::sources::fetch(url, rev).map_err(err)?;
+    Ok((co.root, co.commit))
+}
+
+/// Where repositories and checkouts are cached.
+#[pyfunction]
+fn cache_dir() -> PathBuf {
+    crate::sources::cache_dir()
+}
+
 #[pyfunction]
 #[pyo3(signature = (value, from_unit, to_unit))]
 fn convert(value: f64, from_unit: &str, to_unit: &str) -> PyResult<f64> {
@@ -992,20 +1132,20 @@ impl MergedEntry {
         self.inner.items.clone()
     }
     #[getter]
-    fn hits(&self) -> HashMap<String, i64> {
-        self.inner.hits.clone().into_iter().collect()
+    fn hits(&self) -> indexmap::IndexMap<String, i64> {
+        self.inner.hits.clone()
     }
     #[getter]
-    fn runs(&self) -> HashMap<String, i64> {
-        self.inner.runs.clone().into_iter().collect()
+    fn runs(&self) -> indexmap::IndexMap<String, i64> {
+        self.inner.runs.clone()
     }
     #[getter]
-    fn hit_by(&self) -> HashMap<String, Vec<usize>> {
-        self.inner.hit_by.clone().into_iter().collect()
+    fn hit_by(&self) -> indexmap::IndexMap<String, Vec<usize>> {
+        self.inner.hit_by.clone()
     }
     #[getter]
-    fn out_of_range(&self) -> HashMap<String, i64> {
-        self.inner.out_of_range.clone().into_iter().collect()
+    fn out_of_range(&self) -> indexmap::IndexMap<String, i64> {
+        self.inner.out_of_range.clone()
     }
     #[getter]
     fn samples(&self) -> i64 {
@@ -1049,8 +1189,8 @@ impl MergedEntry {
     fn is_covered(&self, bucket: &str) -> bool {
         self.inner.is_covered(bucket)
     }
-    fn exposure_of(&self, bucket: &str) -> HashMap<String, Option<f64>> {
-        self.inner.exposure_of(bucket).into_iter().collect()
+    fn exposure_of(&self, bucket: &str) -> indexmap::IndexMap<String, Option<f64>> {
+        self.inner.exposure_of(bucket)
     }
     fn to_json(&self) -> String {
         self.inner.to_json().to_string()
@@ -1074,8 +1214,8 @@ impl CoverageReport {
         self.inner.runs
     }
     #[getter]
-    fn scenarios(&self) -> HashMap<String, i64> {
-        self.inner.scenarios.clone().into_iter().collect()
+    fn scenarios(&self) -> indexmap::IndexMap<String, i64> {
+        self.inner.scenarios.clone()
     }
     #[getter]
     fn entries(&self) -> Vec<MergedEntry> {
@@ -1110,6 +1250,57 @@ impl CoverageReport {
     fn to_markdown(&self, max_holes: usize) -> String {
         self.inner.to_markdown(max_holes)
     }
+}
+
+/// A report from entries read elsewhere: `(name, buckets, target, cover_by,
+/// {bucket: amount})` each -- what the sampler reads of coverage.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn coverage_from_entries(
+    entries: Vec<(
+        String,
+        Vec<String>,
+        f64,
+        String,
+        indexmap::IndexMap<String, f64>,
+    )>,
+) -> CoverageReport {
+    let mut report = crate::report::CoverageReport::default();
+    for (name, buckets, target, cover_by, amounts) in entries {
+        let mut e = crate::report::MergedEntry {
+            name,
+            group: String::new(),
+            kind: String::new(),
+            event: String::new(),
+            text: String::new(),
+            target,
+            buckets,
+            unit: String::new(),
+            items: vec![],
+            hits: Default::default(),
+            runs: Default::default(),
+            hit_by: Default::default(),
+            out_of_range: Default::default(),
+            samples: 0,
+            ignored: 0,
+            outside: vec![],
+            exposure: Default::default(),
+            cover_by: cover_by.clone(),
+            min_stay: None,
+            counted: Default::default(),
+        };
+        if cover_by == "hits" {
+            e.hits = amounts
+                .iter()
+                .map(|(k, v)| (k.clone(), *v as i64))
+                .collect();
+        } else {
+            e.exposure.insert(cover_by, Some(amounts));
+        }
+        report.runs = 1;
+        report.entries.push(e);
+    }
+    CoverageReport { inner: report }
 }
 
 /// Merge coverage documents (a JSON list of the files' contents).
@@ -1240,7 +1431,7 @@ struct Sampler {
 #[pymethods]
 impl Sampler {
     #[new]
-    #[pyo3(signature = (odd, knobs, *, seed="0", strategy="uniform", coverage=None, max_tries=200, drawn=None))]
+    #[pyo3(signature = (odd, knobs, *, seed="0", strategy="uniform", coverage=None, max_tries=200, drawn=None, derive=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -1251,6 +1442,7 @@ impl Sampler {
         coverage: Option<Py<CoverageReport>>,
         max_tries: usize,
         drawn: Option<Vec<Py<Sample>>>,
+        derive: Option<PyObject>,
     ) -> PyResult<Self> {
         let knobs: indexmap::IndexMap<String, crate::sampler::Knob> = knobs
             .into_iter()
@@ -1263,7 +1455,7 @@ impl Sampler {
             .collect();
         let coverage = coverage.map(|c| c.borrow(py).inner.clone());
         let strategy = crate::sampler::Strategy::parse(strategy).map_err(err)?;
-        let inner = crate::sampler::Sampler::new(
+        let mut inner = crate::sampler::Sampler::new(
             &odd.inner,
             &knobs,
             seed,
@@ -1273,11 +1465,41 @@ impl Sampler {
             &drawn,
         )
         .map_err(err)?;
+        if let Some(derive) = derive {
+            inner.derive = Some(std::sync::Arc::new(
+                move |values: &mut crate::model::Values| {
+                    Python::with_gil(|py| {
+                        let result = (|| -> PyResult<()> {
+                            let dict = PyDict::new(py);
+                            for (k, v) in values.iter() {
+                                dict.set_item(k, from_value(py, v)?)?;
+                            }
+                            let out = derive.call1(py, (dict,))?;
+                            for (k, v) in out.bind(py).downcast::<PyDict>()?.iter() {
+                                let v = to_value(&v)?;
+                                values.insert(
+                                    k.str()?.to_string(),
+                                    if v == Value::Missing { Value::Open } else { v },
+                                );
+                            }
+                            Ok(())
+                        })();
+                        if let Err(e) = result {
+                            e.print(py);
+                        }
+                    })
+                },
+            ));
+        }
         Ok(Sampler { inner })
     }
     #[getter]
     fn attributes(&self) -> Vec<String> {
         self.inner.attributes()
+    }
+    #[getter]
+    fn coverage_amounts(&self) -> Vec<((String, String), f64)> {
+        self.inner.coverage_amounts()
     }
     #[getter]
     fn situation_holes(&self) -> Vec<String> {
@@ -1311,13 +1533,15 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("OpenOddError", py.get_type::<OpenOddError>())?;
     m.add("UnitError", py.get_type::<UnitError>())?;
     m.add("GitSourceError", py.get_type::<GitSourceError>())?;
-    m.add("UNDECIDED", Py::new(py, Undecided)?)?;
+    m.add("UNDECIDED", undecided(py)?)?;
+    m.add("CACHE_ENV", crate::sources::CACHE_ENV)?;
     m.add_class::<Undecided>()?;
     m.add_class::<Bucketing>()?;
     m.add_class::<Condition>()?;
     m.add_class::<Attribute>()?;
     m.add_class::<Module>()?;
     m.add_class::<Odd>()?;
+    m.add_class::<Units>()?;
     m.add_class::<MergedEntry>()?;
     m.add_class::<CoverageReport>()?;
     m.add_class::<Knob>()?;
@@ -1340,6 +1564,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(normalize_unit, m)?,
         wrap_pyfunction!(value_label, m)?,
         wrap_pyfunction!(merge_coverage, m)?,
+        wrap_pyfunction!(coverage_from_entries, m)?,
+        wrap_pyfunction!(fetch, m)?,
+        wrap_pyfunction!(cache_dir, m)?,
     ] {
         m.add_function(f)?;
     }

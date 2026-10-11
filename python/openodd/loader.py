@@ -38,6 +38,11 @@ class GitSource(tuple):
     """OpenODD files in a git repository at a revision: ``(url, rev, path)``."""
 
     def __new__(cls, url: str, rev: str, path: str) -> "GitSource":
+        for key, value in (("url", url), ("rev", rev), ("path", path)):
+            if not isinstance(value, str) or not value.strip():
+                raise GitSourceError(f"git source: {key} must be a non-empty string")
+            if value.startswith("-") or any(c in value for c in "\n\r\0"):
+                raise GitSourceError(f"git source: bad {key} {value!r}")
         return super().__new__(cls, (url, rev, path))
 
     @property

@@ -16,7 +16,7 @@ What measures the attributes -- a simulator, a recorded log -- is the
 application's :class:`Backend`.
 """
 
-from ._core import GitSourceError, OpenOddError, UnitError, convert, normalize_unit
+from ._core import GitSourceError, OpenOddError, UnitError, Units, convert, normalize_unit
 from .backend import Backend, Probe, default_backend, import_callable, set_default_backend
 from .items import (
     ABOVE_RANGE,
@@ -97,6 +97,7 @@ __all__ = [
     "Probe",
     "SamplingEvent",
     "UnitError",
+    "Units",
     "all_of",
     "any_of",
     "convert",

@@ -344,6 +344,12 @@ impl Condition {
         }
     }
 
+    /// Whether it holds for plain values (no buckets), given the verdicts of
+    /// the modules and labels it refers to.
+    pub fn evaluate_plain(&self, values: &Values, truth: &HashMap<String, Truth>) -> Truth {
+        self.evaluate(values, truth, &HashMap::new())
+    }
+
     pub fn describe(&self) -> String {
         match self {
             Condition::Leaf {

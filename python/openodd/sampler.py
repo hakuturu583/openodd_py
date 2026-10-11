@@ -27,7 +27,7 @@ from typing import Any, Optional, Union
 from . import _core
 from .backend import Backend, default_backend
 from .items import value_label
-from .model import OddDefinition, to_core
+from .model import OddDefinition, read_probe, to_core
 from .report import CoverageReport
 
 __all__ = ["OddDraws", "OddKnob", "OddSample", "OddSampler", "knobs_from_mapping"]
@@ -184,6 +184,27 @@ class OddDraws:
         self._drawn.setdefault(odd.structure_digest, []).extend(samples)
 
 
+def _coverage_core(coverage: Any) -> Any:
+    """The core's report: a :class:`CoverageReport`, or anything with ``entries``
+    that have a ``name``, ``buckets``, ``target``, ``amount(bucket)`` and
+    (optionally) ``cover_by``."""
+    if coverage is None:
+        return None
+    core = getattr(coverage, "_core", None)
+    if core is not None:
+        return core
+    return _core.coverage_from_entries([
+        (
+            e.name,
+            list(e.buckets),
+            float(e.target),
+            str(getattr(e, "cover_by", "hits")),
+            {b: float(e.amount(b)) for b in e.buckets},
+        )
+        for e in coverage.entries
+    ])
+
+
 class OddSampler:
     """Draws concrete cases inside an ODD.
 
@@ -231,20 +252,32 @@ class OddSampler:
                 chosen.append((attribute.name, knob._core()))
         self.odd = odd
         self.strategy = strategy
+        derived = list(getattr(odd, "_code_derived", ()))
+
+        def derive(values: dict[str, Any]) -> dict[str, Any]:
+            return {a.name: read_probe(a.probe.from_values, values) for a in derived}
+
         self._core = _core.Sampler(
             odd._core,
             chosen,
             seed=str(seed),
             strategy=strategy,
-            coverage=None if coverage is None else coverage._core,
+            coverage=_coverage_core(coverage),
             max_tries=max_tries,
             drawn=[s._core() for s in drawn],
+            derive=derive if derived else None,
         )
 
     @property
     def attributes(self) -> list[str]:
         """The attributes drawn, in the ODD's order."""
         return self._core.attributes
+
+    @property
+    def coverage_amounts(self) -> dict[tuple[str, str], float]:
+        """(attribute, bucket) -> how many times over it is covered, as read from
+        the coverage given (only what counts what the ODD counts)."""
+        return dict(self._core.coverage_amounts)
 
     @property
     def situation_holes(self) -> list[str]:

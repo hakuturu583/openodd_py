@@ -104,7 +104,7 @@ def test_merging_and_drawing_from_coverage(tmp_path: Path) -> None:
     report = load_and_merge([tmp_path])
     entry = report.entry("odd.rain")
     assert report.runs == 2 and entry.holes == ["heavy"] and entry.runs == {"none": 1, "light": 1}
-    assert report.odds["o"]["revisions"] == ["abc"]
+    assert report.odds["o"].revisions == ["abc"]
     assert "| odd.rain | tick | 67% | 2/3 | heavy |" in report.to_markdown()
     sampler = OddSampler(odd(), controls=CONTROLS, seed=4, strategy="coverage", coverage=report, backend=backend())
     assert all(c.buckets["rain"] == "heavy" for c in sampler.sample(3)[:1])

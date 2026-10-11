@@ -136,7 +136,15 @@ class OddAttribute:
         min_stay: Optional[float] = None,
     ) -> None:
         self.probe = probe
-        self._buckets = {"values": values, "buckets": buckets, "range": range, "every": every}
+        # A probe that knows the unit it reads in (a reader's) sets the
+        # attribute's: one given besides must be it.
+        probe_unit = getattr(probe, "unit", None)
+        if isinstance(probe_unit, str) and probe_unit:
+            if unit and _core.normalize_unit(unit) != _core.normalize_unit(probe_unit):
+                what = getattr(probe, "key", None)
+                reads = f"measure {what}" if what else "its probe"
+                raise ValueError(f"OddAttribute({name}): {reads} is in {probe_unit!r}, not {unit!r}")
+            unit = probe_unit
         core_values = None if values is None else [to_core(v) for v in values]
         self._core = _core.Attribute(
             name,
@@ -191,6 +199,20 @@ class OddAttribute:
         return self._core.unit
 
     @property
+    def derived(self) -> bool:
+        """Whether its value is worked out from other attributes': a categorical
+        OpenODD defines by expressions on them, or a probe built in code with a
+        ``from_values(values)`` (and the ``sources`` it reads)."""
+        return self.source[0] == "derived" or _code_derived(self.probe)
+
+    @property
+    def derived_from(self) -> list[str]:
+        """The attributes a derived attribute is worked out from."""
+        if _code_derived(self.probe):
+            return [getattr(s, "name", str(s)) for s in getattr(self.probe, "sources", ())]
+        return self._core.derived_from
+
+    @property
     def text(self) -> str:
         return self._core.text
 
@@ -236,6 +258,27 @@ class OddAttribute:
 
     def __repr__(self) -> str:
         return f"OddAttribute({self.name!r})"
+
+
+def _code_derived(probe: Any) -> bool:
+    return callable(getattr(probe, "from_values", None))
+
+
+class _DerivedProbe:
+    """A derived attribute's probe: its value worked out from the others'."""
+
+    def __init__(self, odd: "OddDefinition", name: str) -> None:
+        self._odd = odd
+        self.name = name
+
+    def from_values(self, values: Mapping[str, Any]) -> Any:
+        return self._odd.complete(values).get(self.name)
+
+    def __call__(self, context: Any) -> Any:
+        return self._odd.sample(context).get(self.name)
+
+    def __repr__(self) -> str:
+        return f"<derived probe of {self.name}>"
 
 
 def _never_called(context: Any) -> Any:
@@ -309,6 +352,10 @@ class OddModule:
     @property
     def active(self) -> bool:
         return self._core.active
+
+    @active.setter
+    def active(self, active: bool) -> None:
+        self._core.active = active
 
     @property
     def text(self) -> str:
@@ -404,8 +451,20 @@ class OddDefinition:
         return self
 
     def _setup(self) -> None:
-        self._plain = [a for a in self.attributes if self._kind(a) != "derived"]
+        for a in self.attributes:
+            if self._kind(a) == "derived":
+                a.probe = _DerivedProbe(self, a.name)
+                if a.item is not None:
+                    a.item.expression = a.probe
+        self._plain = [a for a in self.attributes if not a.derived]
         self._has_derived = len(self._plain) != len(self.attributes)
+        self._code_derived = [a for a in self.attributes if _code_derived(a.probe) and self._kind(a) != "derived"]
+        if self.modules and not self.roots and all(m.situation for m in self.modules):
+            logger.warning(
+                "ODD %s: every module is a situation, so nothing bounds the ODD; "
+                "refer to one from a bound, or name it in roots",
+                self.name,
+            )
 
     @staticmethod
     def _kind(attribute: OddAttribute) -> str:
@@ -481,12 +540,15 @@ class OddDefinition:
         """
         values = {a.name: read_probe(a.probe, context) for a in self._plain}
         if self._has_derived:
-            values = self._core.complete(_core_values(values))
+            values = self.complete(values)
         return values
 
     def complete(self, values: Mapping[str, Any]) -> dict[str, Any]:
         """*values* with every derived attribute worked out."""
-        return self._core.complete(_core_values(values))
+        out = self._core.complete(_core_values(values))
+        for a in self._code_derived:
+            out[a.name] = read_probe(a.probe.from_values, out)
+        return out
 
     # -- buckets inside and outside --------------------------------------------
 

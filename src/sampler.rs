@@ -174,8 +174,12 @@ struct Axis {
     labels: Vec<String>,
 }
 
+/// Works out attributes the core cannot (a Python probe's `from_values`):
+/// fills them into the values, leaving them open when it cannot tell.
+pub type Derive = std::sync::Arc<dyn Fn(&mut Values) + Send + Sync>;
+
 /// Draws concrete cases inside an ODD.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Sampler {
     odd: Odd,
     strategy: Strategy,
@@ -190,6 +194,17 @@ pub struct Sampler {
     planned: HashMap<(String, String), i64>,
     /// What went wrong but did not stop the batch (a situation given up on).
     pub warnings: Vec<String>,
+    /// Works out the attributes derived outside the core, if any.
+    pub derive: Option<Derive>,
+}
+
+impl std::fmt::Debug for Sampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sampler")
+            .field("odd", &self.odd.name)
+            .field("strategy", &self.strategy)
+            .finish()
+    }
 }
 
 fn rng_for(seed: &str) -> ChaCha8Rng {
@@ -309,6 +324,7 @@ impl Sampler {
             situation_holes: Vec::new(),
             planned: HashMap::new(),
             warnings: Vec::new(),
+            derive: None,
         };
         if strategy == Strategy::Coverage {
             sampler.read_coverage(coverage);
@@ -386,6 +402,15 @@ impl Sampler {
         self.axes.iter().map(|a| a.attribute.clone()).collect()
     }
 
+    /// How many times over each (attribute, bucket) is covered, as read from
+    /// the coverage given -- only entries that count what the ODD counts.
+    pub fn coverage_amounts(&self) -> Vec<((String, String), f64)> {
+        let mut out: Vec<((String, String), f64)> =
+            self.amount.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// The situations still uncovered, which the first cases are aimed at.
     pub fn situation_holes(&self) -> Vec<String> {
         self.situation_holes.clone()
@@ -430,6 +455,9 @@ impl Sampler {
 
     fn admits(&self, values: &mut Values, situation: Option<&str>, strict: bool) -> bool {
         self.odd.complete_open(values);
+        if let Some(derive) = &self.derive {
+            derive(values);
+        }
         let verdict = self.odd.evaluate(values);
         if !verdict.inside {
             return false;

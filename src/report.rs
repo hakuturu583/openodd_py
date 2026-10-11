@@ -614,6 +614,35 @@ fn odd_markdown(e: &OddExposure) -> Vec<String> {
             e.unmeasured.join(", ")
         ));
     }
+    for source in &e.sources {
+        let get = |k: &str| {
+            source
+                .get(k)
+                .and_then(Json::as_str)
+                .unwrap_or("None")
+                .to_string()
+        };
+        let commit = get("commit");
+        lines.push(format!(
+            "- Source: {} {} at {} ({})",
+            get("git"),
+            get("path"),
+            get("rev"),
+            &commit[..commit.len().min(12)]
+        ));
+    }
+    let mut commits: IndexMap<(String, String), std::collections::BTreeSet<String>> =
+        IndexMap::new();
+    for s in &e.sources {
+        let get = |k: &str| s.get(k).map(|v| v.to_string()).unwrap_or_default();
+        commits
+            .entry((get("git"), get("path")))
+            .or_default()
+            .insert(get("commit"));
+    }
+    if commits.values().any(|c| c.len() > 1) {
+        lines.push("- **Warning:** the runs read different commits of a source".into());
+    }
     for r in &e.revisions {
         lines.push(format!("- Revision: {r}"));
     }
@@ -879,6 +908,35 @@ mod tests {
         let r = merge_coverage(&[doc("none", true), other]).unwrap();
         let names: Vec<&str> = r.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["odd.rain", "odd.rain#2"]);
+    }
+
+    #[test]
+    fn markdown_names_the_sources_and_flags_different_commits() {
+        let odd = |commit: &str| {
+            json!({"name": "calm", "ticks": {"inside": 1}, "seconds": {"inside": 0.1},
+            "sources": [{"git": "u", "rev": "main", "commit": commit, "path": "odd.yml"}]})
+        };
+        let docs = |a: &str, b: &str| {
+            vec![
+                json!({"schema": COVERAGE_SCHEMA, "scenario": "s1", "items": [], "odd": odd(a)}),
+                json!({"schema": COVERAGE_SCHEMA, "scenario": "s2", "items": [], "odd": odd(b)}),
+            ]
+        };
+        let same = merge_coverage(&docs(&"a".repeat(40), &"a".repeat(40)))
+            .unwrap()
+            .to_markdown(20);
+        assert!(
+            same.contains("- Source: u odd.yml at main (aaaaaaaaaaaa)"),
+            "{same}"
+        );
+        assert!(!same.contains("different commits"));
+        let mixed = merge_coverage(&docs(&"a".repeat(40), &"b".repeat(40)))
+            .unwrap()
+            .to_markdown(20);
+        assert!(
+            mixed.contains("the runs read different commits of a source"),
+            "{mixed}"
+        );
     }
 
     #[test]
