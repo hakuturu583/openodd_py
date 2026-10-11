@@ -1,4 +1,4 @@
-# Cuts releases and publishes them to PyPI. The mechanism is simple_lanelet2's.
+# Cuts releases and publishes them (GitHub release, and PyPI once enabled). The mechanism is simple_lanelet2's.
 #
 # There are three ways in, and the first is the everyday one:
 #
@@ -14,10 +14,13 @@
 # tags` workflow on purpose: the auto-release tag is pushed with GITHUB_TOKEN, and a
 # token-pushed tag does not start new workflow runs.
 #
-# Authentication to PyPI is Trusted Publishing, so there is no API token in this
-# repository's secrets. Configure it once on PyPI: project openodd-py, owner
-# hakuturu583, repository openodd_py, workflow release.yml, environment pypi. Until
-# that exists the publish step fails and the wheels are still available as artifacts.
+# Every release's wheels and sdist are attached to its GitHub release, whose assets
+# page is a find-links index (`uv`/`pip --find-links
+# https://github.com/hakuturu583/openodd_py/releases/expanded_assets/<tag>`).
+#
+# Publishing to PyPI is off until it is set up: Trusted Publishing (no token is stored
+# here) for project openodd-py, owner hakuturu583, repository openodd_py, workflow
+# release.yml, environment pypi; then set the repository variable PUBLISH_PYPI to true.
 #
 # A version can never be replaced on PyPI, so the tests run again here rather than
 # trusting that CI was green on the same commit.
@@ -112,15 +115,6 @@ jobs:
           git tag -a "${{ steps.bump.outputs.tag }}" -m "Release ${{ steps.bump.outputs.tag }}"
           git push origin "HEAD:main"
           git push origin "${{ steps.bump.outputs.tag }}"
-
-      - name: GitHub release with generated notes
-        if: steps.pr.outputs.bump != 'none'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "${{ steps.bump.outputs.tag }}" \
-            --title "${{ steps.bump.outputs.tag }}" \
-            --generate-notes
 
   # One place to work out, for all three entry points, which commit to build and whether
   # it may be published. Runs even when `release` is skipped (tag push, dispatch).
@@ -256,10 +250,35 @@ jobs:
           name: sdist
           path: dist
 
+  # The GitHub release, created for an auto-cut and a hand-cut tag alike, once the
+  # wheels have passed -- so a release page never exists without its files.
+  github-release:
+    name: GitHub release with the wheels attached
+    needs: [resolve, wheels, sdist]
+    if: ${{ !cancelled() && needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.resolve.outputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.ref }}
+          files: dist/*
+          generate_release_notes: true
+
   publish:
     name: publish to PyPI
     needs: [resolve, wheels, sdist]
-    if: ${{ !cancelled() && needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.resolve.outputs.publish == 'true' }}
+    if: ${{ !cancelled() && needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.resolve.outputs.publish == 'true' && vars.PUBLISH_PYPI == 'true' }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
