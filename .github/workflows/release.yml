@@ -1,9 +1,14 @@
 name: Release
 
 # On a tag v*: build abi3 wheels (one per platform serves every Python 3.10+)
-# and the sdist, and publish them to PyPI with Trusted Publishing -- no token
-# is stored here. Configure it once on PyPI: project openodd-py, owner
-# hakuturu583, repository openodd_py, workflow release.yml, environment pypi.
+# and the sdist, and attach them to the tag's GitHub release, whose assets
+# page is a find-links index (`uv`/`pip --find-links
+# https://github.com/hakuturu583/openodd_py/releases/expanded_assets/<tag>`).
+#
+# Publishing to PyPI is off until it is set up: Trusted Publishing (no token
+# is stored here) for project openodd-py, owner hakuturu583, repository
+# openodd_py, workflow release.yml, environment pypi; then set the repository
+# variable PUBLISH_PYPI to true.
 
 on:
   push:
@@ -11,7 +16,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   wheels:
@@ -57,9 +62,23 @@ jobs:
           name: sdist
           path: dist
 
-  publish:
+  github-release:
     needs: [wheels, macos, sdist]
     if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  publish:
+    needs: [wheels, macos, sdist]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_PYPI == 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
