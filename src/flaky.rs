@@ -286,6 +286,53 @@ fn standard_normal(rng: &mut ChaCha8Rng) -> f64 {
 /// deviation of 4, where Φ is within 3e-5 of 0 or 1.
 const MAX_AMPLITUDE: f64 = 16.0;
 
+/// A log-normal prior on a length scale, in the normalized space, and the
+/// range it is kept in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LengthScalePrior {
+    pub categorical: bool,
+    /// The prior's median.
+    pub median: f64,
+    /// The standard deviation of the log length scale.
+    pub log_sd: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl LengthScalePrior {
+    /// A numeric parameter: a boundary that bends over about a third of its
+    /// range, give or take a factor of e; from 1% to 10 ranges.
+    pub const NUMERIC: LengthScalePrior = LengthScalePrior {
+        categorical: false,
+        median: 0.3,
+        log_sd: 1.0,
+        min: 0.01,
+        max: 10.0,
+    };
+    /// A categorical parameter: two categories (1 apart) correlated by
+    /// e^(-1/2) at the median. Kept below 4 (a correlation of 0.97 between
+    /// categories): the model may find a category nearly irrelevant, never
+    /// entirely, so runs in one category still say something of another
+    /// while each category's own boundary is learnt.
+    pub const CATEGORICAL: LengthScalePrior = LengthScalePrior {
+        categorical: true,
+        median: 1.0,
+        log_sd: 1.0,
+        min: 0.05,
+        max: 4.0,
+    };
+
+    fn clamp(&self, ls: f64) -> f64 {
+        ls.clamp(self.min, self.max)
+    }
+
+    /// The log density of the log length scale, up to a constant.
+    fn log_density(&self, ls: f64) -> f64 {
+        let z = (ls.ln() - self.median.ln()) / self.log_sd;
+        -0.5 * z * z
+    }
+}
+
 /// The squared-exponential kernel with a length scale per coordinate (ARD).
 fn kernel(a: &[f64], b: &[f64], ls: &[f64], ampl: f64) -> f64 {
     let d2: f64 = a
@@ -325,7 +372,19 @@ impl Classifier {
     /// The length scales start from friedrich's fit of an isotropic GP
     /// regression on the ±1 outcomes; then each parameter's length scale and
     /// the amplitude are refined in turn by the Laplace evidence.
-    pub fn fit(x: &[Vec<f64>], passed: &[bool], groups: &[usize]) -> Result<Self> {
+    ///
+    /// The refinement maximizes the evidence plus a log-normal prior on each
+    /// length scale ([`LengthScalePrior`]): with few runs the evidence alone
+    /// can call a parameter irrelevant (a length scale of 100) that only
+    /// matters near the boundary, where the runs are not yet; the prior keeps
+    /// it within reach of the data until enough runs say otherwise.
+    /// `categorical[p]` says whether parameter `p` is categorical.
+    pub fn fit(
+        x: &[Vec<f64>],
+        passed: &[bool],
+        groups: &[usize],
+        categorical: &[bool],
+    ) -> Result<Self> {
         if x.is_empty() || x.len() != passed.len() {
             return Err(Error::value("flaky: no observations to fit"));
         }
@@ -334,6 +393,21 @@ impl Classifier {
         }
         let y: Vec<f64> = passed.iter().map(|p| if *p { 1.0 } else { -1.0 }).collect();
         let params = groups.iter().max().map_or(0, |m| m + 1);
+        if categorical.len() != params {
+            return Err(Error::value("flaky: a kind for every parameter"));
+        }
+        let priors: Vec<LengthScalePrior> = categorical
+            .iter()
+            .map(|c| {
+                if *c {
+                    LengthScalePrior::CATEGORICAL
+                } else {
+                    LengthScalePrior::NUMERIC
+                }
+            })
+            .collect();
+        let log_prior =
+            |ls: &[f64]| -> f64 { ls.iter().zip(&priors).map(|(l, p)| p.log_density(*l)).sum() };
         let base = regression_length_scale(x, &y)
             .unwrap_or(0.3)
             .clamp(0.02, 3.0);
@@ -341,25 +415,39 @@ impl Classifier {
             let coordinates: Vec<f64> = groups.iter().map(|g| ls[*g]).collect();
             laplace(x, &y, ls.to_vec(), coordinates, ampl)
         };
-        let mut ls = vec![base; params];
+        // A numeric parameter starts from friedrich's length scale, a
+        // categorical one from its prior's median.
+        let mut ls: Vec<f64> = priors
+            .iter()
+            .map(|p| {
+                if p.categorical {
+                    p.median
+                } else {
+                    p.clamp(base)
+                }
+            })
+            .collect();
         let mut ampl = 4.0;
         let mut best = attempt(&ls, ampl)
             .or_else(|| {
-                ls = vec![0.3; params];
+                ls = priors.iter().map(|p| p.median).collect();
                 ampl = 1.0;
                 attempt(&ls, ampl)
             })
             .ok_or_else(|| Error::value("flaky: the classifier did not converge"))?;
+        let mut best_objective = best.log_evidence + log_prior(&ls);
         let passes = if x.len() <= 400 { 3 } else { 1 };
         for _ in 0..passes {
             let mut improved = false;
             for p in 0..params {
                 for factor in [0.25, 0.5, 2.0, 4.0, 16.0] {
                     let mut candidate = ls.clone();
-                    candidate[p] = (ls[p] * factor).clamp(0.01, 100.0);
+                    candidate[p] = priors[p].clamp(ls[p] * factor);
                     if let Some(c) = attempt(&candidate, ampl) {
-                        if c.log_evidence > best.log_evidence + 1e-9 {
+                        let objective = c.log_evidence + log_prior(&candidate);
+                        if objective > best_objective + 1e-9 {
                             best = c;
+                            best_objective = objective;
                             ls = candidate;
                             improved = true;
                         }
@@ -372,8 +460,10 @@ impl Classifier {
                 // would pull every prediction there back to a coin toss.
                 let candidate = (ampl * factor).clamp(0.25, MAX_AMPLITUDE);
                 if let Some(c) = attempt(&ls, candidate) {
-                    if c.log_evidence > best.log_evidence + 1e-9 {
+                    let objective = c.log_evidence + log_prior(&ls);
+                    if objective > best_objective + 1e-9 {
                         best = c;
+                        best_objective = objective;
                         ampl = candidate;
                         improved = true;
                     }
@@ -681,7 +771,18 @@ impl FlakinessModel {
     pub fn classifier(&mut self) -> Result<&Classifier> {
         if self.classifier.is_none() {
             let groups = self.space.groups();
-            self.classifier = Some(Classifier::fit(&self.x, &self.passed, &groups)?);
+            let categorical: Vec<bool> = self
+                .space
+                .dims()
+                .iter()
+                .map(|d| matches!(d, Dim::Categorical { .. }))
+                .collect();
+            self.classifier = Some(Classifier::fit(
+                &self.x,
+                &self.passed,
+                &groups,
+                &categorical,
+            )?);
         }
         Ok(self.classifier.as_ref().expect("fitted above"))
     }
@@ -1250,6 +1351,18 @@ mod tests {
             .unwrap()
             .robustness_radius;
         assert_eq!(r, Some(std::f64::consts::SQRT_2));
+    }
+
+    #[test]
+    fn a_category_is_never_called_entirely_irrelevant() {
+        // Rain changes nothing here, yet its length scale stays within the
+        // prior's range: runs in one category still inform another.
+        let mut m = model();
+        let c = m.classifier().unwrap();
+        assert!(c.length_scales[1] <= LengthScalePrior::CATEGORICAL.max);
+        assert!(c.length_scales[0] <= LengthScalePrior::NUMERIC.max);
+        let prior = LengthScalePrior::CATEGORICAL;
+        assert!(prior.log_density(prior.median) > prior.log_density(prior.max));
     }
 
     #[test]

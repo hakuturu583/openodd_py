@@ -63,8 +63,21 @@ relevance determination). A parameter the outcome does not depend on ends up wit
 length scale, so runs that differ only in it inform each other. The length scales start
 from the one fitted by a GP regression on the ±1 outcomes, using the
 [`friedrich`](https://crates.io/crates/friedrich) crate (marginal likelihood, gradient
-descent). Each parameter's length scale, and the amplitude, are then refined in turn by
-the Laplace approximation's evidence. The amplitude is capped at 16 (a latent standard
+descent). A categorical parameter starts from its prior's median instead. Each
+parameter's length scale, and the amplitude, are then refined in turn by the Laplace
+approximation's evidence plus a log-normal prior on each length scale (a MAP estimate):
+
+| Parameter | Prior median | log-sd | Range |
+|---|---|---|---|
+| numeric | 0.3 (about a third of its range) | 1 | 0.01 – 10 |
+| categorical | 1 (two categories correlated by e^-1/2) | 1 | 0.05 – 4 |
+
+The prior matters with few runs. The evidence alone can call a parameter irrelevant (a
+length scale of 100) when it only matters near the boundary, where the runs are not yet:
+in a closed-loop check on a cut-in ODD (160 runs), it did so for the rain, whose friction
+and noise move the boundary. A categorical length scale is kept below 4 (a correlation
+of 0.97 between categories), so the model may find a category nearly irrelevant, never
+entirely. The amplitude is capped at 16 (a latent standard
 deviation of 4): on separable outcomes the evidence keeps rising with the amplitude, and
 a huge prior variance would pull every prediction far from the runs back to a coin toss.
 `FlakinessModel.kernel()` shows what was fitted.
