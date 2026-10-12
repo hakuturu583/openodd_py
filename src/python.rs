@@ -1589,7 +1589,7 @@ impl Sampler {
     #[getter]
     fn space(&self) -> ParamSpace {
         ParamSpace {
-            inner: self.inner.space(),
+            inner: crate::flaky::ParamSpace::of(&self.inner),
         }
     }
     /// *count* cases, `explore_fraction` of them the most unstable of `pool`
