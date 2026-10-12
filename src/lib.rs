@@ -12,6 +12,7 @@
 
 pub mod cells;
 pub mod error;
+pub mod flaky;
 pub mod items;
 pub mod loader;
 pub mod model;

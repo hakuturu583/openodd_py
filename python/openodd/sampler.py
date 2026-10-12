@@ -146,6 +146,9 @@ class OddSample:
         buckets: Attribute name -> the bucket label drawn for it.
         values: Attribute name -> the value drawn, in the attribute's terms.
         situation: The situation the case was aimed at, if any.
+        flaky: Its flakiness, when :class:`~.flaky.FlakySearch` chose it for
+            that (:class:`~.flaky.FlakyMetrics`); ``None`` for a case the
+            sampler's own policy drew.
     """
 
     index: int
@@ -153,10 +156,13 @@ class OddSample:
     buckets: dict[str, str]
     values: dict[str, Any]
     situation: Optional[str] = None
+    flaky: Optional[Any] = None
 
     @classmethod
-    def _from_core(cls, core: Any) -> "OddSample":
-        return cls(core.index, list(core.overrides), dict(core.buckets), dict(core.values), core.situation)
+    def _from_core(cls, core: Any, flaky: Optional[Any] = None) -> "OddSample":
+        return cls(
+            core.index, list(core.overrides), dict(core.buckets), dict(core.values), core.situation, flaky
+        )
 
     def _core(self) -> Any:
         return _core.Sample(

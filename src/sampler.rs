@@ -33,6 +33,7 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
+use crate::flaky::{Dim, ParamSpace};
 use crate::items::CoverItem;
 use crate::model::{Odd, Values};
 use crate::report::CoverageReport;
@@ -409,6 +410,53 @@ impl Sampler {
             self.amount.iter().map(|(k, v)| (k.clone(), *v)).collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+
+    /// The space the drawn attributes span, normalized (see [`ParamSpace`]): a
+    /// numeric attribute over what its knob can bring about in its drawable
+    /// buckets, a categorical one over its drawable buckets.
+    pub fn space(&self) -> ParamSpace {
+        let dims = self
+            .axes
+            .iter()
+            .map(|axis| {
+                if !axis.item.numeric() {
+                    return Dim::Categorical {
+                        name: axis.attribute.clone(),
+                        labels: axis.labels.clone(),
+                    };
+                }
+                let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+                for label in &axis.labels {
+                    let span = match axis.knob.values.get(label) {
+                        Some(KnobValue::Range(l, h)) => Some((*l, *h)),
+                        Some(KnobValue::Value(v)) => v.as_float().map(|x| (x, x)),
+                        None => interval(&axis.item, &axis.knob, label).map(|(l, h, _)| (l, h)),
+                    };
+                    if let Some((l, h)) = span {
+                        low = low.min(l);
+                        high = high.max(h);
+                    }
+                }
+                Dim::Numeric {
+                    name: axis.attribute.clone(),
+                    low,
+                    high,
+                }
+            })
+            .collect();
+        ParamSpace::new(dims)
+    }
+
+    /// Count *sample*, drawn elsewhere from this ODD, as planned: the coverage
+    /// strategy then draws its buckets as if this sampler had drawn it.
+    pub fn plan(&mut self, sample: &Sample) {
+        for (name, label) in &sample.buckets {
+            *self
+                .planned
+                .entry((name.clone(), label.clone()))
+                .or_default() += 1;
+        }
     }
 
     /// The situations still uncovered, which the first cases are aimed at.

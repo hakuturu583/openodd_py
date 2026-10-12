@@ -18,6 +18,11 @@
   taxonomy.
 - **Sample** the next runs from the ODD (`OddSampler`), aimed at what coverage
   left uncovered.
+- **Find flaky cases**: `FlakySearch` learns where runs pass and fail (Gaussian-process
+  classification in the Rust core) and draws part of each batch where a small change
+  flips the outcome, keeping the sampler's own policy for the rest. Each case gets
+  `flip_probability`, `instability_confidence` and `robustness_radius`
+  ([docs/flaky.md](docs/flaky.md)).
 
 What measures the attributes -- a simulator, a recorded log -- is the application's
 *backend*: a subclass of `openodd.Backend` naming its probes, how a run sets an

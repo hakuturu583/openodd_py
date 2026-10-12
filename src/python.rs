@@ -1580,6 +1580,183 @@ impl Sampler {
             .map(|inner| Sample { inner })
             .collect())
     }
+    /// The normalized space of the drawn attributes.
+    #[getter]
+    fn space(&self) -> ParamSpace {
+        ParamSpace {
+            inner: self.inner.space(),
+        }
+    }
+    /// *count* cases, `explore_fraction` of them the most unstable of `pool`
+    /// candidates each (see `crate::flaky::search`).
+    #[pyo3(signature = (model, count, *, explore_fraction=0.5, pool=16))]
+    fn search(
+        &mut self,
+        mut model: PyRefMut<'_, FlakinessModel>,
+        count: usize,
+        explore_fraction: f64,
+        pool: usize,
+    ) -> PyResult<Vec<(Sample, Option<MetricsTuple>)>> {
+        Ok(crate::flaky::search(
+            &mut self.inner,
+            &mut model.inner,
+            count,
+            explore_fraction,
+            pool,
+        )
+        .map_err(err)?
+        .into_iter()
+        .map(|(inner, m)| (Sample { inner }, m.map(metrics_tuple)))
+        .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flaky cases
+// ---------------------------------------------------------------------------
+
+fn ordered_values(values: &Bound<'_, PyDict>) -> PyResult<indexmap::IndexMap<String, Value>> {
+    let mut out = indexmap::IndexMap::with_capacity(values.len());
+    for (k, v) in values.iter() {
+        out.insert(k.str()?.to_string(), to_value(&v)?);
+    }
+    Ok(out)
+}
+
+type MetricsTuple = (f64, f64, f64, Option<f64>);
+
+fn metrics_tuple(m: crate::flaky::Metrics) -> MetricsTuple {
+    (
+        m.pass_probability,
+        m.flip_probability,
+        m.instability_confidence,
+        m.robustness_radius,
+    )
+}
+
+/// One parameter: `("numeric", name, (low, high), None)` or
+/// `("categorical", name, None, labels)`.
+type DimTuple = (String, String, Option<(f64, f64)>, Option<Vec<String>>);
+
+/// The normalized space of a case's parameters.
+#[pyclass(frozen, module = "openodd._core")]
+#[derive(Clone)]
+struct ParamSpace {
+    inner: crate::flaky::ParamSpace,
+}
+
+#[pymethods]
+impl ParamSpace {
+    #[new]
+    fn new(dims: Vec<DimTuple>) -> PyResult<Self> {
+        let mut out = Vec::with_capacity(dims.len());
+        for (kind, name, range, labels) in dims {
+            out.push(match (kind.as_str(), range, labels) {
+                ("numeric", Some((low, high)), None) => {
+                    crate::flaky::Dim::Numeric { name, low, high }
+                }
+                ("categorical", None, Some(labels)) => {
+                    crate::flaky::Dim::Categorical { name, labels }
+                }
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "ParamSpace: {name} is numeric with a range or categorical with labels"
+                    )))
+                }
+            });
+        }
+        let inner = crate::flaky::ParamSpace::new(out);
+        inner.check().map_err(err)?;
+        Ok(ParamSpace { inner })
+    }
+    #[getter]
+    fn dims(&self) -> Vec<DimTuple> {
+        self.inner
+            .dims()
+            .iter()
+            .map(|d| match d {
+                crate::flaky::Dim::Numeric { name, low, high } => {
+                    ("numeric".into(), name.clone(), Some((*low, *high)), None)
+                }
+                crate::flaky::Dim::Categorical { name, labels } => (
+                    "categorical".into(),
+                    name.clone(),
+                    None,
+                    Some(labels.clone()),
+                ),
+            })
+            .collect()
+    }
+    fn encode(&self, values: &Bound<'_, PyDict>) -> PyResult<Vec<f64>> {
+        self.inner.encode(&ordered_values(values)?).map_err(err)
+    }
+}
+
+/// A GP classifier of pass/fail, and the flakiness metrics it gives.
+#[pyclass(module = "openodd._core")]
+struct FlakinessModel {
+    inner: crate::flaky::FlakinessModel,
+}
+
+#[pymethods]
+impl FlakinessModel {
+    #[new]
+    #[pyo3(signature = (space, *, seed="0", threshold=0.1, epsilon=0.05, perturbations=32, draws=256, directions=16))]
+    fn new(
+        space: &ParamSpace,
+        seed: &str,
+        threshold: f64,
+        epsilon: f64,
+        perturbations: usize,
+        draws: usize,
+        directions: usize,
+    ) -> PyResult<Self> {
+        let config = crate::flaky::Config {
+            threshold,
+            epsilon,
+            perturbations,
+            draws,
+            directions,
+        };
+        Ok(FlakinessModel {
+            inner: crate::flaky::FlakinessModel::new(space.inner.clone(), config, seed)
+                .map_err(err)?,
+        })
+    }
+    #[getter]
+    fn space(&self) -> ParamSpace {
+        ParamSpace {
+            inner: self.inner.space().clone(),
+        }
+    }
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+    fn observe(&mut self, values: &Bound<'_, PyDict>, passed: bool) -> PyResult<()> {
+        self.inner
+            .observe(&ordered_values(values)?, passed)
+            .map_err(err)
+    }
+    fn metrics(&mut self, values: &Bound<'_, PyDict>) -> PyResult<MetricsTuple> {
+        self.inner
+            .metrics(&ordered_values(values)?)
+            .map(metrics_tuple)
+            .map_err(err)
+    }
+    /// `(length scale per parameter, amplitude, log_evidence)` of the fitted classifier.
+    fn kernel(&mut self) -> PyResult<(Vec<f64>, f64, f64)> {
+        let c = self.inner.classifier().map_err(err)?;
+        Ok((c.length_scales.clone(), c.amplitude, c.log_evidence))
+    }
+    fn ranking(&mut self) -> PyResult<Vec<(usize, MetricsTuple)>> {
+        Ok(self
+            .inner
+            .ranking()
+            .map_err(err)?
+            .into_iter()
+            .map(|(i, m)| (i, metrics_tuple(m)))
+            .collect())
+    }
 }
 
 #[pymodule]
@@ -1604,6 +1781,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Knob>()?;
     m.add_class::<Sample>()?;
     m.add_class::<Sampler>()?;
+    m.add_class::<ParamSpace>()?;
+    m.add_class::<FlakinessModel>()?;
     for f in [
         wrap_pyfunction!(is_in, m)?,
         wrap_pyfunction!(equals, m)?,
