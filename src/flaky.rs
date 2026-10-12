@@ -887,6 +887,71 @@ fn unstable_first(a: &Metrics, b: &Metrics) -> std::cmp::Ordering {
         .then(b.flip_probability.total_cmp(&a.flip_probability))
 }
 
+/// What an explored case counts for when the batch already has `n` cases with
+/// its categories: `SAME_CATEGORIES_DECAY^n` times its instability. Without
+/// it, a batch piles into the conditions whose flaky band is widest.
+const SAME_CATEGORIES_DECAY: f64 = 0.7;
+
+/// The numeric parameters that can change: (coordinate, name, low, high).
+fn numeric_dims(space: &ParamSpace) -> Vec<(usize, String, f64, f64)> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for dim in space.dims() {
+        if let Dim::Numeric { name, low, high } = dim {
+            if high > low {
+                out.push((offset, name.clone(), *low, *high));
+            }
+        }
+        offset += dim.width();
+    }
+    out
+}
+
+/// *x* moved along the numeric parameters onto the predicted boundary (a
+/// latent mean of 0) by a few Newton steps, or `None` when that does not
+/// bring it closer.
+fn to_boundary(
+    classifier: &Classifier,
+    x: &[f64],
+    numeric: &[(usize, String, f64, f64)],
+) -> Option<Vec<f64>> {
+    const H: f64 = 1e-3;
+    const MAX_STEP: f64 = 0.25;
+    if numeric.is_empty() {
+        return None;
+    }
+    let mut y = x.to_vec();
+    let start = classifier.latent_mean(&[y.clone()])[0].abs();
+    for _ in 0..4 {
+        let mut points = vec![y.clone()];
+        for (coord, ..) in numeric {
+            for d in [H, -H] {
+                let mut p = y.clone();
+                p[*coord] += d;
+                points.push(p);
+            }
+        }
+        let m = classifier.latent_mean(&points);
+        let grad: Vec<f64> = (0..numeric.len())
+            .map(|i| (m[1 + 2 * i] - m[2 + 2 * i]) / (2.0 * H))
+            .collect();
+        let norm2: f64 = grad.iter().map(|g| g * g).sum();
+        if norm2 < 1e-12 || m[0].abs() < 1e-3 {
+            break;
+        }
+        let mut step: Vec<f64> = grad.iter().map(|g| -m[0] * g / norm2).collect();
+        let len = step.iter().map(|s| s * s).sum::<f64>().sqrt();
+        if len > MAX_STEP {
+            step.iter_mut().for_each(|s| *s *= MAX_STEP / len);
+        }
+        for ((coord, ..), s) in numeric.iter().zip(&step) {
+            y[*coord] = (y[*coord] + s).clamp(0.0, 1.0);
+        }
+    }
+    let end = classifier.latent_mean(&[y.clone()])[0].abs();
+    (end < start).then_some(y)
+}
+
 /// A point uniform in the ball of radius *epsilon* about *x*, in the numeric
 /// coordinates, kept in `[0, 1]`.
 fn perturb(x: &[f64], numeric: &[usize], epsilon: f64, rng: &mut ChaCha8Rng) -> Vec<f64> {
@@ -1112,6 +1177,33 @@ pub fn search(
             Err(_) => failures += 1,
         }
     }
+    {
+        // Each candidate also moved onto the predicted boundary, where the
+        // flaky band is: drawn candidates seldom land in a narrow one.
+        let numeric = numeric_dims(model.space());
+        let moved: Vec<(Sample, Vec<f64>)> = {
+            let classifier = model.classifier()?;
+            candidates
+                .iter()
+                .filter_map(|(sample, x, _)| {
+                    let y = to_boundary(classifier, x, &numeric)?;
+                    let changes: Vec<(String, f64)> = numeric
+                        .iter()
+                        .map(|(coord, name, low, high)| {
+                            (name.clone(), low + y[*coord] * (high - low))
+                        })
+                        .collect();
+                    let sample = sampler.moved(sample, &changes)?;
+                    Some((sample, y))
+                })
+                .collect()
+        };
+        for (sample, _) in moved {
+            let x = model.space().encode(&sample.values)?;
+            let metrics = model.measure(&x, cheap_perturbations, cheap_draws, false)?;
+            candidates.push((sample, x, metrics));
+        }
+    }
     candidates.sort_by(|a, b| unstable_first(&a.2, &b.2));
     let mut taken: Vec<Vec<f64>> = out
         .iter()
@@ -1128,15 +1220,41 @@ pub fn search(
                 >= epsilon
         })
     };
+    let decay = SAME_CATEGORIES_DECAY;
+    let numeric_coords = model.space().numeric_coords();
+    let cell = |x: &[f64]| -> Vec<u64> {
+        x.iter()
+            .enumerate()
+            .filter(|(i, _)| !numeric_coords.contains(i))
+            .map(|(_, v)| v.to_bits())
+            .collect()
+    };
+    let mut per_cell: std::collections::HashMap<Vec<u64>, i32> = std::collections::HashMap::new();
     let mut chosen: Vec<usize> = Vec::new();
-    for (i, (_, x, _)) in candidates.iter().enumerate() {
-        if chosen.len() == explore {
-            break;
-        }
-        if far(x, &taken) {
-            chosen.push(i);
-            taken.push(x.clone());
-        }
+    while chosen.len() < explore {
+        // The most unstable apart from those taken, a category combination
+        // already in the batch counting for less each time.
+        let best = candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, (_, x, _))| !chosen.contains(i) && far(x, &taken))
+            .map(|(i, (_, x, m))| {
+                let n = *per_cell.get(&cell(x)).unwrap_or(&0);
+                (
+                    i,
+                    m.instability_confidence * decay.powi(n),
+                    m.flip_probability * decay.powi(n),
+                )
+            })
+            .max_by(|a, b| {
+                a.1.total_cmp(&b.1)
+                    .then(a.2.total_cmp(&b.2))
+                    .then(b.0.cmp(&a.0))
+            });
+        let Some((i, ..)) = best else { break };
+        chosen.push(i);
+        taken.push(candidates[i].1.clone());
+        *per_cell.entry(cell(&candidates[i].1)).or_default() += 1;
     }
     // Not enough apart: the next most unstable, close or not.
     for i in 0..candidates.len() {

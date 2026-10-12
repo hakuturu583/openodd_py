@@ -11,12 +11,12 @@ the rest.
 import openodd
 
 sampler = openodd.OddSampler(odd, controls=controls, strategy="coverage", seed=0)
-search = openodd.FlakySearch(sampler, explore_fraction=0.5)
+search = openodd.FlakySearch(sampler)      # 80% of each batch explored once covered
 
 for case, passed in earlier_runs:          # an OddSample (or its values) and the outcome
     search.observe(case, passed)
 
-for case in search.sample(20):             # the first 10 the sampler's, the rest flaky
+for case in search.sample(20):             # the first 4 the sampler's, the rest flaky
     run(case.overrides)
     if case.flaky is not None:             # chosen for its instability
         print(case.flaky.flip_probability, case.flaky.robustness_radius)
@@ -127,8 +127,8 @@ instability and the rest with the sampler's own policy, the holes first:
    them. While the coverage strategy has buckets covered fewer than `coverage_depth`
    times (1), the cases it needs to cover them are its own whatever `explore_fraction`
    says: a case covers one bucket of each attribute, so it needs as many as the
-   attribute lacking most lacks. Once the buckets are covered, `explore_fraction` of
-   each batch is explored. `coverage_depth=0` explores from the first observed run; the
+   attribute lacking most lacks. Once the buckets are covered, `explore_fraction` (0.8)
+   of each batch is explored; the rest keeps sweeping the ODD. `coverage_depth=0` explores from the first observed run; the
    uniform strategy has no holes to fill.
 
    A bucket the knobs can set may still be in no case the ODD admits: heavy rain
@@ -140,10 +140,18 @@ instability and the rest with the sampler's own policy, the holes first:
 2. **Candidates**: `pool` candidates per explored case (16) are drawn from the ODD by a
    copy of the sampler. They are combinations the ODD admits, set by the same knobs, and
    drawing them plans nothing in the sampler itself.
-3. **Ranking**: each candidate is scored with fewer perturbations and draws, then ranked
-   by `instability_confidence`, then `flip_probability`.
-4. **Spacing**: the most unstable candidates are kept, each at least `epsilon` from the
-   others and from the sampler's cases (closer ones only when too few are apart). Their
+3. **Onto the boundary**: each candidate is also moved, along its numeric parameters
+   only, onto the predicted boundary (a latent mean of 0) by a few Newton steps. Where
+   the outcome barely depends on chance, the flaky band is narrow and drawn candidates
+   seldom land in it. A moved case is kept as a candidate when the knobs can set its
+   values and the ODD admits it.
+4. **Ranking**: each candidate is scored with fewer perturbations and draws, by
+   `instability_confidence`, then `flip_probability`.
+5. **Picking**: the most unstable candidates are taken one at a time, each at least
+   `epsilon` from the others and from the sampler's cases (closer ones only when too
+   few are apart). A candidate whose categories are already in the batch `n` times
+   counts for `0.7ⁿ` of its instability, so the batch is not piled into the
+   conditions where the band is widest. Their
    full metrics are in `OddSample.flaky`, and the sampler counts them as planned, so its
    coverage strategy goes on from them.
 

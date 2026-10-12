@@ -80,8 +80,12 @@ def test_the_holes_come_before_the_flaky_cases() -> None:
     assert [c.flaky is None for c in cases] == [True, True, False, False]
     own = [first, *cases[:2]]
     assert len({c.buckets["gap"] for c in own}) == 3
-    # Covered: the whole batch is explored.
-    assert all(c.flaky is not None for c in s.sample(4))
+    # Covered (40 cases drawn by the sampler): the whole batch is explored.
+    covered = FlakySearch(
+        OddSampler(odd(), controls=CONTROLS, seed=3, strategy="coverage", backend=backend()),
+        explore_fraction=1.0,
+    )
+    assert all(c.flaky is not None for c in observed(covered).sample(4))
     # Not waiting for the holes: explored from the first run on.
     eager = FlakySearch(OddSampler(odd(), controls=CONTROLS, seed=3, strategy="coverage", backend=backend()),
                         [(first, passes(first))], explore_fraction=1.0, coverage_depth=0)

@@ -1593,7 +1593,7 @@ impl Sampler {
     }
     /// *count* cases, `explore_fraction` of them the most unstable of `pool`
     /// candidates each (see `crate::flaky::search`).
-    #[pyo3(signature = (model, count, *, explore_fraction=0.5, pool=16, coverage_depth=1))]
+    #[pyo3(signature = (model, count, *, explore_fraction=0.8, pool=16, coverage_depth=1))]
     fn search(
         &mut self,
         mut model: PyRefMut<'_, FlakinessModel>,

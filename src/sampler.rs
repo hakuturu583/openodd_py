@@ -672,6 +672,66 @@ impl Sampler {
         Some((Value::Float(value), written))
     }
 
+    /// *sample* with numeric attributes moved to new values, if the knobs can
+    /// set them and the ODD admits the result: what a run of it would set and
+    /// read back, its buckets updated. Nothing is planned.
+    pub fn moved(&self, sample: &Sample, changes: &[(String, f64)]) -> Option<Sample> {
+        let mut out = sample.clone();
+        for (attribute, target) in changes {
+            let axis = self.axes.iter().position(|a| &a.attribute == attribute)?;
+            let Axis {
+                item, knob, labels, ..
+            } = &self.axes[axis];
+            let label = item.bucket_of(&Value::Float(*target)).ok()?;
+            if !item.numeric() || !labels.contains(&label) {
+                return None;
+            }
+            match knob.values.get(&label) {
+                Some(KnobValue::Range(l, h)) if !(*l <= *target && *target <= *h) => return None,
+                Some(KnobValue::Value(_)) => return None,
+                None => {
+                    let (l, h, _) = interval(item, knob, &label)?;
+                    if !(l <= *target && *target <= h) {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+            let mut written = Value::Float(target * knob.scale + knob.offset);
+            if knob.integer {
+                written = Value::Int(written.as_float()?.round_ties_even() as i64);
+            }
+            if let Some((l0, l1)) = knob.limits {
+                let w = written.as_float()?;
+                if !(l0 <= w && w <= l1) {
+                    return None;
+                }
+            }
+            let back = crate::value::parse_float(&render(&written))?;
+            let value = (back - knob.offset) / knob.scale;
+            if !value.is_finite() || item.bucket_of(&Value::Float(value)).ok()? != label {
+                return None;
+            }
+            out.values.insert(attribute.clone(), Value::Float(value));
+            out.buckets.insert(attribute.clone(), label);
+            let prefix = format!("{}=", knob.key);
+            let entry = out.overrides.iter_mut().find(|o| o.starts_with(&prefix))?;
+            *entry = format!("{prefix}{}", render(&written));
+        }
+        let mut as_values: Values = self
+            .odd
+            .attributes
+            .iter()
+            .map(|a| (a.name.clone(), Value::Open))
+            .collect();
+        as_values.extend(out.values.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let situation = out.situation.clone();
+        if !self.admits(&mut as_values, situation.as_deref(), true) {
+            return None;
+        }
+        Some(out)
+    }
+
     /// Draw one case; `situation`, if given, is a module the case aims at.
     pub fn draw(&mut self, index: usize, situation: Option<&str>) -> Result<Sample> {
         self.draw_with(index, situation, None)

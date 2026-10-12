@@ -22,7 +22,7 @@ measured together.
 batch is drawn by the sampler's own policy (uniform, or the least covered
 first), the rest are the most unstable of the candidates the ODD admits::
 
-    search = FlakySearch(sampler, explore_fraction=0.5)
+    search = FlakySearch(sampler)
     for case, passed in earlier_runs:
         search.observe(case, passed)
     for case in search.sample(20):
@@ -236,7 +236,7 @@ class FlakySearch:
         sampler: OddSampler,
         observations: Iterable[Observation] = (),
         *,
-        explore_fraction: float = 0.5,
+        explore_fraction: float = 0.8,
         pool: int = 16,
         coverage_depth: int = 1,
         **model: Any,
