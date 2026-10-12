@@ -1560,6 +1560,10 @@ impl Sampler {
     fn situation_holes(&self) -> Vec<String> {
         self.inner.situation_holes()
     }
+    #[getter]
+    fn unreachable(&self) -> Vec<(String, String)> {
+        self.inner.unreachable()
+    }
     /// Warnings since the last call (situations given up on).
     fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.inner.warnings)

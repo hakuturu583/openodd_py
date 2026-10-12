@@ -39,6 +39,7 @@ refined, with the amplitude, by the Laplace evidence.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Optional, Union
@@ -46,6 +47,8 @@ from typing import Any, Optional, Union
 from . import _core
 from .model import to_core
 from .sampler import OddSample, OddSampler
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["FlakinessModel", "FlakyMetrics", "FlakySearch", "ParameterSpace"]
 
@@ -279,6 +282,8 @@ class FlakySearch:
             pool=self.pool,
             coverage_depth=self.coverage_depth,
         )
+        for warning in self.sampler._core.take_warnings():
+            logger.warning(warning)
         return [
             OddSample._from_core(core, None if m is None else FlakyMetrics._from_core(m))
             for core, m in drawn

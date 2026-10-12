@@ -290,6 +290,12 @@ class OddSampler:
         """The situations still uncovered, which the first cases are aimed at."""
         return self._core.situation_holes
 
+    @property
+    def unreachable(self) -> list[tuple[str, str]]:
+        """``(attribute, bucket)`` pairs the knobs can set but no case inside
+        the ODD has, given up on as holes (see :class:`~.flaky.FlakySearch`)."""
+        return self._core.unreachable
+
     def draw(self, index: int = 0, situation: Optional[str] = None) -> OddSample:
         """Draw one case; *situation*, if given, is a module the case aims at."""
         return OddSample._from_core(self._core.draw(index, situation))

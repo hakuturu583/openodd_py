@@ -90,6 +90,52 @@ def test_the_holes_come_before_the_flaky_cases() -> None:
         search(coverage_depth=-1)
 
 
+def test_a_bucket_no_case_can_have_is_no_hole(caplog: pytest.LogCaptureFixture) -> None:
+    # Heavy rain is ruled out by day, and the simulator cannot make the night:
+    # no case has heavy rain, though the rain knob can set it.
+    ruled_out = """
+TAXONOMY:
+  environment:
+    rain: [none, heavy]
+    illumination: [day, night]
+MODULES:
+  bound:
+    EXCLUDE_AND:
+      rain: heavy
+      illumination: day
+"""
+
+    def rain(c):
+        return c.get("rain")
+
+    def light(c):
+        return c.get("illumination")
+
+    be = openodd.Backend(
+        probes={"rain": (rain, ""), "illumination": (light, "")},
+        knobs={
+            rain: OddKnob("env.rain", values={"none": 0, "heavy": 90}),
+            light: OddKnob("env.sun", values={"day": 60}),
+        },
+    )
+    o = openodd.load_openodd(
+        ruled_out,
+        bindings={"rain": {"probe": "rain"}, "illumination": {"probe": "illumination"}},
+        name="o",
+        backend=be,
+    )
+    sampler = OddSampler(o, seed=0, strategy="coverage", backend=be)
+    s = FlakySearch(sampler, explore_fraction=1.0)
+    first = sampler.sample(1)[0]
+    s.observe(first, True)
+    with caplog.at_level("WARNING"):
+        cases = s.sample(4)
+    # Given up on at once, with a warning: the whole batch is explored.
+    assert sampler.unreachable == [("environment.rain", "heavy")]
+    assert "bucket heavy" in caplog.text
+    assert all(c.flaky is not None for c in cases)
+
+
 def test_the_metrics_tell_the_boundary_from_the_far_side() -> None:
     s = observed(search())
     near = s.metrics({"gap": 20.5, "rain": "none"})

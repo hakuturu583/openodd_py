@@ -193,6 +193,8 @@ pub struct Sampler {
     amount: HashMap<(String, String), f64>,
     situation_holes: Vec<String>,
     planned: HashMap<(String, String), i64>,
+    /// Buckets the knobs can set but no admitted case has: not holes to fill.
+    unreachable: HashSet<(String, String)>,
     /// What went wrong but did not stop the batch (a situation given up on).
     pub warnings: Vec<String>,
     /// Works out the attributes derived outside the core, if any.
@@ -324,6 +326,7 @@ impl Sampler {
             amount: HashMap::new(),
             situation_holes: Vec::new(),
             planned: HashMap::new(),
+            unreachable: HashSet::new(),
             warnings: Vec::new(),
             derive: None,
         };
@@ -464,24 +467,57 @@ impl Sampler {
     /// cases planned. A case covers one bucket of each attribute, so this is
     /// what the attribute lacking most lacks. Always 0 with the uniform
     /// strategy, which does not aim at the holes.
-    pub fn coverage_deficit(&self, depth: usize) -> usize {
+    ///
+    /// A bucket the knobs can set but no admitted case has (the ODD rules out
+    /// every combination of it with what the other knobs can set) is not a
+    /// hole: it is tried once, given up on with a warning, and left out from
+    /// then on (see [`Sampler::unreachable`]).
+    pub fn coverage_deficit(&mut self, depth: usize) -> usize {
         if self.strategy == Strategy::Uniform {
             return 0;
         }
-        self.axes
-            .iter()
-            .map(|axis| {
-                axis.labels
-                    .iter()
-                    .map(|l| {
-                        (depth as f64 - self.load(&axis.attribute, l))
-                            .max(0.0)
-                            .ceil()
-                    })
-                    .sum::<f64>() as usize
-            })
-            .max()
-            .unwrap_or(0)
+        let mut deficit = 0;
+        for axis in 0..self.axes.len() {
+            let attribute = self.axes[axis].attribute.clone();
+            let mut lacking = 0.0;
+            for label in self.axes[axis].labels.clone() {
+                let missing = (depth as f64 - self.load(&attribute, &label))
+                    .max(0.0)
+                    .ceil();
+                if missing == 0.0
+                    || self
+                        .unreachable
+                        .contains(&(attribute.clone(), label.clone()))
+                {
+                    continue;
+                }
+                if !self.reachable(axis, &label) {
+                    self.warnings.push(format!(
+                        "OddSampler: no case inside ODD {} has {attribute} in bucket {label} \
+                         that the knobs can set; not aiming at it",
+                        self.odd.name
+                    ));
+                    self.unreachable.insert((attribute.clone(), label));
+                    continue;
+                }
+                lacking += missing;
+            }
+            deficit = deficit.max(lacking as usize);
+        }
+        deficit
+    }
+
+    /// The buckets given up on as holes, (attribute, bucket), sorted.
+    pub fn unreachable(&self) -> Vec<(String, String)> {
+        let mut out: Vec<_> = self.unreachable.iter().cloned().collect();
+        out.sort();
+        out
+    }
+
+    /// Whether a case can be drawn with *label* for the axis: tried on a copy,
+    /// so the sampler's random stream and plan are untouched.
+    fn reachable(&self, axis: usize, label: &str) -> bool {
+        self.clone().draw_with(0, None, Some((axis, label))).is_ok()
     }
 
     /// The situations still uncovered, which the first cases are aimed at.
@@ -497,17 +533,28 @@ impl Sampler {
 
     fn pick(&mut self, axis: usize, least: bool) -> String {
         let labels = self.axes[axis].labels.clone();
+        let attribute = self.axes[axis].attribute.clone();
         if self.strategy == Strategy::Uniform {
             return labels[self.rng.gen_range(0..labels.len())].clone();
         }
-        let attribute = self.axes[axis].attribute.clone();
         let loads: Vec<f64> = labels.iter().map(|l| self.load(&attribute, l)).collect();
         if least {
-            let lowest = loads.iter().copied().fold(f64::INFINITY, f64::min);
+            // A bucket given up on is no hole to aim at.
+            let aimable: Vec<bool> = labels
+                .iter()
+                .map(|l| !self.unreachable.contains(&(attribute.clone(), l.clone())))
+                .collect();
+            let any = aimable.iter().any(|a| *a);
+            let lowest = loads
+                .iter()
+                .zip(&aimable)
+                .filter(|(_, a)| **a || !any)
+                .map(|(l, _)| *l)
+                .fold(f64::INFINITY, f64::min);
             let candidates: Vec<&String> = labels
                 .iter()
-                .zip(&loads)
-                .filter(|(_, l)| **l == lowest)
+                .zip(loads.iter().zip(&aimable))
+                .filter(|(_, (l, a))| **l == lowest && (**a || !any))
                 .map(|(b, _)| b)
                 .collect();
             return candidates[self.rng.gen_range(0..candidates.len())].clone();
@@ -627,10 +674,26 @@ impl Sampler {
 
     /// Draw one case; `situation`, if given, is a module the case aims at.
     pub fn draw(&mut self, index: usize, situation: Option<&str>) -> Result<Sample> {
+        self.draw_with(index, situation, None)
+    }
+
+    /// [`Sampler::draw`], with one axis's bucket fixed if `fixed` is given.
+    fn draw_with(
+        &mut self,
+        index: usize,
+        situation: Option<&str>,
+        fixed: Option<(usize, &str)>,
+    ) -> Result<Sample> {
         for attempt in 0..self.max_tries {
             let least = attempt < self.max_tries / 2;
             let buckets: IndexMap<String, String> = (0..self.axes.len())
-                .map(|i| (self.axes[i].attribute.clone(), self.pick(i, least)))
+                .map(|i| {
+                    let label = match fixed {
+                        Some((axis, label)) if axis == i => label.to_string(),
+                        _ => self.pick(i, least),
+                    };
+                    (self.axes[i].attribute.clone(), label)
+                })
                 .collect();
             let mut as_buckets: Values = self
                 .odd
