@@ -1,0 +1,4 @@
+# Line endings are part of what an ODD *is*: its revision is the SHA-256 of its
+# files' bytes. Keep them LF on every checkout, Windows included, so the bundled ODD
+# has one revision on every platform.
+* text=auto eol=lf
