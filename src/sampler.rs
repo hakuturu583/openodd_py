@@ -459,6 +459,31 @@ impl Sampler {
         }
     }
 
+    /// How many more cases the coverage strategy needs before every drawable
+    /// bucket is covered `depth` times, counting the coverage given and the
+    /// cases planned. A case covers one bucket of each attribute, so this is
+    /// what the attribute lacking most lacks. Always 0 with the uniform
+    /// strategy, which does not aim at the holes.
+    pub fn coverage_deficit(&self, depth: usize) -> usize {
+        if self.strategy == Strategy::Uniform {
+            return 0;
+        }
+        self.axes
+            .iter()
+            .map(|axis| {
+                axis.labels
+                    .iter()
+                    .map(|l| {
+                        (depth as f64 - self.load(&axis.attribute, l))
+                            .max(0.0)
+                            .ceil()
+                    })
+                    .sum::<f64>() as usize
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// The situations still uncovered, which the first cases are aimed at.
     pub fn situation_holes(&self) -> Vec<String> {
         self.situation_holes.clone()

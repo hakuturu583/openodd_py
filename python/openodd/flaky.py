@@ -215,10 +215,15 @@ class FlakySearch:
         sampler: Draws the cases: its own policy for the share not explored,
             and the candidates for the rest (so only what the ODD admits).
         observations: Earlier runs, ``(case, passed)``.
-        explore_fraction: The share of each batch chosen for instability; the
-            rest is the sampler's own. Nothing is explored before a run is
-            observed.
+        explore_fraction: The share of each batch chosen for instability once
+            the ODD is covered; the rest is the sampler's own. Nothing is
+            explored before a run is observed.
         pool: Candidates drawn per explored case.
+        coverage_depth: The holes first: while the sampler's coverage strategy
+            has buckets covered fewer than this many times, the cases it needs
+            to cover them are its own, whatever ``explore_fraction`` says. 0
+            explores from the first observed run; the uniform strategy has no
+            holes to fill.
         **model: :class:`FlakinessModel`'s options (``threshold``,
             ``epsilon``, ...).
     """
@@ -230,6 +235,7 @@ class FlakySearch:
         *,
         explore_fraction: float = 0.5,
         pool: int = 16,
+        coverage_depth: int = 1,
         **model: Any,
     ) -> None:
         if not 0.0 <= explore_fraction <= 1.0:
@@ -237,6 +243,9 @@ class FlakySearch:
         self.sampler = sampler
         self.explore_fraction = float(explore_fraction)
         self.pool = int(pool)
+        if coverage_depth < 0:
+            raise ValueError("FlakySearch: coverage_depth must not be negative")
+        self.coverage_depth = int(coverage_depth)
         self.model = FlakinessModel(
             ParameterSpace._from_core(sampler._core.space), observations, **model
         )
@@ -264,7 +273,11 @@ class FlakySearch:
         if count < 0:
             raise ValueError("FlakySearch: count must not be negative")
         drawn = self.sampler._core.search(
-            self.model._core, count, explore_fraction=self.explore_fraction, pool=self.pool
+            self.model._core,
+            count,
+            explore_fraction=self.explore_fraction,
+            pool=self.pool,
+            coverage_depth=self.coverage_depth,
         )
         return [
             OddSample._from_core(core, None if m is None else FlakyMetrics._from_core(m))

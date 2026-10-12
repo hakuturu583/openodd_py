@@ -1589,13 +1589,14 @@ impl Sampler {
     }
     /// *count* cases, `explore_fraction` of them the most unstable of `pool`
     /// candidates each (see `crate::flaky::search`).
-    #[pyo3(signature = (model, count, *, explore_fraction=0.5, pool=16))]
+    #[pyo3(signature = (model, count, *, explore_fraction=0.5, pool=16, coverage_depth=1))]
     fn search(
         &mut self,
         mut model: PyRefMut<'_, FlakinessModel>,
         count: usize,
         explore_fraction: f64,
         pool: usize,
+        coverage_depth: usize,
     ) -> PyResult<Vec<(Sample, Option<MetricsTuple>)>> {
         Ok(crate::flaky::search(
             &mut self.inner,
@@ -1603,6 +1604,7 @@ impl Sampler {
             count,
             explore_fraction,
             pool,
+            coverage_depth,
         )
         .map_err(err)?
         .into_iter()

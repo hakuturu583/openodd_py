@@ -69,6 +69,27 @@ def test_a_batch_keeps_the_sampler_and_explores_the_boundary() -> None:
     assert min(c.flaky.flip_probability for c in explored) > 0.05
 
 
+def test_the_holes_come_before_the_flaky_cases() -> None:
+    sampler = OddSampler(odd(), controls=CONTROLS, seed=3, strategy="coverage", backend=backend())
+    s = FlakySearch(sampler, explore_fraction=1.0)
+    first = sampler.sample(1)[0]
+    s.observe(first, passes(first))
+    # Three buckets each for the rain and the gap, one of each covered: the
+    # sampler needs two more cases, and the rest is explored.
+    cases = s.sample(4)
+    assert [c.flaky is None for c in cases] == [True, True, False, False]
+    own = [first, *cases[:2]]
+    assert len({c.buckets["gap"] for c in own}) == 3
+    # Covered: the whole batch is explored.
+    assert all(c.flaky is not None for c in s.sample(4))
+    # Not waiting for the holes: explored from the first run on.
+    eager = FlakySearch(OddSampler(odd(), controls=CONTROLS, seed=3, strategy="coverage", backend=backend()),
+                        [(first, passes(first))], explore_fraction=1.0, coverage_depth=0)
+    assert all(c.flaky is not None for c in eager.sample(4))
+    with pytest.raises(ValueError, match="coverage_depth"):
+        search(coverage_depth=-1)
+
+
 def test_the_metrics_tell_the_boundary_from_the_far_side() -> None:
     s = observed(search())
     near = s.metrics({"gap": 20.5, "rain": "none"})

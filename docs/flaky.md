@@ -121,10 +121,15 @@ The same seed, runs and case always give the same metrics, whatever was measured
 ## The search
 
 `FlakySearch.sample(count)` draws `round(count × explore_fraction)` cases for
-instability and the rest with the sampler's own policy:
+instability and the rest with the sampler's own policy, the holes first:
 
 1. **The sampler's own cases**: drawn first, exactly as `OddSampler.sample` would draw
-   them.
+   them. While the coverage strategy has buckets covered fewer than `coverage_depth`
+   times (1), the cases it needs to cover them are its own whatever `explore_fraction`
+   says: a case covers one bucket of each attribute, so it needs as many as the
+   attribute lacking most lacks. Once the buckets are covered, `explore_fraction` of
+   each batch is explored. `coverage_depth=0` explores from the first observed run; the
+   uniform strategy has no holes to fill.
 2. **Candidates**: `pool` candidates per explored case (16) are drawn from the ODD by a
    copy of the sampler. They are combinations the ODD admits, set by the same knobs, and
    drawing them plans nothing in the sampler itself.

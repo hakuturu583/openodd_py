@@ -1055,9 +1055,11 @@ const MAX_CATEGORY_COMBINATIONS: usize = 1024;
 // The search
 // ---------------------------------------------------------------------------
 
-/// Draw *count* cases: the sampler's own for all but `explore_fraction` of
-/// them, the most unstable of `pool` candidates per case for the rest. A
-/// model with no observations explores nothing. Returns each case with its
+/// Draw *count* cases. The sampler's own come first: as many as it still
+/// needs to cover every bucket `coverage_depth` times
+/// ([`Sampler::coverage_deficit`]), and at least all but `explore_fraction`
+/// of the batch. The rest are the most unstable of `pool` candidates per
+/// case. A model with no observations explores nothing. Returns each case with its
 /// metrics when it was chosen for its instability.
 pub fn search(
     sampler: &mut Sampler,
@@ -1065,6 +1067,7 @@ pub fn search(
     count: usize,
     explore_fraction: f64,
     pool: usize,
+    coverage_depth: usize,
 ) -> Result<Vec<(Sample, Option<Metrics>)>> {
     if !(0.0..=1.0).contains(&explore_fraction) {
         return Err(Error::value("flaky: explore_fraction must be in [0, 1]"));
@@ -1074,10 +1077,13 @@ pub fn search(
             "flaky: the model's space is not the sampler's",
         ));
     }
+    // The holes first: as many of the batch as the sampler still needs to
+    // cover every bucket, then `explore_fraction` of the rest.
     let explore = if model.is_empty() {
         0
     } else {
-        (count as f64 * explore_fraction).round() as usize
+        let holes = sampler.coverage_deficit(coverage_depth).min(count);
+        ((count as f64 * explore_fraction).round() as usize).min(count - holes)
     };
     let mut out: Vec<(Sample, Option<Metrics>)> = sampler
         .sample(count - explore)?
