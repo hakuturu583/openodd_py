@@ -492,6 +492,7 @@ impl Attribute {
         )?;
         item.unit = self.unit.clone();
         item.text = self.text.clone();
+        item.attribute = Some(self.name.clone());
         self.item = Some(item);
         Ok(())
     }

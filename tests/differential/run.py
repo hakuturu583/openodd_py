@@ -18,6 +18,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 from cases import all_cases, contexts  # noqa: E402
 
+#: Keys of an item's definition the reference does not write.
+NEWER_KEYS = ("amount", "attribute")
+
 
 def plain(x: Any) -> Any:
     if isinstance(x, float):
@@ -60,7 +63,9 @@ def run(impl: str, case: dict[str, Any]) -> dict[str, Any]:
             for a in odd.attributes
         ],
         "modules": [m.describe() for m in odd.modules],
-        "situations": [m.item.describe() for m in odd.situations()],
+        # amount / attribute came after the reference: compare what both write.
+        "situations": [{k: v for k, v in m.item.describe().items() if k not in NEWER_KEYS}
+                       for m in odd.situations()],
         "unmeasured": odd.unmeasured(),
     }
     verdicts = []

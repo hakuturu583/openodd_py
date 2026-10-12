@@ -251,10 +251,65 @@ impl Bucketing {
     fn group(&self) -> &'static str {
         self.inner.group.as_str()
     }
+    /// The ODD attribute the item buckets, when it is one's.
+    #[getter]
+    fn attribute(&self) -> Option<String> {
+        self.inner.attribute.clone()
+    }
+    /// The measure a bucket's coverage is read from.
+    #[getter]
+    fn amount(&self) -> String {
+        self.inner.criteria.amount()
+    }
 
     /// The label of the bucket `value` falls in.
     fn bucket_of(&self, value: &Bound<'_, PyAny>) -> PyResult<String> {
         self.inner.bucket_of(&to_value(value)?).map_err(err)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cells
+// ---------------------------------------------------------------------------
+
+/// Steps, seconds and metres per combination of an ODD's buckets.
+#[pyclass(module = "openodd._core")]
+struct Cells {
+    inner: crate::cells::CellCounter,
+}
+
+#[pymethods]
+impl Cells {
+    #[new]
+    fn new(odd: &Odd) -> Self {
+        Cells {
+            inner: crate::cells::CellCounter::new(&odd.inner),
+        }
+    }
+    /// The attributes with buckets: the labels of a cell, in order.
+    #[getter]
+    fn attributes(&self) -> Vec<String> {
+        self.inner.attributes.clone()
+    }
+    /// Steps counted so far.
+    #[getter]
+    fn ticks(&self) -> u64 {
+        self.inner.ticks()
+    }
+    /// The cell of one step (one value per attribute of the ODD, in order).
+    fn cell_of(&self, values: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
+        let values = values.iter().map(to_value).collect::<PyResult<Vec<_>>>()?;
+        self.inner.cell_of(&values).map_err(err)
+    }
+    /// Count one step that took `seconds` and covered `meters`.
+    #[pyo3(signature = (values, seconds=0.0, meters=0.0))]
+    fn add(&mut self, values: Vec<Bound<'_, PyAny>>, seconds: f64, meters: f64) -> PyResult<()> {
+        let values = values.iter().map(to_value).collect::<PyResult<Vec<_>>>()?;
+        self.inner.add(&values, seconds, meters).map_err(err)
+    }
+    /// `{"attributes": [...], "rows": [[[label, ...], ticks, seconds, meters], ...]}`.
+    fn to_json(&self) -> String {
+        self.inner.to_json().to_string()
     }
 }
 
@@ -1537,6 +1592,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CACHE_ENV", crate::sources::CACHE_ENV)?;
     m.add_class::<Undecided>()?;
     m.add_class::<Bucketing>()?;
+    m.add_class::<Cells>()?;
+    m.add("MISSING", crate::cells::MISSING)?;
     m.add_class::<Condition>()?;
     m.add_class::<Attribute>()?;
     m.add_class::<Module>()?;
