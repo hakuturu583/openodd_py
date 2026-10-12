@@ -259,3 +259,9 @@ def test_the_report_assesses_the_runs_and_carries_them_over() -> None:
     assert len(fresh.model) == 30
     assert fresh.observe_report(report, scenario="other") == 0
     assert all(c.flaky is not None for c in fresh.sample(4)[2:])
+
+
+def test_hiding_the_holes_keeps_the_flaky_cases() -> None:
+    report = openodd.merge_coverage(_campaign(20))
+    rows = [line for line in report.to_markdown(max_holes=0).splitlines() if "| cut_in |" in line]
+    assert len(rows) == 20

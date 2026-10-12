@@ -461,6 +461,9 @@ impl CaseRun {
     }
 }
 
+/// The most runs the "Flaky cases" section of the Markdown report lists.
+pub const MAX_CASE_ROWS: usize = 20;
+
 /// Above this instability confidence, a case counts as flaky in the report.
 pub const FLAKY_CONFIDENCE: f64 = 0.5;
 
@@ -663,7 +666,7 @@ impl CoverageReport {
                 }
             }
         }
-        lines.extend(cases_markdown(&self.cases, max_holes));
+        lines.extend(cases_markdown(&self.cases, MAX_CASE_ROWS));
         lines.join("\n") + "\n"
     }
 }

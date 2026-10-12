@@ -199,7 +199,7 @@ outcome (`CaseRun.assessed`), with the model's defaults. Its Markdown gains a
 **Flaky cases** section: how many runs were chosen for instability and by the
 sampler's policy, how many of each failed, how many are flaky as assessed
 (`instability_confidence` above 0.5), and the runs flakiest first, with their
-predicted and assessed flakiness side by side.
+predicted and assessed flakiness side by side (at most 20 rows).
 
 **The next campaign** starts from them:
 
