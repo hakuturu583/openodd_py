@@ -16,6 +16,9 @@ classifiers = [
   "Topic :: Scientific/Engineering",
 ]
 
+[project.scripts]
+openodd-coverage = "openodd.report:main"
+
 [project.urls]
 Repository = "https://github.com/hakuturu583/openodd_py"
 

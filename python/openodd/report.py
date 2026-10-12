@@ -1,7 +1,7 @@
 """Merge coverage files and grade them (the merge is the Rust core's).
 
 A coverage file (``*_coverage.json``, schema :data:`COVERAGE_SCHEMA`) is what
-a backend's collector writes for one run: every cover item's hits and
+the collector (:class:`~.collector.CoverageCollector`) writes for one run: every cover item's hits and
 exposure per bucket, and the run's exposure to its ODD. Merged:
 
 * a bucket is covered when its amount -- hits, or the seconds, metres or
@@ -168,9 +168,24 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
     parser.add_argument("--json", type=Path, help="also write the merged report as JSON here")
     parser.add_argument("--markdown", type=Path, help="write the Markdown report here instead of stdout")
     parser.add_argument("--max-holes", type=int, default=20, help="holes listed per item (default: 20)")
+    parser.add_argument(
+        "--export-cod",
+        type=Path,
+        metavar="DIR",
+        help="also write each run's ODD samples as an ASAM OpenODD COD table, "
+        "with its manifest and taxonomy, into DIR",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
-    report = load_and_merge(args.paths)
+    documents = load_coverage_files(args.paths)
+    report = merge_coverage([doc for _, doc in documents])
+    if args.export_cod is not None:
+        from .cod import export_cods  # noqa: PLC0415 - cod imports nothing of the report
+
+        exported = export_cods(documents, args.export_cod)
+        print(f"Exported {len(exported)} COD table(s) to {args.export_cod}", file=sys.stderr)  # noqa: T201
+        if not exported:
+            return 1  # asked for, and nothing had samples to export
     if report.runs == 0:
         print("No coverage files found.", file=sys.stderr)  # noqa: T201
         return 1

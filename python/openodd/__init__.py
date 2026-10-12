@@ -41,6 +41,8 @@ from .loader import (
     load_openodd,
     read_archive_manifest,
 )
+from .cod import CodExport, export_cod, export_cods
+from .collector import CROSS_SEPARATOR, CoverageCollector
 from .report import (
     COVERAGE_SCHEMA,
     CoverageReport,
@@ -66,6 +68,11 @@ from .model import (
 )
 
 __all__ = [
+    "CROSS_SEPARATOR",
+    "CodExport",
+    "CoverageCollector",
+    "export_cod",
+    "export_cods",
     "COVERAGE_SCHEMA",
     "CoverageReport",
     "MergedEntry",
