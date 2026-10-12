@@ -211,3 +211,23 @@ def test_units() -> None:
     assert openodd.normalize_unit("kph") == "km/h"
     with pytest.raises(openodd.UnitError):
         openodd.convert(1, "m", "s")
+
+
+def test_the_bundled_default_odd() -> None:
+    names = ["in_junction", "lanelet_location", "lanelet_subtype", "speed_limit_kph", "lane_count",
+             "illumination", "rain", "fog", "ego_speed_kph", "traffic_density", "pedestrian_nearby"]
+    units = {"speed_limit_kph": "km/h", "ego_speed_kph": "km/h"}
+    backend = Backend(
+        probes={n: ((lambda c, n=n: c.get(n)), units.get(n, "")) for n in names},
+        readers={"measure": lambda k: ((lambda c, k=k: c.get(k)), {"vehicle_ahead_gap_m": "m",
+                 "vehicle_ahead_relative_speed_kph": "km/h", "crossing_pedestrian_gap_m": "m",
+                 "crossing_pedestrian_speed_ms": "m/s"}[k])},
+    )
+    odd = openodd.bundled_odd(backend=backend)
+    assert odd.name == "default" and odd.modules == [] and len(odd.attributes) == 15
+    assert len(odd.revision) == 64 and odd.revision == openodd.bundled_odd(backend=backend).revision
+    speed = next(a for a in odd.attributes if a.name == "dynamic.ego_speed")
+    assert (speed.unit, speed.cover_by, speed.min_stay) == ("km/h", "entries", 3.0)
+    assert odd.evaluate(odd.sample({"ego_speed_kph": 200})).inside  # no modules, nothing is outside
+    with pytest.raises(ValueError, match="no bundled ODD"):
+        openodd.bundled_odd("nope", backend=backend)

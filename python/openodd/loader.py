@@ -21,7 +21,9 @@ from .backend import Backend, default_backend
 from .model import OddDefinition, Probe, _missing
 
 __all__ = [
+    "BUNDLED_ODDS",
     "GitSource",
+    "bundled_odd",
     "OpenOddError",
     "load_odd_archive",
     "load_odd_binding",
@@ -153,6 +155,19 @@ def load_openodd(
         situations=None if situations is None else json.dumps(_plain(situations)),
     )
     return _wrap(core, backend)
+
+
+#: The ODDs this package ships, by name: their binding files.
+BUNDLED_ODDS = {"default": "odds/default/default.binding.yaml"}
+
+
+def bundled_odd(name: str = "default", *, backend: Optional[Backend] = None) -> OddDefinition:
+    """An ODD this package ships (``default``: every attribute a road-vehicle
+    simulator commonly measures, and no modules). Its probes are named as a
+    backend names them; its revision changes only when its files do."""
+    if name not in BUNDLED_ODDS:
+        raise ValueError(f"no bundled ODD {name!r}; bundled: {', '.join(BUNDLED_ODDS)}")
+    return load_odd_binding(Path(__file__).parent / BUNDLED_ODDS[name], backend=backend)
 
 
 def load_odd_archive(archive: bytes, *, backend: Optional[Backend] = None) -> OddDefinition:

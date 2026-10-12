@@ -1,0 +1,23 @@
+# The default ODD: every attribute a road-vehicle simulator commonly measures,
+# after ISO 34503 (scenery, environmental conditions, dynamic elements), and no
+# modules -- so every situation is inside it. It says what the runs reached,
+# not what a system is built for: write your own ODD for that.
+TAXONOMY:
+  scenery:
+    junction: boolean
+    location: [urban, nonurban, private]
+    road_type: [road, highway, road_shoulder, play_street, parking]
+    speed_limit: float velocity
+    lane_count: integer count
+  environment:
+    illumination: [day, low_sun, twilight, night]
+    rain: [none, light, moderate, heavy]
+    fog: [none, light, moderate, heavy]
+  dynamic:
+    ego_speed: float velocity
+    traffic_density: [none, low, medium, high]
+    pedestrian_nearby: boolean
+    vehicle_ahead_gap: float length
+    vehicle_ahead_relative_speed: float velocity
+    crossing_pedestrian_gap: float length
+    crossing_pedestrian_speed: float velocity
