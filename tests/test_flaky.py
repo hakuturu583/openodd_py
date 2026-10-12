@@ -234,6 +234,7 @@ def test_a_run_records_its_case_and_outcome() -> None:
     assert set(first["case"]["values"]) == {"rain", "gap"}
     assert first["outcome"] == {"passed": first["case"]["values"]["gap"] > BOUNDARY}
     assert ParameterSpace.from_list(first["case"]["space"]) == search().space
+    assert ParameterSpace.of(search().sampler) == search().space
     # A run that records nothing writes nothing about it.
     blank = openodd.CoverageCollector([]).to_dict("s")
     assert blank["case"] is None and blank["outcome"] is None

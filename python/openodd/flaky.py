@@ -108,6 +108,13 @@ class ParameterSpace:
         self._core = _core.ParamSpace(dims)
 
     @classmethod
+    def of(cls, sampler: OddSampler) -> "ParameterSpace":
+        """The space the attributes *sampler* draws span: a numeric one over
+        what its knob can set in its drawable buckets, a categorical one over
+        its drawable buckets (what :attr:`FlakySearch.space` is)."""
+        return cls._from_core(sampler._core.space)
+
+    @classmethod
     def _from_core(cls, core: Any) -> "ParameterSpace":
         self = cls.__new__(cls)
         self._core = core
@@ -278,7 +285,7 @@ class FlakySearch:
             raise ValueError("FlakySearch: coverage_depth must not be negative")
         self.coverage_depth = int(coverage_depth)
         self.model = FlakinessModel(
-            ParameterSpace._from_core(sampler._core.space), observations, **model
+            ParameterSpace.of(sampler), observations, **model
         )
 
     @property
