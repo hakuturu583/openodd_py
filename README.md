@@ -13,6 +13,12 @@
 What measures the attributes -- a simulator, a recorded log -- is the application's
 *backend*; the core only judges values.
 
+A `default` ODD ships with the package (`openodd.bundled_odd()`,
+[python/openodd/odds/default](python/openodd/odds/default)): every attribute a road-vehicle
+simulator commonly measures, after ISO 34503, and no modules. Its binding names the probes
+a backend provides (`ego_speed_kph`, `measure: vehicle_ahead_gap_m`, ...); its revision
+changes only when its files do.
+
 ```python
 import openodd
 

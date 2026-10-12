@@ -32,7 +32,9 @@ from .items import (
     value_label,
 )
 from .loader import (
+    BUNDLED_ODDS,
     GitSource,
+    bundled_odd,
     load_odd_archive,
     load_odd_binding,
     load_odd_file,
@@ -82,7 +84,9 @@ __all__ = [
     "HOLDS",
     "INACTIVE",
     "UNDECIDED",
+    "BUNDLED_ODDS",
     "Backend",
+    "bundled_odd",
     "CoverGroup",
     "CoverItem",
     "CrossItem",
