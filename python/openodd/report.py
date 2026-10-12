@@ -11,6 +11,11 @@ exposure per bucket, and the run's exposure to its ODD. Merged:
   grade is the mean of its items';
 * an item defined differently in different runs is reported once per
   definition (``name#2``), never merged.
+
+A run that recorded the case it ran (:meth:`~.collector.CoverageCollector.record_case`)
+is kept as a :class:`CaseRun`. Its flakiness is refitted over all the runs of
+its scenario that were chosen in the same space and recorded an outcome
+(``assessed``), and the report lists them, flakiest first.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ __all__ = [
     "COVERAGE_FILE_GLOB",
     "COVERAGE_SCHEMA",
     "COVERAGE_SCHEMAS",
+    "CaseRun",
     "CoverageReport",
     "MergedEntry",
     "OddExposure",
@@ -76,6 +82,35 @@ class OddExposure:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
 
 
+@dataclass
+class CaseRun:
+    """A run that recorded the case it ran.
+
+    Attributes:
+        document: The coverage file's index in the merge.
+        scenario: The run's scenario.
+        values: Parameter -> the value it ran with.
+        buckets: Parameter -> the bucket drawn for it.
+        chosen_for: ``"instability"`` (a flaky search chose it) or
+            ``"coverage"`` (the sampler's own policy did).
+        predicted: The flakiness predicted when it was chosen for its
+            instability (a :class:`~.flaky.FlakyMetrics` as a dict).
+        space: The normalized space it was chosen in, as written.
+        passed: Its outcome, if recorded.
+        assessed: Its flakiness over all the runs of its scenario and space.
+    """
+
+    document: int
+    scenario: str
+    values: dict[str, Any]
+    buckets: dict[str, Any]
+    chosen_for: str
+    predicted: Optional[dict[str, Any]]
+    space: Optional[list[dict[str, Any]]]
+    passed: Optional[bool]
+    assessed: Optional[dict[str, Any]]
+
+
 class CoverageReport:
     """Coverage merged over a number of runs."""
 
@@ -98,6 +133,11 @@ class CoverageReport:
     def odds(self) -> dict[str, OddExposure]:
         """ODD name -> how the runs measured against it fared."""
         return {name: OddExposure(**raw) for name, raw in json.loads(self._core.odds_json()).items()}
+
+    @property
+    def cases(self) -> list[CaseRun]:
+        """The runs that recorded the case they ran, in the order merged."""
+        return [CaseRun(**raw) for raw in json.loads(self._core.cases_json())]
 
     def entry(self, name: str) -> Optional[MergedEntry]:
         return next((e for e in self.entries if e.name == name), None)

@@ -50,8 +50,10 @@ use indexmap::IndexMap;
 use nalgebra::{Cholesky, DMatrix, DVector, Dyn};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
+use serde_json::{json, Value as Json};
 
 use crate::error::{Error, Result};
+use crate::report::{CaseRun, CoverageReport, Flakiness};
 use crate::sampler::{rng_for, Domain, Sample, Sampler};
 use crate::value::Value;
 
@@ -96,6 +98,53 @@ pub struct ParamSpace {
 impl ParamSpace {
     pub fn new(dims: Vec<Dim>) -> Self {
         ParamSpace { dims }
+    }
+
+    /// The space as a coverage file keeps it: per parameter, in order,
+    /// `{"name", "range": [low, high]}` or `{"name", "labels": [...]}`.
+    pub fn to_json(&self) -> Json {
+        Json::Array(
+            self.dims
+                .iter()
+                .map(|dim| match dim {
+                    Dim::Numeric { name, low, high } => json!({"name": name, "range": [low, high]}),
+                    Dim::Categorical { name, labels } => json!({"name": name, "labels": labels}),
+                })
+                .collect(),
+        )
+    }
+
+    /// The space [`ParamSpace::to_json`] wrote.
+    pub fn from_json(raw: &Json) -> Result<Self> {
+        let bad = || Error::value(format!("flaky: not a parameter space: {raw}"));
+        let dims = raw
+            .as_array()
+            .ok_or_else(bad)?
+            .iter()
+            .map(|d| {
+                let name = d
+                    .get("name")
+                    .and_then(Json::as_str)
+                    .ok_or_else(bad)?
+                    .to_string();
+                if let Some(range) = d.get("range").and_then(Json::as_array) {
+                    let low = range.first().and_then(Json::as_f64).ok_or_else(bad)?;
+                    let high = range.get(1).and_then(Json::as_f64).ok_or_else(bad)?;
+                    return Ok(Dim::Numeric { name, low, high });
+                }
+                let labels = d
+                    .get("labels")
+                    .and_then(Json::as_array)
+                    .ok_or_else(bad)?
+                    .iter()
+                    .map(|l| l.as_str().map(String::from).ok_or_else(bad))
+                    .collect::<Result<_>>()?;
+                Ok(Dim::Categorical { name, labels })
+            })
+            .collect::<Result<_>>()?;
+        let space = ParamSpace::new(dims);
+        space.check()?;
+        Ok(space)
     }
 
     /// The space the attributes *sampler* draws span: a numeric attribute
@@ -1283,6 +1332,72 @@ pub fn search(
     Ok(out)
 }
 
+/// Refit the flakiness of every run in *report* that recorded its case:
+/// over all the runs of its scenario chosen in the same space that recorded
+/// an outcome (`CaseRun::assessed`). The metrics are measured as a
+/// [`FlakinessModel`] with the default [`Config`] and seed *seed* would; a run
+/// whose values do not fit its space is left unassessed.
+pub fn assess(report: &mut CoverageReport, seed: &str) -> Result<()> {
+    let mut groups: IndexMap<(String, String), Vec<usize>> = IndexMap::new();
+    for (i, run) in report.cases.iter().enumerate() {
+        if let Some(space) = &run.space {
+            groups
+                .entry((run.scenario.clone(), space.to_string()))
+                .or_default()
+                .push(i);
+        }
+    }
+    for runs in groups.into_values() {
+        let first = &report.cases[runs[0]];
+        let Some(space) = first
+            .space
+            .as_ref()
+            .and_then(|s| ParamSpace::from_json(s).ok())
+        else {
+            continue;
+        };
+        let mut model = FlakinessModel::new(space, Config::default(), seed)?;
+        for &i in &runs {
+            let run = &report.cases[i];
+            if let Some(passed) = run.passed {
+                // A run whose values do not fit is no observation.
+                let _ = model.observe(&case_values(run), passed);
+            }
+        }
+        if model.is_empty() {
+            continue;
+        }
+        for &i in &runs {
+            let values = case_values(&report.cases[i]);
+            if let Ok(m) = model.metrics(&values) {
+                report.cases[i].assessed = Some(Flakiness {
+                    pass_probability: m.pass_probability,
+                    flip_probability: m.flip_probability,
+                    instability_confidence: m.instability_confidence,
+                    robustness_radius: m.robustness_radius,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A recorded case's values, as the model reads them.
+fn case_values(run: &CaseRun) -> IndexMap<String, Value> {
+    run.values
+        .iter()
+        .map(|(k, v)| {
+            let value = match v {
+                Json::Bool(b) => Value::Bool(*b),
+                Json::Number(n) => n.as_f64().map(Value::Float).unwrap_or(Value::Missing),
+                Json::String(s) => Value::Str(s.clone()),
+                _ => Value::Missing,
+            };
+            (k.clone(), value)
+        })
+        .collect()
+}
+
 /// A case the search may explore: coded, scored, and its categories.
 #[derive(Clone)]
 struct Candidate {
@@ -1332,6 +1447,47 @@ mod tests {
             .unwrap();
         }
         m
+    }
+
+    #[test]
+    fn a_space_round_trips_through_json() {
+        let raw = space().to_json();
+        assert_eq!(raw[0], json!({"name": "gap", "range": [0.0, 100.0]}));
+        assert_eq!(ParamSpace::from_json(&raw).unwrap(), space());
+        assert!(ParamSpace::from_json(&json!([{"name": "x"}])).is_err());
+    }
+
+    #[test]
+    fn a_report_is_assessed_per_scenario_and_space() {
+        let run = |scenario: &str, gap: f64, space: Option<Json>| {
+            json!({
+                "schema": crate::report::COVERAGE_SCHEMA, "scenario": scenario, "items": [],
+                "case": {"values": {"gap": gap, "rain": "none"}, "chosen_for": "coverage", "space": space},
+                "outcome": {"passed": gap > 50.0},
+            })
+        };
+        let mut docs: Vec<Json> = (0..=100)
+            .step_by(5)
+            .map(|g| run("a", g as f64, Some(space().to_json())))
+            .collect();
+        docs.push(run("b", 51.0, Some(space().to_json())));
+        docs.push(run("a", 51.0, None));
+        let mut report = crate::report::merge_coverage(&docs).unwrap();
+        assess(&mut report, "0").unwrap();
+        let a = &report.cases;
+        let at = |gap: f64| {
+            a.iter()
+                .find(|c| c.scenario == "a" && c.values["gap"] == json!(gap) && c.space.is_some())
+                .and_then(|c| c.assessed)
+                .unwrap()
+        };
+        assert!(at(50.0).flip_probability > at(100.0).flip_probability);
+        // Alone in its scenario, a run is assessed from itself only; without
+        // a space, not at all.
+        let b = a.iter().find(|c| c.scenario == "b").unwrap();
+        assert!(b.assessed.is_some());
+        assert!(a.last().unwrap().assessed.is_none());
+        assert!(report.to_markdown(5).contains("## Flaky cases"));
     }
 
     #[test]

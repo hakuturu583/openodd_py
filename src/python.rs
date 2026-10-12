@@ -1306,6 +1306,9 @@ impl CoverageReport {
     fn to_markdown(&self, max_holes: usize) -> String {
         self.inner.to_markdown(max_holes)
     }
+    fn cases_json(&self) -> String {
+        serde_json::Value::Array(self.inner.cases.iter().map(|c| c.to_json()).collect()).to_string()
+    }
 }
 
 /// A report from entries read elsewhere: `(name, buckets, target, cover_by,
@@ -1364,9 +1367,9 @@ fn coverage_from_entries(
 fn merge_coverage(documents_json: &str) -> PyResult<CoverageReport> {
     let docs: Vec<serde_json::Value> =
         serde_json::from_str(documents_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(CoverageReport {
-        inner: crate::report::merge_coverage(&docs).map_err(err)?,
-    })
+    let mut inner = crate::report::merge_coverage(&docs).map_err(err)?;
+    crate::flaky::assess(&mut inner, "report").map_err(err)?;
+    Ok(CoverageReport { inner })
 }
 
 // ---------------------------------------------------------------------------
@@ -1685,6 +1688,18 @@ impl ParamSpace {
                 ),
             })
             .collect()
+    }
+    /// The space as a coverage file keeps it (JSON).
+    fn to_json(&self) -> String {
+        self.inner.to_json().to_string()
+    }
+    #[staticmethod]
+    fn from_json(raw: &str) -> PyResult<Self> {
+        let raw: serde_json::Value =
+            serde_json::from_str(raw).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(ParamSpace {
+            inner: crate::flaky::ParamSpace::from_json(&raw).map_err(err)?,
+        })
     }
     fn encode(&self, values: &Bound<'_, PyDict>) -> PyResult<Vec<f64>> {
         self.inner
