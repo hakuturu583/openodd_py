@@ -33,7 +33,6 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::flaky::{Dim, ParamSpace};
 use crate::items::CoverItem;
 use crate::model::{Odd, Values};
 use crate::report::CoverageReport;
@@ -145,6 +144,16 @@ pub struct Sample {
     pub values: IndexMap<String, Value>,
     /// The situation the case was aimed at, if any.
     pub situation: Option<String>,
+}
+
+/// What a drawn attribute can take.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Domain {
+    /// A number in `[low, high]`: what its knob can bring about in its
+    /// drawable buckets.
+    Numeric { low: f64, high: f64 },
+    /// One of its drawable buckets.
+    Labels(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,19 +420,13 @@ impl Sampler {
         out
     }
 
-    /// The space the drawn attributes span, normalized (see [`ParamSpace`]): a
-    /// numeric attribute over what its knob can bring about in its drawable
-    /// buckets, a categorical one over its drawable buckets.
-    pub fn space(&self) -> ParamSpace {
-        let dims = self
-            .axes
+    /// What each drawn attribute can take, in the ODD's order.
+    pub fn domains(&self) -> Vec<(String, Domain)> {
+        self.axes
             .iter()
             .map(|axis| {
                 if !axis.item.numeric() {
-                    return Dim::Categorical {
-                        name: axis.attribute.clone(),
-                        labels: axis.labels.clone(),
-                    };
+                    return (axis.attribute.clone(), Domain::Labels(axis.labels.clone()));
                 }
                 let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
                 for label in &axis.labels {
@@ -432,14 +435,9 @@ impl Sampler {
                         high = high.max(h);
                     }
                 }
-                Dim::Numeric {
-                    name: axis.attribute.clone(),
-                    low,
-                    high,
-                }
+                (axis.attribute.clone(), Domain::Numeric { low, high })
             })
-            .collect();
-        ParamSpace::new(dims)
+            .collect()
     }
 
     /// Count *sample*, drawn elsewhere from this ODD, as planned: the coverage

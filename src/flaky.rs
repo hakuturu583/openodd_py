@@ -52,7 +52,7 @@ use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::error::{Error, Result};
-use crate::sampler::{rng_for, Sample, Sampler};
+use crate::sampler::{rng_for, Domain, Sample, Sampler};
 use crate::value::Value;
 
 /// A one-hot code is scaled by this, so two categories are 1 apart.
@@ -96,6 +96,21 @@ pub struct ParamSpace {
 impl ParamSpace {
     pub fn new(dims: Vec<Dim>) -> Self {
         ParamSpace { dims }
+    }
+
+    /// The space the attributes *sampler* draws span: a numeric attribute
+    /// over what its knob can bring about in its drawable buckets, a
+    /// categorical one over its drawable buckets.
+    pub fn of(sampler: &Sampler) -> Self {
+        let dims = sampler
+            .domains()
+            .into_iter()
+            .map(|(name, domain)| match domain {
+                Domain::Numeric { low, high } => Dim::Numeric { name, low, high },
+                Domain::Labels(labels) => Dim::Categorical { name, labels },
+            })
+            .collect();
+        ParamSpace::new(dims)
     }
 
     /// Refuse a space that cannot code a case.
@@ -1132,7 +1147,7 @@ pub fn search(
     if !(0.0..=1.0).contains(&explore_fraction) {
         return Err(Error::value("flaky: explore_fraction must be in [0, 1]"));
     }
-    if model.space() != &sampler.space() {
+    if model.space() != &ParamSpace::of(sampler) {
         return Err(Error::value(
             "flaky: the model's space is not the sampler's",
         ));
