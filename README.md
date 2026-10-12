@@ -10,8 +10,19 @@
   (see [docs/versioning.md](docs/versioning.md)), and the transmission packs into a
   deterministic archive the ODD reads back from exactly.
 
+- **Cover** what runs drive: `CoverageCollector` samples cover items and the ODD's
+  attributes step by step (hits, seconds, metres, entries, `min_stay`, situations,
+  steps outside the ODD) and writes a coverage file; `merge_coverage` /
+  `openodd-coverage` merge any number into a report, and `--export-cod` writes each
+  run's ODD samples as an OpenODD COD table (section 8.3) with its manifest and
+  taxonomy.
+- **Sample** the next runs from the ODD (`OddSampler`), aimed at what coverage
+  left uncovered.
+
 What measures the attributes -- a simulator, a recorded log -- is the application's
-*backend*; the core only judges values.
+*backend*: a subclass of `openodd.Backend` naming its probes, how a run sets an
+attribute (`knob`), and where the ego is (`position`, `geolocation`). Everything
+else is this library's.
 
 A `default` ODD ships with the package (`openodd.bundled_odd()`,
 [python/openodd/odds/default](python/openodd/odds/default)): every attribute a road-vehicle
@@ -27,6 +38,12 @@ odd = openodd.load_odd_binding("urban.yaml", backend=backend)
 verdict = odd.evaluate(odd.sample(context))
 odd.revision   # sha256 of the files it was read from
 odd.archive()  # those files as a deterministic .tar.gz
+
+collector = openodd.CoverageCollector(items, odd=odd, backend=backend)
+collector.start(context, 0.0)
+collector.tick(context, 0.05)  # after every step
+collector.end(context, 0.05)
+collector.write(Path("run_coverage.json"), "my_scenario")
 ```
 
 ### Coverage

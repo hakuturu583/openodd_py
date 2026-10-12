@@ -44,6 +44,8 @@ from .loader import (
     load_openodd,
     read_archive_manifest,
 )
+from .cod import CodExport, export_cod, export_cods
+from .collector import CROSS_SEPARATOR, CoverageCollector
 from .report import (
     COVERAGE_SCHEMA,
     CoverageReport,
@@ -74,9 +76,14 @@ except _metadata.PackageNotFoundError:  # a source tree, not installed
     __version__ = "0+unknown"
 
 __all__ = [
+    "CROSS_SEPARATOR",
+    "CodExport",
+    "CoverageCollector",
     "MISSING",
     "OddCells",
     "__version__",
+    "export_cod",
+    "export_cods",
     "COVERAGE_SCHEMA",
     "CoverageReport",
     "MergedEntry",

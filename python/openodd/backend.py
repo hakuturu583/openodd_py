@@ -18,6 +18,11 @@ is missing. A probe that raises is read as missing too.
 The sampler (:mod:`.sampler`) asks the backend the other way round as well:
 how a run *sets* an attribute (:meth:`Backend.knob`), so an application that
 can stage conditions -- a simulator's weather -- can be sampled from an ODD.
+The coverage collector (:mod:`.collector`) asks it where the ego is
+(:meth:`Backend.position`, :meth:`Backend.geolocation`).
+
+An application subclasses :class:`Backend` for what is its own and leaves the
+rest -- the model, the reader, coverage, the sampler -- to this library.
 """
 
 from __future__ import annotations
@@ -111,6 +116,24 @@ class Backend:
         if key not in self.readers:
             raise ValueError(f"the {self.name} backend has no {key!r} readers")
         return self.readers[key](value)
+
+    # -- what the collector asks on every step ---------------------------------
+
+    def position(self, context: Any) -> Optional[tuple[float, float, float]]:
+        """Where the ego is in *context*, in metres (``None``: unknown).
+
+        The collector measures the distance a step stands for with it (an
+        item's ``cover_by="meters"``). A backend that can tell overrides it.
+        """
+        return None
+
+    def geolocation(self, context: Any) -> Optional[tuple[float, float]]:
+        """The ego's latitude and longitude in *context* (``None``: unknown).
+
+        Kept with every step's ODD samples, it is the spatial extent of an
+        exported COD (:mod:`.cod`). A backend that can tell overrides it.
+        """
+        return None
 
     # -- what the Rust reader asks while it reads a binding --------------------
 
