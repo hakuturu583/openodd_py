@@ -56,6 +56,7 @@ from .report import (
     merge_coverage,
 )
 from .sampler import OddDraws, OddKnob, OddSample, OddSampler, knobs_from_mapping
+from .flaky import FlakinessModel, FlakyMetrics, FlakySearch, ParameterSpace
 from .model import (
     INACTIVE,
     UNDECIDED,
@@ -76,6 +77,10 @@ except _metadata.PackageNotFoundError:  # a source tree, not installed
     __version__ = "0+unknown"
 
 __all__ = [
+    "FlakinessModel",
+    "FlakyMetrics",
+    "FlakySearch",
+    "ParameterSpace",
     "CROSS_SEPARATOR",
     "CodExport",
     "CoverageCollector",

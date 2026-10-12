@@ -146,6 +146,9 @@ class OddSample:
         buckets: Attribute name -> the bucket label drawn for it.
         values: Attribute name -> the value drawn, in the attribute's terms.
         situation: The situation the case was aimed at, if any.
+        flaky: Its flakiness, when :class:`~.flaky.FlakySearch` chose it for
+            that (:class:`~.flaky.FlakyMetrics`); ``None`` for a case the
+            sampler's own policy drew.
     """
 
     index: int
@@ -153,10 +156,13 @@ class OddSample:
     buckets: dict[str, str]
     values: dict[str, Any]
     situation: Optional[str] = None
+    flaky: Optional[Any] = None
 
     @classmethod
-    def _from_core(cls, core: Any) -> "OddSample":
-        return cls(core.index, list(core.overrides), dict(core.buckets), dict(core.values), core.situation)
+    def _from_core(cls, core: Any, flaky: Optional[Any] = None) -> "OddSample":
+        return cls(
+            core.index, list(core.overrides), dict(core.buckets), dict(core.values), core.situation, flaky
+        )
 
     def _core(self) -> Any:
         return _core.Sample(
@@ -284,9 +290,23 @@ class OddSampler:
         """The situations still uncovered, which the first cases are aimed at."""
         return self._core.situation_holes
 
+    @property
+    def unreachable(self) -> list[tuple[str, str]]:
+        """``(attribute, bucket)`` pairs the knobs can set but no case inside
+        the ODD has, given up on as holes by the coverage strategy on its first
+        draw."""
+        return self._core.unreachable
+
+    def _log_warnings(self) -> None:
+        """Log what went wrong but did not stop the draws."""
+        for warning in self._core.take_warnings():
+            logger.warning(warning)
+
     def draw(self, index: int = 0, situation: Optional[str] = None) -> OddSample:
         """Draw one case; *situation*, if given, is a module the case aims at."""
-        return OddSample._from_core(self._core.draw(index, situation))
+        case = OddSample._from_core(self._core.draw(index, situation))
+        self._log_warnings()
+        return case
 
     def sample(self, count: int) -> list[OddSample]:
         """Draw *count* cases; with the coverage strategy, the first aim at the
@@ -294,6 +314,5 @@ class OddSampler:
         if count < 0:
             raise ValueError("OddSampler: count must not be negative")
         cases = [OddSample._from_core(c) for c in self._core.sample(count)]
-        for warning in self._core.take_warnings():
-            logger.warning(warning)
+        self._log_warnings()
         return cases
