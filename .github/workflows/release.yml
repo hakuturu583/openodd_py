@@ -8,7 +8,10 @@
 #   push a v* tag  a hand-cut tag (a hotfix, say) is built and published directly; the
 #                  `release` job is skipped.
 #   workflow_dispatch   builds the wheels and sdist without tagging or publishing, to
-#                  eyeball a release before committing to it.
+#                  eyeball a release before committing to it. With `publish: true` it
+#                  instead tags the dispatched commit with the version in its
+#                  Cargo.toml and publishes that: the way to finish a release whose
+#                  version was bumped but never tagged.
 #
 # The publish happens as a follow-up job here rather than in a separate `on: push:
 # tags` workflow on purpose: the auto-release tag is pushed with GITHUB_TOKEN, and a
@@ -33,6 +36,11 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Tag the dispatched commit vX.Y.Z (its Cargo.toml version) and publish it"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -123,14 +131,48 @@ jobs:
           git add Cargo.toml Cargo.lock
           git commit -m "chore(release): ${{ steps.bump.outputs.tag }}"
           git tag -a "${{ steps.bump.outputs.tag }}" -m "Release ${{ steps.bump.outputs.tag }}"
-          git push origin "HEAD:main"
-          git push origin "${{ steps.bump.outputs.tag }}"
+          # One push for both: if either is refused, neither lands, and a re-run
+          # starts over from the same main instead of bumping it again.
+          git push --atomic origin "HEAD:main" "${{ steps.bump.outputs.tag }}"
+
+  # A dispatch with `publish: true`: tag the dispatched commit with the version its
+  # Cargo.toml already says, so a bump that reached main without its tag can still be
+  # published. A tag already on that commit is reused; one elsewhere is refused.
+  tag:
+    name: tag the dispatched version
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: t
+        run: |
+          set -euo pipefail
+          tag="v$(python3 tools/bump_version.py --current)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            if [ "$(git rev-list -n 1 "$tag")" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::Tag $tag already exists on another commit" >&2
+              exit 1
+            fi
+            echo "Tag $tag is already on this commit; publishing it"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"
 
   # One place to work out, for all three entry points, which commit to build and whether
   # it may be published. Runs even when `release` is skipped (tag push, dispatch).
   resolve:
     name: resolve what to build
-    needs: [release]
+    needs: [release, tag]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -146,6 +188,8 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           BUMP: ${{ needs.release.outputs.bump }}
           TAG: ${{ needs.release.outputs.tag }}
+          DISPATCH_TAG: ${{ needs.tag.outputs.tag }}
+          DISPATCH_TAGGED: ${{ needs.tag.result }}
         run: |
           set -euo pipefail
           proceed=false; publish=false; ref="$REF_NAME"
@@ -156,6 +200,11 @@ jobs:
             # The auto-release path: build and publish only if a tag was cut.
             if [ "$BUMP" != "none" ] && [ -n "$TAG" ]; then
               proceed=true; publish=true; ref="$TAG"
+            fi
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ "$DISPATCH_TAGGED" != "skipped" ]; then
+            # A dispatch that publishes: only once its tag is there.
+            if [ "$DISPATCH_TAGGED" = "success" ] && [ -n "$DISPATCH_TAG" ]; then
+              proceed=true; publish=true; ref="$DISPATCH_TAG"
             fi
           elif [ "$EVENT" = "workflow_dispatch" ]; then
             # A dry run: build the artifacts, publish nothing.
