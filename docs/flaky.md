@@ -83,8 +83,9 @@ For a case `x` (`FlakyMetrics`):
 **How they are computed:**
 
 - **Small changes**: `perturbations` points `x'` (32 by default) are drawn uniformly in
-  the ball of radius `epsilon` (0.05) about `x`. Only the numeric parameters change, and
-  each stays within `[0, 1]`.
+  the part of the ball of radius `epsilon` (0.05) about `x` that lies inside the space
+  (by rejection, so a case at an edge is not biased towards itself). Only the numeric
+  parameters change; one fixed at a single value (`low == high`) never does.
 - **Flip rate per draw**: `draws` joint samples (256) are taken of `f` at `x` and its
   neighbours from the posterior. For each sample, with `p = Φ(f(x))` and
   `p' = Φ(f(x'))`, its flip rate is the mean of `p (1 - p') + (1 - p) p'` over the
@@ -97,8 +98,10 @@ For a case `x` (`FlakyMetrics`):
 - **`robustness_radius`**: the sign of the posterior mean of `f` (the predicted outcome)
   is followed out of `x` in steps of 0.01. The search goes along each numeric axis both
   ways and along `directions` (16) random directions, to the edge of the space, and the
-  first change is refined by bisection. Switching a categorical parameter counts as a
-  step of 1.
+  first change is refined by bisection. Switching `k` categorical parameters counts as a
+  step of `√k`. Every combination of categories is tried while there are at most 1024;
+  beyond that, one categorical parameter at a time. The radius is the smallest change
+  the search finds, so it is an estimate from above.
 
 The same seed, runs and case always give the same metrics, whatever was measured before.
 

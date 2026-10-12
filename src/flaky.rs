@@ -32,8 +32,11 @@
 //! * `robustness_radius` -- the smallest normalized distance from `x` at which
 //!   the predicted outcome (the sign of the posterior mean of `f`) changes:
 //!   searched along each numeric axis both ways and along random directions,
-//!   to the edge of the space, then refined by bisection; switching a
-//!   categorical parameter is a step of 1. `None` when nothing changes it.
+//!   to the edge of the space, then refined by bisection; switching `k`
+//!   categorical parameters is a step of `√k` (every combination of them is
+//!   tried while there are at most 1024). `None` when nothing searched
+//!   changes it: the radius is the smallest change found, so an estimate
+//!   from above.
 //!
 //! **The search** ([`search`]) keeps the sampler's own policy -- uniform, or
 //! the coverage strategy's least covered first -- for part of a batch, and
@@ -182,12 +185,16 @@ impl ParamSpace {
     }
 
     /// The coordinates of the numeric parameters in a coded case.
+    /// A parameter fixed at one value (`low == high`) cannot change, so it is
+    /// left out.
     fn numeric_coords(&self) -> Vec<usize> {
         let mut out = Vec::new();
         let mut at = 0;
         for dim in &self.dims {
-            if let Dim::Numeric { .. } = dim {
-                out.push(at);
+            if let Dim::Numeric { low, high, .. } = dim {
+                if high > low {
+                    out.push(at);
+                }
             }
             at += dim.width();
         }
@@ -782,19 +789,33 @@ fn unstable_first(a: &Metrics, b: &Metrics) -> std::cmp::Ordering {
 /// A point uniform in the ball of radius *epsilon* about *x*, in the numeric
 /// coordinates, kept in `[0, 1]`.
 fn perturb(x: &[f64], numeric: &[usize], epsilon: f64, rng: &mut ChaCha8Rng) -> Vec<f64> {
-    let direction: Vec<f64> = numeric.iter().map(|_| standard_normal(rng)).collect();
-    let norm = direction
-        .iter()
-        .map(|d| d * d)
-        .sum::<f64>()
-        .sqrt()
-        .max(1e-12);
-    let radius = epsilon * rng.gen::<f64>().powf(1.0 / numeric.len() as f64);
-    let mut out = x.to_vec();
-    for (d, &i) in direction.iter().zip(numeric) {
-        out[i] = (out[i] + radius * d / norm).clamp(0.0, 1.0);
+    // Rejection: uniform over the part of the ball inside the cube. Clamping
+    // instead would pile the points outside onto its faces -- at a corner,
+    // most of them onto x itself.
+    let mut last = x.to_vec();
+    for _ in 0..64 {
+        let direction: Vec<f64> = numeric.iter().map(|_| standard_normal(rng)).collect();
+        let norm = direction
+            .iter()
+            .map(|d| d * d)
+            .sum::<f64>()
+            .sqrt()
+            .max(1e-12);
+        let radius = epsilon * rng.gen::<f64>().powf(1.0 / numeric.len() as f64);
+        let mut out = x.to_vec();
+        for (d, &i) in direction.iter().zip(numeric) {
+            out[i] += radius * d / norm;
+        }
+        if numeric.iter().all(|&i| (0.0..=1.0).contains(&out[i])) {
+            return out;
+        }
+        last = out;
     }
-    out
+    // A case outside the cube, whose ball barely meets it: the last one, clamped.
+    for &i in numeric {
+        last[i] = last[i].clamp(0.0, 1.0);
+    }
+    last
 }
 
 /// The smallest distance at which the sign of the posterior mean changes.
@@ -874,23 +895,60 @@ fn radius(
             keep(hi);
         }
     }
-    // Switching a category is a step of 1.
-    for &(start, len) in blocks {
-        for other in 0..len {
-            if x[start + other] > 0.0 {
-                continue;
+    // Switching categories: each changed parameter is a step of 1, so a
+    // combination changing k of them is √k away. Every combination when
+    // there are few, else one parameter at a time.
+    let combinations: usize = blocks
+        .iter()
+        .try_fold(1usize, |n, &(_, len)| n.checked_mul(len))
+        .unwrap_or(usize::MAX);
+    let mut switched: Vec<(Vec<f64>, f64)> = Vec::new();
+    if combinations <= MAX_CATEGORY_COMBINATIONS {
+        for code in 1..combinations {
+            let (mut p, mut rest, mut changed) = (x.to_vec(), code, 0usize);
+            for &(start, len) in blocks {
+                let pick = rest % len;
+                rest /= len;
+                let current = (0..len).position(|i| x[start + i] > 0.0);
+                if Some(pick) != current {
+                    changed += 1;
+                }
+                for i in 0..len {
+                    p[start + i] = if i == pick { CATEGORY_SCALE } else { 0.0 };
+                }
             }
-            let mut p = x.to_vec();
-            for i in 0..len {
-                p[start + i] = if i == other { CATEGORY_SCALE } else { 0.0 };
+            if changed > 0 {
+                switched.push((p, (changed as f64).sqrt()));
             }
-            if flipped(classifier.latent_mean(&[p])[0]) {
-                keep(1.0);
+        }
+    } else {
+        for &(start, len) in blocks {
+            for other in 0..len {
+                if x[start + other] > 0.0 {
+                    continue;
+                }
+                let mut p = x.to_vec();
+                for i in 0..len {
+                    p[start + i] = if i == other { CATEGORY_SCALE } else { 0.0 };
+                }
+                switched.push((p, 1.0));
+            }
+        }
+    }
+    if !switched.is_empty() {
+        let points: Vec<Vec<f64>> = switched.iter().map(|(p, _)| p.clone()).collect();
+        for (mean, (_, distance)) in classifier.latent_mean(&points).iter().zip(&switched) {
+            if flipped(*mean) {
+                keep(*distance);
             }
         }
     }
     best
 }
+
+/// Above this many combinations of categories, the robustness radius
+/// switches one categorical parameter at a time.
+const MAX_CATEGORY_COMBINATIONS: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // The search
@@ -1133,6 +1191,65 @@ mod tests {
         assert!((metrics.pass_probability - 0.5).abs() < 0.1, "{metrics:?}");
         assert!(metrics.flip_probability > 0.3, "{metrics:?}");
         assert!(metrics.instability_confidence > 0.9, "{metrics:?}");
+    }
+
+    #[test]
+    fn a_fixed_parameter_is_never_perturbed() {
+        let s = ParamSpace::new(vec![
+            Dim::Numeric {
+                name: "fixed".into(),
+                low: 5.0,
+                high: 5.0,
+            },
+            Dim::Numeric {
+                name: "x".into(),
+                low: 0.0,
+                high: 1.0,
+            },
+        ]);
+        assert_eq!(s.numeric_coords(), vec![1]);
+    }
+
+    #[test]
+    fn perturbations_stay_in_the_cube_without_piling_on_its_face() {
+        let mut rng = rng_for("p");
+        let x = vec![0.0];
+        let points: Vec<Vec<f64>> = (0..200)
+            .map(|_| perturb(&x, &[0], 0.05, &mut rng))
+            .collect();
+        assert!(points.iter().all(|p| (0.0..=0.05).contains(&p[0])));
+        // Uniform over [0, 0.05]: none sits exactly on the face.
+        assert!(points.iter().all(|p| p[0] > 0.0));
+    }
+
+    #[test]
+    fn a_combination_of_categories_can_be_the_nearest_change() {
+        // Two binary parameters: only "11" passes.
+        let s = ParamSpace::new(vec![
+            Dim::Categorical {
+                name: "a".into(),
+                labels: vec!["0".into(), "1".into()],
+            },
+            Dim::Categorical {
+                name: "b".into(),
+                labels: vec!["0".into(), "1".into()],
+            },
+        ]);
+        let mut m = FlakinessModel::new(s, Config::default(), "0").unwrap();
+        for _ in 0..6 {
+            for (a, b) in [("0", "0"), ("0", "1"), ("1", "0"), ("1", "1")] {
+                let v = values(&[("a", Value::Str(a.into())), ("b", Value::Str(b.into()))]);
+                m.observe(&v, a == "1" && b == "1").unwrap();
+            }
+        }
+        let r = m
+            .metrics(&values(&[
+                ("a", Value::Str("0".into())),
+                ("b", Value::Str("0".into())),
+            ]))
+            .unwrap()
+            .robustness_radius;
+        assert_eq!(r, Some(std::f64::consts::SQRT_2));
     }
 
     #[test]
