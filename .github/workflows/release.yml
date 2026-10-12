@@ -202,10 +202,29 @@ jobs:
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q
 
+  # The same tests on Windows, which the Linux job cannot speak for.
+  verify-windows:
+    name: test the tagged commit (windows)
+    needs: [resolve]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.proceed == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: cargo test --locked
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
+      - run: uv run --no-project maturin develop
+      - run: uv run --no-project pytest -q
+
   wheels:
     name: wheel (${{ matrix.os }} ${{ matrix.target }})
-    needs: [resolve, verify]
-    if: ${{ !cancelled() && needs.verify.result == 'success' }}
+    needs: [resolve, verify, verify-windows]
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.verify-windows.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -215,12 +234,13 @@ jobs:
           - { os: linux, runner: ubuntu-latest, target: x86_64 }
           - { os: linux, runner: ubuntu-24.04-arm, target: aarch64 }
           - { os: macos, runner: macos-latest, target: universal2-apple-darwin }
+          - { os: windows, runner: windows-latest, target: x64 }
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.ref }}
       # abi3-py310, so one wheel per platform serves every Python 3.10+.
-      # `manylinux` is ignored on macOS.
+      # `manylinux` is ignored on macOS and Windows.
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -230,13 +250,16 @@ jobs:
       # rebuild of the same sources.
       - uses: astral-sh/setup-uv@v6
       - name: test the wheel that is about to be published
+        shell: bash
         run: |
           uv venv --python 3.12 "$RUNNER_TEMP/fresh"
           uv pip install --python "$RUNNER_TEMP/fresh" dist/*.whl pytest hypothesis pyyaml
+          PY="$RUNNER_TEMP/fresh/bin/python"
+          [ -x "$PY" ] || PY="$RUNNER_TEMP/fresh/Scripts/python"
           # Run from a directory without python/openodd, so the installed wheel is
           # what gets imported.
           cp -r tests "$RUNNER_TEMP/tests"
-          cd "$RUNNER_TEMP" && "$RUNNER_TEMP/fresh/bin/python" -m pytest tests -q
+          cd "$RUNNER_TEMP" && "$PY" -m pytest tests -q
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.target }}

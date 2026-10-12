@@ -33,3 +33,19 @@ jobs:
       - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q
+
+  # The Rust tests and the Python suite on Windows, once: abi3 means one interpreter
+  # covers the wheel, and the Linux matrix already spans the Python versions.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: cargo test
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
+      - run: uv run --no-project maturin develop
+      - run: uv run --no-project pytest -q
