@@ -39,10 +39,9 @@ Releases are cut by labels, as in simple_lanelet2. Put exactly one of
 `Cargo.toml` and `Cargo.lock` with `tools/bump_version.py`, commits
 `chore(release): vX.Y.Z` and tags it, runs the tests again, builds the wheels (Linux
 x86_64/aarch64, macOS universal2) and the sdist, tests each wheel, and attaches them to a
-GitHub release with generated notes. Publishing to PyPI (Trusted Publishing) also runs
-once the repository variable `PUBLISH_PYPI` is `true`. A PR without a label releases
-nothing. The [release label check](.github/workflows/release-label.yml) runs on every PR:
-it creates any missing `release:*` label, fails if the PR carries more than one, and
+GitHub release with generated notes, and publishes them to PyPI with Trusted
+Publishing. A PR without a label releases nothing. The
+[release label check](.github/workflows/release-label.yml) runs on every PR: it creates any missing `release:*` label, fails if the PR carries more than one, and
 says in its summary which release the merge will cut.
 
 A hand-pushed `v*` tag is built and published the same way (its version must match

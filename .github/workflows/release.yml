@@ -1,4 +1,4 @@
-# Cuts releases and publishes them (GitHub release, and PyPI once enabled). The mechanism is simple_lanelet2's.
+# Cuts releases and publishes them to the GitHub release and PyPI. The mechanism is simple_lanelet2's.
 #
 # There are three ways in, and the first is the everyday one:
 #
@@ -18,9 +18,10 @@
 # page is a find-links index (`uv`/`pip --find-links
 # https://github.com/hakuturu583/openodd_py/releases/expanded_assets/<tag>`).
 #
-# Publishing to PyPI is off until it is set up: Trusted Publishing (no token is stored
-# here) for project openodd-py, owner hakuturu583, repository openodd_py, workflow
-# release.yml, environment pypi; then set the repository variable PUBLISH_PYPI to true.
+# Every release is also published to PyPI with Trusted Publishing, so no token is
+# stored here. Configure it once on PyPI: project openodd-py, owner hakuturu583,
+# repository openodd_py, workflow release.yml, environment pypi. Until that exists the
+# publish job fails, while the GitHub release still carries the files.
 #
 # A version can never be replaced on PyPI, so the tests run again here rather than
 # trusting that CI was green on the same commit.
@@ -287,7 +288,7 @@ jobs:
   publish:
     name: publish to PyPI
     needs: [resolve, wheels, sdist]
-    if: ${{ !cancelled() && needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.resolve.outputs.publish == 'true' && vars.PUBLISH_PYPI == 'true' }}
+    if: ${{ !cancelled() && needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.resolve.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
