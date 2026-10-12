@@ -293,12 +293,20 @@ class OddSampler:
     @property
     def unreachable(self) -> list[tuple[str, str]]:
         """``(attribute, bucket)`` pairs the knobs can set but no case inside
-        the ODD has, given up on as holes (see :class:`~.flaky.FlakySearch`)."""
+        the ODD has, given up on as holes by the coverage strategy on its first
+        draw."""
         return self._core.unreachable
+
+    def _log_warnings(self) -> None:
+        """Log what went wrong but did not stop the draws."""
+        for warning in self._core.take_warnings():
+            logger.warning(warning)
 
     def draw(self, index: int = 0, situation: Optional[str] = None) -> OddSample:
         """Draw one case; *situation*, if given, is a module the case aims at."""
-        return OddSample._from_core(self._core.draw(index, situation))
+        case = OddSample._from_core(self._core.draw(index, situation))
+        self._log_warnings()
+        return case
 
     def sample(self, count: int) -> list[OddSample]:
         """Draw *count* cases; with the coverage strategy, the first aim at the
@@ -306,6 +314,5 @@ class OddSampler:
         if count < 0:
             raise ValueError("OddSampler: count must not be negative")
         cases = [OddSample._from_core(c) for c in self._core.sample(count)]
-        for warning in self._core.take_warnings():
-            logger.warning(warning)
+        self._log_warnings()
         return cases

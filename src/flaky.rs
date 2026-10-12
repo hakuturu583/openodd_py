@@ -44,14 +44,15 @@
 //! ODD by a copy of the sampler (so only admitted combinations), scored, and
 //! kept apart by at least `epsilon`.
 
+use std::collections::HashMap;
+
 use indexmap::IndexMap;
 use nalgebra::{Cholesky, DMatrix, DVector, Dyn};
-use rand::{Rng, SeedableRng};
+use rand::Rng;
 use rand_chacha::ChaCha8Rng;
-use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::sampler::{Sample, Sampler};
+use crate::sampler::{rng_for, Sample, Sampler};
 use crate::value::Value;
 
 /// A one-hot code is scaled by this, so two categories are 1 apart.
@@ -184,21 +185,34 @@ impl ParamSpace {
             .collect()
     }
 
-    /// The coordinates of the numeric parameters in a coded case.
-    /// A parameter fixed at one value (`low == high`) cannot change, so it is
+    /// The numeric parameters that can change, `(coordinate, name, low,
+    /// high)`. A parameter fixed at one value (`low == high`) cannot, so it is
     /// left out.
-    fn numeric_coords(&self) -> Vec<usize> {
+    fn numeric_dims(&self) -> Vec<(usize, &str, f64, f64)> {
         let mut out = Vec::new();
         let mut at = 0;
         for dim in &self.dims {
-            if let Dim::Numeric { low, high, .. } = dim {
+            if let Dim::Numeric { name, low, high } = dim {
                 if high > low {
-                    out.push(at);
+                    out.push((at, name.as_str(), *low, *high));
                 }
             }
             at += dim.width();
         }
         out
+    }
+
+    /// The coordinates of the numeric parameters that can change.
+    fn numeric_coords(&self) -> Vec<usize> {
+        self.numeric_dims().into_iter().map(|(c, ..)| c).collect()
+    }
+
+    /// The label set in each categorical parameter of a coded case.
+    fn categories(&self, x: &[f64]) -> Vec<Option<usize>> {
+        self.categorical_blocks()
+            .into_iter()
+            .map(|(at, n)| (0..n).position(|i| x[at + i] > 0.0))
+            .collect()
     }
 
     /// `(first coordinate, number of labels)` of each categorical parameter.
@@ -716,11 +730,6 @@ fn jittered_cholesky(mut cov: DMatrix<f64>) -> DMatrix<f64> {
     })
 }
 
-fn rng_for(seed: &str) -> ChaCha8Rng {
-    let digest: [u8; 32] = Sha256::digest(seed.as_bytes()).into();
-    ChaCha8Rng::from_seed(digest)
-}
-
 /// A classifier, the space it codes cases in, and the observations it is fitted to.
 #[derive(Debug, Clone)]
 pub struct FlakinessModel {
@@ -892,28 +901,13 @@ fn unstable_first(a: &Metrics, b: &Metrics) -> std::cmp::Ordering {
 /// it, a batch piles into the conditions whose flaky band is widest.
 const SAME_CATEGORIES_DECAY: f64 = 0.7;
 
-/// The numeric parameters that can change: (coordinate, name, low, high).
-fn numeric_dims(space: &ParamSpace) -> Vec<(usize, String, f64, f64)> {
-    let mut out = Vec::new();
-    let mut offset = 0;
-    for dim in space.dims() {
-        if let Dim::Numeric { name, low, high } = dim {
-            if high > low {
-                out.push((offset, name.clone(), *low, *high));
-            }
-        }
-        offset += dim.width();
-    }
-    out
-}
-
 /// *x* moved along the numeric parameters onto the predicted boundary (a
 /// latent mean of 0) by a few Newton steps, or `None` when that does not
 /// bring it closer.
 fn to_boundary(
     classifier: &Classifier,
     x: &[f64],
-    numeric: &[(usize, String, f64, f64)],
+    numeric: &[(usize, &str, f64, f64)],
 ) -> Option<Vec<f64>> {
     const H: f64 = 1e-3;
     const MAX_STEP: f64 = 0.25;
@@ -921,8 +915,8 @@ fn to_boundary(
         return None;
     }
     let mut y = x.to_vec();
-    let start = classifier.latent_mean(&[y.clone()])[0].abs();
-    for _ in 0..4 {
+    let (mut start, mut end) = (None, f64::INFINITY);
+    for step in 0..=4 {
         let mut points = vec![y.clone()];
         for (coord, ..) in numeric {
             for d in [H, -H] {
@@ -932,24 +926,25 @@ fn to_boundary(
             }
         }
         let m = classifier.latent_mean(&points);
+        end = m[0].abs();
+        start.get_or_insert(end);
         let grad: Vec<f64> = (0..numeric.len())
             .map(|i| (m[1 + 2 * i] - m[2 + 2 * i]) / (2.0 * H))
             .collect();
         let norm2: f64 = grad.iter().map(|g| g * g).sum();
-        if norm2 < 1e-12 || m[0].abs() < 1e-3 {
+        if step == 4 || norm2 < 1e-12 || end < 1e-3 {
             break;
         }
-        let mut step: Vec<f64> = grad.iter().map(|g| -m[0] * g / norm2).collect();
-        let len = step.iter().map(|s| s * s).sum::<f64>().sqrt();
+        let mut delta: Vec<f64> = grad.iter().map(|g| -m[0] * g / norm2).collect();
+        let len = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
         if len > MAX_STEP {
-            step.iter_mut().for_each(|s| *s *= MAX_STEP / len);
+            delta.iter_mut().for_each(|d| *d *= MAX_STEP / len);
         }
-        for ((coord, ..), s) in numeric.iter().zip(&step) {
-            y[*coord] = (y[*coord] + s).clamp(0.0, 1.0);
+        for ((coord, ..), d) in numeric.iter().zip(&delta) {
+            y[*coord] = (y[*coord] + d).clamp(0.0, 1.0);
         }
     }
-    let end = classifier.latent_mean(&[y.clone()])[0].abs();
-    (end < start).then_some(y)
+    start.is_some_and(|s| end < s).then_some(y)
 }
 
 /// A point uniform in the ball of radius *epsilon* about *x*, in the numeric
@@ -1147,6 +1142,7 @@ pub fn search(
     let explore = if model.is_empty() {
         0
     } else {
+        sampler.find_unreachable();
         let holes = sampler.coverage_deficit(coverage_depth).min(count);
         ((count as f64 * explore_fraction).round() as usize).min(count - holes)
     };
@@ -1161,50 +1157,57 @@ pub fn search(
     // Candidates from a copy: drawing them plans nothing in the sampler.
     let mut drawer = sampler.clone();
     let wanted = (explore * pool.max(1)).min(4096);
-    let mut candidates: Vec<(Sample, Vec<f64>, Metrics)> = Vec::new();
+    let mut drawn: Vec<Sample> = Vec::new();
+    let mut failures = 0;
+    while drawn.len() < wanted && failures < wanted {
+        match drawer.draw(0, None) {
+            Ok(sample) => drawn.push(sample),
+            Err(_) => failures += 1,
+        }
+    }
+    // Each candidate also moved onto the predicted boundary, where the flaky
+    // band is: drawn candidates seldom land in a narrow one.
+    let moved: Vec<Sample> = {
+        let space = model.space().clone();
+        let numeric = space.numeric_dims();
+        let xs: Vec<Vec<f64>> = drawn
+            .iter()
+            .map(|s| space.encode(&s.values))
+            .collect::<Result<_>>()?;
+        let classifier = model.classifier()?;
+        drawn
+            .iter()
+            .zip(&xs)
+            .filter_map(|(sample, x)| {
+                let y = to_boundary(classifier, x, &numeric)?;
+                let changes: Vec<(String, f64)> = numeric
+                    .iter()
+                    .map(|(coord, name, low, high)| {
+                        (name.to_string(), low + y[*coord] * (high - low))
+                    })
+                    .collect();
+                sampler.moved(sample, &changes)
+            })
+            .collect()
+    };
     let (cheap_perturbations, cheap_draws) = (
         model.config.perturbations.min(16),
         model.config.draws.min(128),
     );
-    let mut failures = 0;
-    while candidates.len() < wanted && failures < wanted {
-        match drawer.draw(0, None) {
-            Ok(sample) => {
-                let x = model.space().encode(&sample.values)?;
-                let metrics = model.measure(&x, cheap_perturbations, cheap_draws, false)?;
-                candidates.push((sample, x, metrics));
-            }
-            Err(_) => failures += 1,
-        }
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for sample in drawn.into_iter().chain(moved) {
+        let x = model.space().encode(&sample.values)?;
+        let metrics = model.measure(&x, cheap_perturbations, cheap_draws, false)?;
+        let categories = model.space().categories(&x);
+        candidates.push(Candidate {
+            sample,
+            x,
+            metrics,
+            categories,
+        });
     }
-    {
-        // Each candidate also moved onto the predicted boundary, where the
-        // flaky band is: drawn candidates seldom land in a narrow one.
-        let numeric = numeric_dims(model.space());
-        let moved: Vec<(Sample, Vec<f64>)> = {
-            let classifier = model.classifier()?;
-            candidates
-                .iter()
-                .filter_map(|(sample, x, _)| {
-                    let y = to_boundary(classifier, x, &numeric)?;
-                    let changes: Vec<(String, f64)> = numeric
-                        .iter()
-                        .map(|(coord, name, low, high)| {
-                            (name.clone(), low + y[*coord] * (high - low))
-                        })
-                        .collect();
-                    let sample = sampler.moved(sample, &changes)?;
-                    Some((sample, y))
-                })
-                .collect()
-        };
-        for (sample, _) in moved {
-            let x = model.space().encode(&sample.values)?;
-            let metrics = model.measure(&x, cheap_perturbations, cheap_draws, false)?;
-            candidates.push((sample, x, metrics));
-        }
-    }
-    candidates.sort_by(|a, b| unstable_first(&a.2, &b.2));
+    candidates.sort_by(|a, b| unstable_first(&a.metrics, &b.metrics));
+
     let mut taken: Vec<Vec<f64>> = out
         .iter()
         .map(|(s, _)| model.space().encode(&s.values))
@@ -1220,60 +1223,58 @@ pub fn search(
                 >= epsilon
         })
     };
-    let decay = SAME_CATEGORIES_DECAY;
-    let numeric_coords = model.space().numeric_coords();
-    let cell = |x: &[f64]| -> Vec<u64> {
-        x.iter()
-            .enumerate()
-            .filter(|(i, _)| !numeric_coords.contains(i))
-            .map(|(_, v)| v.to_bits())
-            .collect()
-    };
-    let mut per_cell: std::collections::HashMap<Vec<u64>, i32> = std::collections::HashMap::new();
+    let mut per_categories: HashMap<&[Option<usize>], i32> = HashMap::new();
+    let mut used = vec![false; candidates.len()];
     let mut chosen: Vec<usize> = Vec::new();
     while chosen.len() < explore {
-        // The most unstable apart from those taken, a category combination
-        // already in the batch counting for less each time.
+        // The most unstable apart from those taken, a combination of
+        // categories already in the batch counting for less each time; the
+        // candidates are sorted, so a tie goes to the earlier.
         let best = candidates
             .iter()
             .enumerate()
-            .filter(|(i, (_, x, _))| !chosen.contains(i) && far(x, &taken))
-            .map(|(i, (_, x, m))| {
-                let n = *per_cell.get(&cell(x)).unwrap_or(&0);
-                (
-                    i,
-                    m.instability_confidence * decay.powi(n),
-                    m.flip_probability * decay.powi(n),
-                )
+            .filter(|(i, c)| !used[*i] && far(&c.x, &taken))
+            .map(|(i, c)| {
+                let weight = SAME_CATEGORIES_DECAY
+                    .powi(*per_categories.get(c.categories.as_slice()).unwrap_or(&0));
+                let scaled = Metrics {
+                    instability_confidence: c.metrics.instability_confidence * weight,
+                    flip_probability: c.metrics.flip_probability * weight,
+                    ..c.metrics
+                };
+                (i, scaled)
             })
-            .max_by(|a, b| {
-                a.1.total_cmp(&b.1)
-                    .then(a.2.total_cmp(&b.2))
-                    .then(b.0.cmp(&a.0))
-            });
-        let Some((i, ..)) = best else { break };
+            .min_by(|a, b| unstable_first(&a.1, &b.1).then(a.0.cmp(&b.0)));
+        let Some((i, _)) = best else { break };
+        used[i] = true;
         chosen.push(i);
-        taken.push(candidates[i].1.clone());
-        *per_cell.entry(cell(&candidates[i].1)).or_default() += 1;
+        taken.push(candidates[i].x.clone());
+        *per_categories
+            .entry(candidates[i].categories.as_slice())
+            .or_default() += 1;
     }
     // Not enough apart: the next most unstable, close or not.
-    for i in 0..candidates.len() {
-        if chosen.len() == explore {
-            break;
-        }
-        if !chosen.contains(&i) {
-            chosen.push(i);
-        }
-    }
+    let missing = explore - chosen.len();
+    chosen.extend((0..candidates.len()).filter(|i| !used[*i]).take(missing));
+
     let base = out.len();
     for (j, i) in chosen.into_iter().enumerate() {
-        let (mut sample, x, _) = candidates[i].clone();
+        let Candidate { mut sample, x, .. } = candidates[i].clone();
         sample.index = base + j;
         let metrics = model.metrics_at(&x)?;
         sampler.plan(&sample);
         out.push((sample, Some(metrics)));
     }
     Ok(out)
+}
+
+/// A case the search may explore: coded, scored, and its categories.
+#[derive(Clone)]
+struct Candidate {
+    sample: Sample,
+    x: Vec<f64>,
+    metrics: Metrics,
+    categories: Vec<Option<usize>>,
 }
 
 #[cfg(test)]

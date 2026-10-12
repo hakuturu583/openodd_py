@@ -193,8 +193,9 @@ pub struct Sampler {
     amount: HashMap<(String, String), f64>,
     situation_holes: Vec<String>,
     planned: HashMap<(String, String), i64>,
-    /// Buckets the knobs can set but no admitted case has: not holes to fill.
-    unreachable: HashSet<(String, String)>,
+    /// Buckets the knobs can set but no admitted case has, (axis, label
+    /// index): not holes to fill. Found on the first draw.
+    unreachable: Option<HashSet<(usize, usize)>>,
     /// What went wrong but did not stop the batch (a situation given up on).
     pub warnings: Vec<String>,
     /// Works out the attributes derived outside the core, if any.
@@ -210,7 +211,7 @@ impl std::fmt::Debug for Sampler {
     }
 }
 
-fn rng_for(seed: &str) -> ChaCha8Rng {
+pub(crate) fn rng_for(seed: &str) -> ChaCha8Rng {
     let digest: [u8; 32] = Sha256::digest(seed.as_bytes()).into();
     ChaCha8Rng::from_seed(digest)
 }
@@ -326,7 +327,7 @@ impl Sampler {
             amount: HashMap::new(),
             situation_holes: Vec::new(),
             planned: HashMap::new(),
-            unreachable: HashSet::new(),
+            unreachable: None,
             warnings: Vec::new(),
             derive: None,
         };
@@ -334,12 +335,7 @@ impl Sampler {
             sampler.read_coverage(coverage);
         }
         for s in drawn {
-            for (name, label) in &s.buckets {
-                *sampler
-                    .planned
-                    .entry((name.clone(), label.clone()))
-                    .or_default() += 1;
-            }
+            sampler.plan(s);
         }
         let aimed: HashSet<&String> = drawn.iter().filter_map(|s| s.situation.as_ref()).collect();
         sampler.situation_holes.retain(|s| !aimed.contains(s));
@@ -431,12 +427,7 @@ impl Sampler {
                 }
                 let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
                 for label in &axis.labels {
-                    let span = match axis.knob.values.get(label) {
-                        Some(KnobValue::Range(l, h)) => Some((*l, *h)),
-                        Some(KnobValue::Value(v)) => v.as_float().map(|x| (x, x)),
-                        None => interval(&axis.item, &axis.knob, label).map(|(l, h, _)| (l, h)),
-                    };
-                    if let Some((l, h)) = span {
+                    if let Some((l, h, _)) = knob_span(&axis.item, &axis.knob, label) {
                         low = low.min(l);
                         high = high.max(h);
                     }
@@ -466,58 +457,80 @@ impl Sampler {
     /// bucket is covered `depth` times, counting the coverage given and the
     /// cases planned. A case covers one bucket of each attribute, so this is
     /// what the attribute lacking most lacks. Always 0 with the uniform
-    /// strategy, which does not aim at the holes.
-    ///
-    /// A bucket the knobs can set but no admitted case has (the ODD rules out
-    /// every combination of it with what the other knobs can set) is not a
-    /// hole: it is tried once, given up on with a warning, and left out from
-    /// then on (see [`Sampler::unreachable`]).
-    pub fn coverage_deficit(&mut self, depth: usize) -> usize {
+    /// strategy, which does not aim at the holes. A bucket no admitted case
+    /// has is no hole (see [`Sampler::find_unreachable`]).
+    pub fn coverage_deficit(&self, depth: usize) -> usize {
         if self.strategy == Strategy::Uniform {
             return 0;
         }
-        let mut deficit = 0;
-        for axis in 0..self.axes.len() {
-            let attribute = self.axes[axis].attribute.clone();
-            let mut lacking = 0.0;
-            for label in self.axes[axis].labels.clone() {
-                let missing = (depth as f64 - self.load(&attribute, &label))
-                    .max(0.0)
-                    .ceil();
-                if missing == 0.0
-                    || self
-                        .unreachable
-                        .contains(&(attribute.clone(), label.clone()))
-                {
-                    continue;
-                }
-                if !self.reachable(axis, &label) {
-                    self.warnings.push(format!(
-                        "OddSampler: no case inside ODD {} has {attribute} in bucket {label} \
-                         that the knobs can set; not aiming at it",
-                        self.odd.name
-                    ));
-                    self.unreachable.insert((attribute.clone(), label));
-                    continue;
-                }
-                lacking += missing;
-            }
-            deficit = deficit.max(lacking as usize);
+        self.axes
+            .iter()
+            .enumerate()
+            .map(|(a, axis)| {
+                axis.labels
+                    .iter()
+                    .enumerate()
+                    .filter(|(l, _)| self.aimable(a, *l))
+                    .map(|(_, label)| {
+                        (depth as f64 - self.load(&axis.attribute, label))
+                            .max(0.0)
+                            .ceil()
+                    })
+                    .sum::<f64>() as usize
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// With the coverage strategy, find the buckets the knobs can set but no
+    /// admitted case has (the ODD rules out every combination of them with what
+    /// the other knobs can set), once: each is tried on a copy of the sampler,
+    /// so its random stream and plan are untouched. Those found are given up on
+    /// with a warning; the coverage strategy aims at them no more. Run by the
+    /// first draw.
+    pub fn find_unreachable(&mut self) {
+        if self.unreachable.is_some() {
+            return;
         }
-        deficit
+        let mut found = HashSet::new();
+        if self.strategy == Strategy::Coverage {
+            let mut probe = self.clone();
+            probe.unreachable = Some(HashSet::new());
+            for (a, axis) in self.axes.iter().enumerate() {
+                for (l, label) in axis.labels.iter().enumerate() {
+                    if probe.draw_with(0, None, Some((a, label))).is_err() {
+                        self.warnings.push(format!(
+                            "OddSampler: no case inside ODD {} has {} in bucket {label} \
+                             that the knobs can set; not aiming at it",
+                            self.odd.name, axis.attribute
+                        ));
+                        found.insert((a, l));
+                    }
+                }
+            }
+        }
+        self.unreachable = Some(found);
     }
 
-    /// The buckets given up on as holes, (attribute, bucket), sorted.
+    /// The buckets given up on as holes, (attribute, bucket), in axis order.
     pub fn unreachable(&self) -> Vec<(String, String)> {
-        let mut out: Vec<_> = self.unreachable.iter().cloned().collect();
-        out.sort();
-        out
+        let mut found: Vec<&(usize, usize)> = self.unreachable.iter().flatten().collect();
+        found.sort();
+        found
+            .into_iter()
+            .map(|(a, l)| {
+                (
+                    self.axes[*a].attribute.clone(),
+                    self.axes[*a].labels[*l].clone(),
+                )
+            })
+            .collect()
     }
 
-    /// Whether a case can be drawn with *label* for the axis: tried on a copy,
-    /// so the sampler's random stream and plan are untouched.
-    fn reachable(&self, axis: usize, label: &str) -> bool {
-        self.clone().draw_with(0, None, Some((axis, label))).is_ok()
+    fn aimable(&self, axis: usize, label: usize) -> bool {
+        self.unreachable
+            .as_ref()
+            .is_none_or(|u| !u.contains(&(axis, label)))
     }
 
     /// The situations still uncovered, which the first cases are aimed at.
@@ -533,31 +546,25 @@ impl Sampler {
 
     fn pick(&mut self, axis: usize, least: bool) -> String {
         let labels = self.axes[axis].labels.clone();
-        let attribute = self.axes[axis].attribute.clone();
         if self.strategy == Strategy::Uniform {
             return labels[self.rng.gen_range(0..labels.len())].clone();
         }
+        let attribute = self.axes[axis].attribute.clone();
         let loads: Vec<f64> = labels.iter().map(|l| self.load(&attribute, l)).collect();
         if least {
-            // A bucket given up on is no hole to aim at.
-            let aimable: Vec<bool> = labels
-                .iter()
-                .map(|l| !self.unreachable.contains(&(attribute.clone(), l.clone())))
+            // A bucket given up on is no hole to aim at, unless all are.
+            let mut eligible: Vec<usize> = (0..labels.len())
+                .filter(|l| self.aimable(axis, *l))
                 .collect();
-            let any = aimable.iter().any(|a| *a);
-            let lowest = loads
+            if eligible.is_empty() {
+                eligible = (0..labels.len()).collect();
+            }
+            let lowest = eligible
                 .iter()
-                .zip(&aimable)
-                .filter(|(_, a)| **a || !any)
-                .map(|(l, _)| *l)
+                .map(|l| loads[*l])
                 .fold(f64::INFINITY, f64::min);
-            let candidates: Vec<&String> = labels
-                .iter()
-                .zip(loads.iter().zip(&aimable))
-                .filter(|(_, (l, a))| **l == lowest && (**a || !any))
-                .map(|(b, _)| b)
-                .collect();
-            return candidates[self.rng.gen_range(0..candidates.len())].clone();
+            eligible.retain(|l| loads[*l] == lowest);
+            return labels[eligible[self.rng.gen_range(0..eligible.len())]].clone();
         }
         // The least loaded did not combine into an admitted case: any bucket,
         // the less loaded the likelier.
@@ -636,40 +643,11 @@ impl Sampler {
                 None => None,
             };
         }
-        let (low, high, closed) = match given {
-            Some(KnobValue::Range(l, h)) => (l, h, true),
-            Some(KnobValue::Value(v)) => {
-                let x = v.as_float()?;
-                (x, x, true)
-            }
-            None => interval(&item, &knob, label)?,
-        };
+        let (low, high, closed) = knob_span(&item, &knob, label)?;
         let Value::Float(drawn) = self.uniform(low, high, closed, false)? else {
             return None;
         };
-        if !drawn.is_finite() {
-            return None;
-        }
-        let mut written = Value::Float(drawn * knob.scale + knob.offset);
-        if knob.integer {
-            let Value::Float(w) = written else {
-                unreachable!()
-            };
-            written = Value::Int(w.round_ties_even() as i64);
-        }
-        if let Some((l0, l1)) = knob.limits {
-            let w = written.as_float()?;
-            if !(l0 <= w && w <= l1) {
-                return None;
-            }
-        }
-        // What a run reads back, which must still be in the bucket drawn.
-        let back = crate::value::parse_float(&render(&written))?;
-        let value = (back - knob.offset) / knob.scale;
-        if !value.is_finite() || item.bucket_of(&Value::Float(value)).ok()? != label {
-            return None;
-        }
-        Some((Value::Float(value), written))
+        set_value(&item, &knob, label, drawn)
     }
 
     /// *sample* with numeric attributes moved to new values, if the knobs can
@@ -678,62 +656,48 @@ impl Sampler {
     pub fn moved(&self, sample: &Sample, changes: &[(String, f64)]) -> Option<Sample> {
         let mut out = sample.clone();
         for (attribute, target) in changes {
-            let axis = self.axes.iter().position(|a| &a.attribute == attribute)?;
             let Axis {
                 item, knob, labels, ..
-            } = &self.axes[axis];
+            } = self.axes.iter().find(|a| &a.attribute == attribute)?;
             let label = item.bucket_of(&Value::Float(*target)).ok()?;
             if !item.numeric() || !labels.contains(&label) {
                 return None;
             }
-            match knob.values.get(&label) {
-                Some(KnobValue::Range(l, h)) if !(*l <= *target && *target <= *h) => return None,
-                Some(KnobValue::Value(_)) => return None,
-                None => {
-                    let (l, h, _) = interval(item, knob, &label)?;
-                    if !(l <= *target && *target <= h) {
-                        return None;
-                    }
-                }
-                _ => {}
-            }
-            let mut written = Value::Float(target * knob.scale + knob.offset);
-            if knob.integer {
-                written = Value::Int(written.as_float()?.round_ties_even() as i64);
-            }
-            if let Some((l0, l1)) = knob.limits {
-                let w = written.as_float()?;
-                if !(l0 <= w && w <= l1) {
-                    return None;
-                }
-            }
-            let back = crate::value::parse_float(&render(&written))?;
-            let value = (back - knob.offset) / knob.scale;
-            if !value.is_finite() || item.bucket_of(&Value::Float(value)).ok()? != label {
+            let (low, high, _) = knob_span(item, knob, &label)?;
+            if !(low <= *target && *target <= high) {
                 return None;
             }
-            out.values.insert(attribute.clone(), Value::Float(value));
+            let (value, written) = set_value(item, knob, &label, *target)?;
+            out.values.insert(attribute.clone(), value);
             out.buckets.insert(attribute.clone(), label);
             let prefix = format!("{}=", knob.key);
             let entry = out.overrides.iter_mut().find(|o| o.starts_with(&prefix))?;
             *entry = format!("{prefix}{}", render(&written));
         }
-        let mut as_values: Values = self
+        self.admits_values(&out.values, out.situation.as_deref(), true)
+            .then_some(out)
+    }
+
+    /// Whether the ODD admits *values* (the rest of its attributes open).
+    fn admits_values(
+        &self,
+        values: &IndexMap<String, Value>,
+        situation: Option<&str>,
+        strict: bool,
+    ) -> bool {
+        let mut all: Values = self
             .odd
             .attributes
             .iter()
             .map(|a| (a.name.clone(), Value::Open))
             .collect();
-        as_values.extend(out.values.iter().map(|(k, v)| (k.clone(), v.clone())));
-        let situation = out.situation.clone();
-        if !self.admits(&mut as_values, situation.as_deref(), true) {
-            return None;
-        }
-        Some(out)
+        all.extend(values.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.admits(&mut all, situation, strict)
     }
 
     /// Draw one case; `situation`, if given, is a module the case aims at.
     pub fn draw(&mut self, index: usize, situation: Option<&str>) -> Result<Sample> {
+        self.find_unreachable();
         self.draw_with(index, situation, None)
     }
 
@@ -755,22 +719,20 @@ impl Sampler {
                     (self.axes[i].attribute.clone(), label)
                 })
                 .collect();
-            let mut as_buckets: Values = self
-                .odd
-                .attributes
+            let as_buckets: IndexMap<String, Value> = self
+                .axes
                 .iter()
-                .map(|a| (a.name.clone(), Value::Open))
+                .map(|axis| {
+                    let i = axis
+                        .item
+                        .labels
+                        .iter()
+                        .position(|l| *l == buckets[&axis.attribute])
+                        .expect("a label");
+                    (axis.attribute.clone(), Value::Bucket(i))
+                })
                 .collect();
-            for axis in &self.axes {
-                let i = axis
-                    .item
-                    .labels
-                    .iter()
-                    .position(|l| *l == buckets[&axis.attribute])
-                    .expect("a label");
-                as_buckets.insert(axis.attribute.clone(), Value::Bucket(i));
-            }
-            if !self.admits(&mut as_buckets, situation, false) {
+            if !self.admits_values(&as_buckets, situation, false) {
                 continue;
             }
             let mut values = IndexMap::new();
@@ -792,29 +754,18 @@ impl Sampler {
             if !complete {
                 continue;
             }
-            let mut as_values: Values = self
-                .odd
-                .attributes
-                .iter()
-                .map(|a| (a.name.clone(), Value::Open))
-                .collect();
-            as_values.extend(values.iter().map(|(k, v)| (k.clone(), v.clone())));
-            if !self.admits(&mut as_values, situation, true) {
+            if !self.admits_values(&values, situation, true) {
                 continue;
             }
-            for (name, label) in &buckets {
-                *self
-                    .planned
-                    .entry((name.clone(), label.clone()))
-                    .or_default() += 1;
-            }
-            return Ok(Sample {
+            let sample = Sample {
                 index,
                 overrides,
                 buckets,
                 values,
                 situation: situation.map(String::from),
-            });
+            };
+            self.plan(&sample);
+            return Ok(sample);
         }
         let aim = situation
             .map(|s| format!(" aimed at situation {s}"))
@@ -852,6 +803,41 @@ impl Sampler {
         }
         Ok(cases)
     }
+}
+
+/// (low, high, closed): what the knob can set in a numeric bucket.
+fn knob_span(item: &CoverItem, knob: &Knob, label: &str) -> Option<(f64, f64, bool)> {
+    match knob.values.get(label) {
+        Some(KnobValue::Range(l, h)) => Some((*l, *h, true)),
+        Some(KnobValue::Value(v)) => v.as_float().map(|x| (x, x, true)),
+        None => interval(item, knob, label),
+    }
+}
+
+/// (value, written): *target*, a value of a numeric attribute in *label*, as
+/// the knob writes it and a run reads it back -- `None` when the knob cannot
+/// write it or what is read back leaves the bucket.
+fn set_value(item: &CoverItem, knob: &Knob, label: &str, target: f64) -> Option<(Value, Value)> {
+    if !target.is_finite() {
+        return None;
+    }
+    let mut written = Value::Float(target * knob.scale + knob.offset);
+    if knob.integer {
+        written = Value::Int(written.as_float()?.round_ties_even() as i64);
+    }
+    if let Some((l0, l1)) = knob.limits {
+        let w = written.as_float()?;
+        if !(l0 <= w && w <= l1) {
+            return None;
+        }
+    }
+    // What a run reads back, which must still be in the bucket.
+    let back = crate::value::parse_float(&render(&written))?;
+    let value = (back - knob.offset) / knob.scale;
+    if !value.is_finite() || item.bucket_of(&Value::Float(value)).ok()? != label {
+        return None;
+    }
+    Some((Value::Float(value), written))
 }
 
 fn drawable(item: &CoverItem, knob: &Knob, label: &str) -> bool {

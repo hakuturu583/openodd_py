@@ -132,10 +132,10 @@ instability and the rest with the sampler's own policy, the holes first:
    uniform strategy has no holes to fill.
 
    A bucket the knobs can set may still be in no case the ODD admits: heavy rain
-   ruled out by day, on a simulator that cannot make the night. Each hole is tried
-   once (a case drawn with that bucket, on a copy of the sampler); one that cannot be
-   drawn is given up on with a warning, listed in `OddSampler.unreachable`, and is
-   neither counted nor aimed at again. It shows where the ODD asks for more than the
+   ruled out by day, on a simulator that cannot make the night. On its first draw, a
+   sampler with the coverage strategy tries each bucket once (a case drawn with that
+   bucket, on a copy of the sampler); one that cannot be drawn is given up on with a
+   warning, listed in `OddSampler.unreachable`, and is neither counted nor aimed at. It shows where the ODD asks for more than the
    test bench can bring about.
 2. **Candidates**: `pool` candidates per explored case (16) are drawn from the ODD by a
    copy of the sampler. They are combinations the ODD admits, set by the same knobs, and

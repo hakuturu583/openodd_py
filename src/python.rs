@@ -109,12 +109,13 @@ fn from_value(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
     })
 }
 
-fn to_values(values: &Bound<'_, PyDict>) -> PyResult<model::Values> {
-    let mut out = HashMap::with_capacity(values.len());
-    for (k, v) in values.iter() {
-        out.insert(k.str()?.to_string(), to_value(&v)?);
-    }
-    Ok(out)
+/// A dict of attribute values, into any map (insertion order kept by an
+/// `IndexMap`).
+fn to_values<M: FromIterator<(String, Value)>>(values: &Bound<'_, PyDict>) -> PyResult<M> {
+    values
+        .iter()
+        .map(|(k, v)| Ok((k.str()?.to_string(), to_value(&v)?)))
+        .collect()
 }
 
 fn truth_obj(py: Python<'_>, t: Truth) -> PyResult<PyObject> {
@@ -1621,14 +1622,6 @@ impl Sampler {
 // Flaky cases
 // ---------------------------------------------------------------------------
 
-fn ordered_values(values: &Bound<'_, PyDict>) -> PyResult<indexmap::IndexMap<String, Value>> {
-    let mut out = indexmap::IndexMap::with_capacity(values.len());
-    for (k, v) in values.iter() {
-        out.insert(k.str()?.to_string(), to_value(&v)?);
-    }
-    Ok(out)
-}
-
 type MetricsTuple = (f64, f64, f64, Option<f64>);
 
 fn metrics_tuple(m: crate::flaky::Metrics) -> MetricsTuple {
@@ -1694,7 +1687,9 @@ impl ParamSpace {
             .collect()
     }
     fn encode(&self, values: &Bound<'_, PyDict>) -> PyResult<Vec<f64>> {
-        self.inner.encode(&ordered_values(values)?).map_err(err)
+        self.inner
+            .encode(&to_values::<indexmap::IndexMap<String, Value>>(values)?)
+            .map_err(err)
     }
 }
 
@@ -1729,23 +1724,17 @@ impl FlakinessModel {
                 .map_err(err)?,
         })
     }
-    #[getter]
-    fn space(&self) -> ParamSpace {
-        ParamSpace {
-            inner: self.inner.space().clone(),
-        }
-    }
-    fn __len__(&self) -> usize {
-        self.inner.len()
-    }
     fn observe(&mut self, values: &Bound<'_, PyDict>, passed: bool) -> PyResult<()> {
         self.inner
-            .observe(&ordered_values(values)?, passed)
+            .observe(
+                &to_values::<indexmap::IndexMap<String, Value>>(values)?,
+                passed,
+            )
             .map_err(err)
     }
     fn metrics(&mut self, values: &Bound<'_, PyDict>) -> PyResult<MetricsTuple> {
         self.inner
-            .metrics(&ordered_values(values)?)
+            .metrics(&to_values::<indexmap::IndexMap<String, Value>>(values)?)
             .map(metrics_tuple)
             .map_err(err)
     }
