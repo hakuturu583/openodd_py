@@ -16,7 +16,10 @@ What measures the attributes -- a simulator, a recorded log -- is the
 application's :class:`Backend`.
 """
 
+from importlib import metadata as _metadata
+
 from ._core import GitSourceError, OpenOddError, UnitError, Units, convert, normalize_unit
+from .cells import MISSING, OddCells
 from .backend import Backend, Probe, default_backend, import_callable, set_default_backend
 from .items import (
     ABOVE_RANGE,
@@ -67,10 +70,18 @@ from .model import (
     read_probe,
 )
 
+try:
+    __version__: str = _metadata.version("openodd-py")
+except _metadata.PackageNotFoundError:  # a source tree, not installed
+    __version__ = "0+unknown"
+
 __all__ = [
     "CROSS_SEPARATOR",
     "CodExport",
     "CoverageCollector",
+    "MISSING",
+    "OddCells",
+    "__version__",
     "export_cod",
     "export_cods",
     "COVERAGE_SCHEMA",

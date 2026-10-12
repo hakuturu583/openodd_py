@@ -10,7 +10,15 @@ expression that returns ``None`` has nothing to say and is not a sample either.
 
 With an ODD, every step also samples the ODD's attributes, once each
 (:meth:`OddDefinition.sample`). Those values fill the ODD's cover items and
-decide whether the step was inside the ODD.
+decide whether the step was inside the ODD, and the step (its seconds and the
+ego's metres) is counted in its *cell* -- one bucket of each attribute
+(:class:`~.cells.OddCells`) -- so the run can be sliced by any attributes
+later. An ODD read from files is written beside the coverage file as its
+transmission archive (``<name>_odd.tar.gz``).
+
+Every coverage file says what wrote it (``generator``: this library's
+version, and whatever the backend adds), so files from different versions
+can be told apart.
 
 What only the backend knows it asks the :class:`~.backend.Backend`: where the
 ego is (:meth:`~.backend.Backend.position`, in metres, for the distance a
@@ -34,9 +42,11 @@ import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
 from .backend import Backend, default_backend
+from .cells import OddCells
 
 from .items import (
     ABOVE_RANGE,
@@ -55,9 +65,26 @@ from .report import COVERAGE_SCHEMA
 if TYPE_CHECKING:
     from .model import OddDefinition, OddVerdict
 
-__all__ = ["COVERAGE_SCHEMA", "CoverageCollector", "CROSS_SEPARATOR"]
+__all__ = [
+    "COVERAGE_SCHEMA",
+    "CROSS_SEPARATOR",
+    "ODD_ARCHIVE_SUFFIX",
+    "CoverageCollector",
+    "generator",
+]
 
 logger = logging.getLogger(__name__)
+
+#: Beside a run's coverage file, the transmission archive of its ODD.
+ODD_ARCHIVE_SUFFIX = "_odd.tar.gz"
+
+
+def generator(extra: Optional[Mapping[str, Optional[str]]] = None) -> dict[str, Optional[str]]:
+    """What writes a coverage file: this library's version, then *extra*."""
+    from . import __version__  # noqa: PLC0415 - the package imports this module
+
+    return {"openodd": __version__, **dict(extra or {})}
+
 
 #: Joins the bucket labels of a cross-coverage cell.
 CROSS_SEPARATOR = " / "
@@ -139,6 +166,22 @@ class _OddMonitor:
         self.out_intervals: list[list[float]] = []
         #: Whether the excursion going on is the last interval listed.
         self._recording = False
+        #: Steps, seconds and metres per combination of the attributes'
+        #: buckets (``odd.cells``).
+        self.cells = OddCells(odd)
+        self._cell_failed = False
+
+    def count(self, values: dict[str, Any], seconds: float, meters: float) -> None:
+        """Count one step in its cell (best effort, logged once)."""
+        try:
+            self.cells.add([values.get(a.name) for a in self.odd.attributes], seconds, meters)
+        except Exception:
+            if not self._cell_failed:
+                self._cell_failed = True
+                logger.warning(
+                    "coverage: could not count a step in the ODD's cells (logged once)",
+                    exc_info=True,
+                )
 
     def record(
         self,
@@ -195,6 +238,7 @@ class _OddMonitor:
                 "attributes": [_attribute_meta(a) for a in self.odd.attributes],
                 "rows": self.rows,
             },
+            "cells": self.cells.to_dict(),
         }
 
 
@@ -351,14 +395,17 @@ class CoverageCollector:
         odd: Optional["OddDefinition"] = None,
         *,
         backend: Optional[Backend] = None,
+        generator: Optional[Mapping[str, Optional[str]]] = None,
     ) -> None:
         """Collect *items* and *crosses*, and the attributes of *odd* if given.
 
         With an *odd*, its attributes' cover items come first, and every step
         is also judged inside or outside it. *backend* says where the ego is
-        (the default backend if none).
+        (the default backend if none). *generator* names, besides this
+        library, what wrote the file (an application and its version).
         """
         self._backend = backend or default_backend()
+        self._generator = dict(generator or {})
         self._odd = _OddMonitor(odd) if odd is not None else None
         # ODD item -> the attribute whose sampled value fills it.
         self._odd_items: dict[str, str] = {}
@@ -431,6 +478,8 @@ class CoverageCollector:
             for item, module in self._situation_items.items():
                 values[item] = _situation_value(verdict.modules.get(module))
         step = self._step(context, elapsed)
+        if self._odd is not None:
+            self._odd.count(attributes, step.seconds, step.meters)
         self._sample_event(context, SamplingEvent.TICK, values, step)
         for key, entry in self._conditions.items():
             condition, was_satisfied = entry
@@ -458,6 +507,7 @@ class CoverageCollector:
         """One run's coverage, in the coverage-file format."""
         return {
             "schema": COVERAGE_SCHEMA,
+            "generator": generator(self._generator),
             "scenario": scenario,
             "items": [e.to_dict() for e in self._items],
             "crosses": [c.to_dict() for c in self._crosses],
@@ -465,7 +515,12 @@ class CoverageCollector:
         }
 
     def write(self, path: Path, scenario: str) -> None:
-        """Write the coverage file; a failure is logged, never raised."""
+        """Write the coverage file; a failure is logged, never raised.
+
+        An ODD read from files is written beside it too, as its transmission
+        archive (``<name>_odd.tar.gz``, :meth:`OddDefinition.archive`): the
+        exact files the run was measured against, by their revision.
+        """
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
@@ -473,6 +528,15 @@ class CoverageCollector:
             )
         except Exception:
             logger.warning("coverage: could not write %s", path, exc_info=True)
+        if self._odd is None:
+            return
+        try:
+            archive = self._odd.odd.archive()
+            if archive is not None:
+                stem = path.name.removesuffix(".json").removesuffix("_coverage")
+                (path.parent / f"{stem}{ODD_ARCHIVE_SUFFIX}").write_bytes(archive)
+        except Exception:
+            logger.warning("coverage: could not write the ODD's archive", exc_info=True)
 
     # ------------------------------------------------------------------
 

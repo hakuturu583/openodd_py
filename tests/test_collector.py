@@ -325,3 +325,40 @@ class TestOdd:
         collector.tick(SimpleNamespace(speed=10, hidden=1), 0.5)
         rows = collector.to_dict("S")["odd"]["samples"]["rows"]
         assert rows == [[0.5, 35.6, 139.7, 10, 1]]
+
+    def test_each_tick_is_counted_in_its_cell(self) -> None:
+        collector = CoverageCollector([], odd=_speed_odd(), backend=_Positioned())
+        collector.start(SimpleNamespace(speed=0, hidden=1, x=0.0), 0.0)
+        for t, (speed, x) in enumerate([(10, 5.0), (10, 10.0), (40, 20.0)], start=1):
+            collector.tick(SimpleNamespace(speed=speed, hidden=1, x=x), float(t))
+        cells = collector.to_dict("S")["odd"]["cells"]
+        assert cells["attributes"] == ["speed"]
+        assert cells["rows"] == [[["[0, 30)"], 2, 2.0, 10.0], [["[30, 60)"], 1, 1.0, 10.0]]
+
+    def test_the_file_says_what_wrote_it(self) -> None:
+        import openodd
+
+        collector = CoverageCollector([], generator={"framework": "app==1.0"})
+        assert collector.to_dict("S")["generator"] == {
+            "openodd": openodd.__version__,
+            "framework": "app==1.0",
+        }
+
+    def test_an_odd_read_from_files_is_archived_beside_the_coverage(self, tmp_path: Path) -> None:
+        import openodd
+
+        odd = openodd.load_openodd(
+            "TAXONOMY:\n  speed: float velocity\n", name="o",
+            bindings={"speed": {"probe": "pkg:none", "buckets": [0, 50]}},
+            backend=Backend(probes={"pkg:none": (lambda c: c.speed, "km/h")}, allow_imports=False),
+        )
+        collector = CoverageCollector([], odd=odd)
+        collector.tick(SimpleNamespace(speed=10), 0.1)
+        collector.write(tmp_path / "S_coverage.json", "S")
+        archive = (tmp_path / "S_odd.tar.gz").read_bytes()
+        assert openodd.load_odd_archive(archive).revision == odd.revision
+
+    def test_an_odd_built_in_code_has_no_archive(self, tmp_path: Path) -> None:
+        collector = CoverageCollector([], odd=_speed_odd())
+        collector.write(tmp_path / "S_coverage.json", "S")
+        assert not (tmp_path / "S_odd.tar.gz").exists()

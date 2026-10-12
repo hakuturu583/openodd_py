@@ -46,6 +46,26 @@ collector.end(context, 0.05)
 collector.write(Path("run_coverage.json"), "my_scenario")
 ```
 
+### Coverage
+
+A coverage document records, besides each item's buckets, how a run spent its
+time across the ODD's buckets: `OddCells` adds up steps, seconds and metres per
+*cell* -- one bucket of each attribute, as its cover item buckets it -- so a
+consumer can slice runs by any attributes without the per-step values:
+
+```python
+cells = openodd.OddCells(odd)
+cells.add(values, seconds=dt, meters=ds)   # every step: each attribute's value
+cells.to_dict()
+# {"attributes": ["speed", "rain"], "rows": [[["[30, 60]", "heavy"], 812, 40.6, 588.2], ...]}
+```
+
+A missing value is `<missing>`, a number outside the buckets `<below>` / `<above>`.
+Each item's definition (`describe()`) names the measure its coverage is read from
+(`amount`: `hits`, `counted.seconds`, ...) and, for an ODD attribute's item, the
+attribute (`attribute`). `openodd.__version__` is the installed version, for
+coverage files to say what wrote them.
+
 ## Development
 
 ```bash
