@@ -158,6 +158,60 @@ instability and the rest with the sampler's own policy, the holes first:
 Before any run is observed there is nothing to learn from, so the whole batch is the
 sampler's.
 
+## Recording the runs
+
+What the search computes is written into each run's coverage file, so that the
+report can be read back after the campaign and the next campaign can start from it:
+
+```python
+for case in search.sample(20):
+    collector = openodd.CoverageCollector(items, odd=odd)
+    collector.record_case(case, space=search.space)   # values, why chosen, predicted flakiness
+    passed = run(case.overrides, collector)
+    collector.record_outcome(passed)
+    collector.write(out / f"{name}_coverage.json", name)
+    search.observe(case, passed)
+```
+
+The coverage file gains two entries, both `null` when nothing was recorded:
+
+```json
+"case": {
+  "index": 3, "situation": null,
+  "values": {"environment.rain": "heavy", "dynamic.vehicle_ahead_gap": 21.4},
+  "buckets": {...}, "overrides": [...],
+  "chosen_for": "instability",
+  "flaky": {"pass_probability": 0.48, "flip_probability": 0.31,
+            "instability_confidence": 0.94, "robustness_radius": 0.03},
+  "space": [{"name": "environment.rain", "labels": ["none", "light", "heavy"]},
+            {"name": "dynamic.vehicle_ahead_gap", "range": [5.0, 60.0]}]
+},
+"outcome": {"passed": false}
+```
+
+`chosen_for` is `instability` for a case the search chose (its `flaky` is the
+prediction made then) and `coverage` for one the sampler's own policy drew.
+
+**The merged report** (`merge_coverage`, `openodd-coverage`) keeps every such run
+(`CoverageReport.cases`, a `CaseRun` each). It refits the flakiness of each run over
+all the runs of its scenario that were chosen in the same space and recorded an
+outcome (`CaseRun.assessed`), with the model's defaults. Its Markdown gains a
+**Flaky cases** section: how many runs were chosen for instability and by the
+sampler's policy, how many of each failed, how many are flaky as assessed
+(`instability_confidence` above 0.5), and the runs flakiest first, with their
+predicted and assessed flakiness side by side (at most 20 rows).
+
+**The next campaign** starts from them:
+
+```python
+report = openodd.load_and_merge([previous_results])
+search = openodd.FlakySearch(sampler)
+search.observe_report(report, scenario="cut_in")   # the runs chosen in this space
+```
+
+Only runs with an outcome, chosen in the same space (the same parameters, ranges
+and labels), are observed.
+
 ## Cost
 
 Fitting is `O(n³)` in the runs observed, repeated for each step of the length-scale

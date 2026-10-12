@@ -48,6 +48,7 @@ from .cod import CodExport, export_cod, export_cods
 from .collector import CROSS_SEPARATOR, CoverageCollector
 from .report import (
     COVERAGE_SCHEMA,
+    CaseRun,
     CoverageReport,
     MergedEntry,
     find_coverage_files,
@@ -90,6 +91,7 @@ __all__ = [
     "export_cod",
     "export_cods",
     "COVERAGE_SCHEMA",
+    "CaseRun",
     "CoverageReport",
     "MergedEntry",
     "OddDraws",

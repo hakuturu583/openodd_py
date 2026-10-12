@@ -17,6 +17,11 @@
 //! Besides hits, a merged bucket counts the runs that hit it, and sums its
 //! exposure: seconds spent in it, metres driven in it, times it was entered.
 //! A file from before exposure was recorded leaves those unknown for the item.
+//!
+//! A run that recorded the case it ran (its values, and the flakiness a flaky
+//! search predicted when it chose it) and its outcome is kept as a
+//! [`CaseRun`]; `crate::flaky::assess` refits the flakiness of every such
+//! run over all the runs of its scenario.
 
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value as Json};
@@ -350,7 +355,117 @@ pub struct CoverageReport {
     pub entries: Vec<MergedEntry>,
     /// ODD name -> how the runs measured against it fared.
     pub odds: IndexMap<String, OddExposure>,
+    /// The runs that recorded the case they ran, in the order merged.
+    pub cases: Vec<CaseRun>,
 }
+
+/// How flaky a case is (see `crate::flaky::Metrics`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flakiness {
+    pub pass_probability: f64,
+    pub flip_probability: f64,
+    pub instability_confidence: f64,
+    pub robustness_radius: Option<f64>,
+}
+
+impl Flakiness {
+    pub fn to_json(&self) -> Json {
+        json!({
+            "pass_probability": self.pass_probability,
+            "flip_probability": self.flip_probability,
+            "instability_confidence": self.instability_confidence,
+            "robustness_radius": self.robustness_radius,
+        })
+    }
+
+    fn from_json(raw: &Json) -> Option<Self> {
+        let get = |k: &str| raw.get(k).and_then(Json::as_f64);
+        Some(Flakiness {
+            pass_probability: get("pass_probability")?,
+            flip_probability: get("flip_probability")?,
+            instability_confidence: get("instability_confidence")?,
+            robustness_radius: get("robustness_radius"),
+        })
+    }
+}
+
+/// A run that recorded the case it ran: what the coverage file's `case` and
+/// `outcome` hold.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseRun {
+    /// The coverage file's index in the merge.
+    pub document: usize,
+    pub scenario: String,
+    /// Parameter -> its value (a JSON number, string or bool).
+    pub values: Map<String, Json>,
+    /// Parameter -> the bucket drawn for it.
+    pub buckets: Map<String, Json>,
+    /// `instability` (a flaky search chose it) or `coverage` (the sampler's
+    /// own policy did).
+    pub chosen_for: String,
+    /// The flakiness predicted when the case was chosen for its instability.
+    pub predicted: Option<Flakiness>,
+    /// The normalized space the case was chosen in, as written.
+    pub space: Option<Json>,
+    pub passed: Option<bool>,
+    /// What all the runs of its scenario and space say of it, once assessed.
+    pub assessed: Option<Flakiness>,
+}
+
+impl CaseRun {
+    fn read(document: usize, scenario: &str, doc: &Json) -> Option<Self> {
+        let case = doc.get("case").filter(|c| c.is_object())?;
+        let map = |k: &str| {
+            case.get(k)
+                .and_then(Json::as_object)
+                .cloned()
+                .unwrap_or_default()
+        };
+        Some(CaseRun {
+            document,
+            scenario: scenario.to_string(),
+            values: map("values"),
+            buckets: map("buckets"),
+            chosen_for: case
+                .get("chosen_for")
+                .and_then(Json::as_str)
+                .unwrap_or("coverage")
+                .to_string(),
+            predicted: case.get("flaky").and_then(Flakiness::from_json),
+            space: case.get("space").filter(|s| s.is_array()).cloned(),
+            passed: doc
+                .get("outcome")
+                .and_then(|o| o.get("passed"))
+                .and_then(Json::as_bool),
+            assessed: None,
+        })
+    }
+
+    /// Its flakiness, as assessed if it was, else as predicted.
+    pub fn flakiness(&self) -> Option<Flakiness> {
+        self.assessed.or(self.predicted)
+    }
+
+    pub fn to_json(&self) -> Json {
+        json!({
+            "document": self.document,
+            "scenario": self.scenario,
+            "values": self.values,
+            "buckets": self.buckets,
+            "chosen_for": self.chosen_for,
+            "predicted": self.predicted.map(|f| f.to_json()),
+            "space": self.space,
+            "passed": self.passed,
+            "assessed": self.assessed.map(|f| f.to_json()),
+        })
+    }
+}
+
+/// The most runs the "Flaky cases" section of the Markdown report lists.
+pub const MAX_CASE_ROWS: usize = 20;
+
+/// Above this instability confidence, a case counts as flaky in the report.
+pub const FLAKY_CONFIDENCE: f64 = 0.5;
 
 const GROUP_ORDER: [&str; 3] = ["odd", "situation", "scenario"];
 
@@ -394,6 +509,7 @@ impl CoverageReport {
             "runs": self.runs,
             "scenarios": self.scenarios,
             "odds": self.odds.iter().map(|(k, v)| (k.clone(), v.to_json())).collect::<Map<_, _>>(),
+            "cases": self.cases.iter().map(CaseRun::to_json).collect::<Vec<_>>(),
             "groups": self.groups().iter().map(|g| (g.clone(), json!({
                 "grade": self.group_grade(g),
                 "entries": self.entries.iter().filter(|e| &e.group == g).map(MergedEntry::to_json).collect::<Vec<_>>(),
@@ -550,8 +666,108 @@ impl CoverageReport {
                 }
             }
         }
+        lines.extend(cases_markdown(&self.cases, MAX_CASE_ROWS));
         lines.join("\n") + "\n"
     }
+}
+
+/// The "Flaky cases" section: the runs that recorded their case, flakiest
+/// first (at most *max_rows*).
+fn cases_markdown(cases: &[CaseRun], max_rows: usize) -> Vec<String> {
+    if cases.is_empty() {
+        return Vec::new();
+    }
+    let failed = |chosen_for: &str| {
+        let runs: Vec<&CaseRun> = cases
+            .iter()
+            .filter(|c| c.chosen_for == chosen_for)
+            .collect();
+        let failed = runs.iter().filter(|c| c.passed == Some(false)).count();
+        (runs.len(), failed)
+    };
+    let (explored, explored_failed) = failed("instability");
+    let (sampled, sampled_failed) = failed("coverage");
+    let with_outcome = cases.iter().filter(|c| c.passed.is_some()).count();
+    let assessed = cases.iter().filter(|c| c.assessed.is_some()).count();
+    let flaky = cases
+        .iter()
+        .filter(|c| {
+            c.assessed
+                .is_some_and(|f| f.instability_confidence > FLAKY_CONFIDENCE)
+        })
+        .count();
+    let mut lines = vec![
+        String::new(),
+        "## Flaky cases".into(),
+        String::new(),
+        format!(
+            "Runs that recorded their case: {} ({with_outcome} with an outcome). \
+             Chosen for instability: {explored} ({explored_failed} failed); \
+             by the sampler's policy: {sampled} ({sampled_failed} failed).",
+            cases.len()
+        ),
+    ];
+    if assessed > 0 {
+        lines.push(String::new());
+        lines.push(format!(
+            "Assessed over all the runs of their scenario: {flaky} of {assessed} flaky \
+             (instability confidence above {FLAKY_CONFIDENCE})."
+        ));
+    }
+    let mut order: Vec<&CaseRun> = cases.iter().collect();
+    let key = |c: &CaseRun| {
+        c.flakiness()
+            .map(|f| (f.instability_confidence, f.flip_probability))
+            .unwrap_or((-1.0, -1.0))
+    };
+    order.sort_by(|a, b| {
+        let (ka, kb) = (key(a), key(b));
+        kb.0.total_cmp(&ka.0).then(kb.1.total_cmp(&ka.1))
+    });
+    let cell = |f: Option<Flakiness>, pick: fn(&Flakiness) -> Option<f64>| {
+        f.as_ref()
+            .and_then(pick)
+            .map(|x| format!("{x:.2}"))
+            .unwrap_or_else(|| "-".into())
+    };
+    lines.extend([
+        String::new(),
+        "| Scenario | Case | Chosen for | Passed | Predicted confidence | Confidence | Flip | P(pass) | Radius |".into(),
+        "|---|---|---|---|---|---|---|---|---|".into(),
+    ]);
+    for c in order.iter().take(max_rows) {
+        let values = c
+            .values
+            .iter()
+            .map(|(k, v)| match v.as_f64() {
+                Some(x) => format!("{k}={}", round3(x)),
+                None => format!(
+                    "{k}={}",
+                    v.as_str().map(String::from).unwrap_or(v.to_string())
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "| {} | {values} | {} | {} | {} | {} | {} | {} | {} |",
+            c.scenario,
+            c.chosen_for,
+            match c.passed {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "-",
+            },
+            cell(c.predicted, |f| Some(f.instability_confidence)),
+            cell(c.assessed, |f| Some(f.instability_confidence)),
+            cell(c.assessed, |f| Some(f.flip_probability)),
+            cell(c.assessed, |f| Some(f.pass_probability)),
+            cell(c.assessed, |f| f.robustness_radius),
+        ));
+    }
+    if cases.len() > max_rows {
+        lines.push(format!("\n... ({} more)", cases.len() - max_rows));
+    }
+    lines
 }
 
 fn capitalize(s: &str) -> String {
@@ -741,6 +957,7 @@ pub fn merge_coverage(documents: &[Json]) -> Result<CoverageReport> {
             .unwrap_or("")
             .to_string();
         *report.scenarios.entry(scenario.clone()).or_default() += 1;
+        report.cases.extend(CaseRun::read(index, &scenario, doc));
         if let Some(odd) = doc.get("odd").filter(|o| o.is_object()) {
             let name = odd.get("name").and_then(Json::as_str).unwrap_or("");
             report

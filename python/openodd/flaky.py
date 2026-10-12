@@ -39,12 +39,14 @@ refined, with the amplitude, by the Laplace evidence.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 from . import _core
 from .model import to_core
+from .report import CoverageReport
 from .sampler import OddSample, OddSampler
 
 __all__ = ["FlakinessModel", "FlakyMetrics", "FlakySearch", "ParameterSpace"]
@@ -106,6 +108,13 @@ class ParameterSpace:
         self._core = _core.ParamSpace(dims)
 
     @classmethod
+    def of(cls, sampler: OddSampler) -> "ParameterSpace":
+        """The space the attributes *sampler* draws span: a numeric one over
+        what its knob can set in its drawable buckets, a categorical one over
+        its drawable buckets (what :attr:`FlakySearch.space` is)."""
+        return cls._from_core(sampler._core.space)
+
+    @classmethod
     def _from_core(cls, core: Any) -> "ParameterSpace":
         self = cls.__new__(cls)
         self._core = core
@@ -126,6 +135,22 @@ class ParameterSpace:
     def encode(self, case: Case) -> list[float]:
         """A case's values, coded in the normalized space."""
         return list(self._core.encode(_values(case)))
+
+    def to_list(self) -> list[dict[str, Any]]:
+        """The space as a coverage file keeps it: per parameter, in order,
+        ``{"name", "range": [low, high]}`` or ``{"name", "labels": [...]}``."""
+        return json.loads(self._core.to_json())
+
+    @classmethod
+    def from_list(cls, raw: Sequence[Mapping[str, Any]]) -> "ParameterSpace":
+        """The space :meth:`to_list` gave."""
+        return cls._from_core(_core.ParamSpace.from_json(json.dumps(list(raw))))
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ParameterSpace) and self.to_list() == other.to_list()
+
+    def __hash__(self) -> int:
+        return hash(json.dumps(self.to_list()))
 
     def __repr__(self) -> str:
         return f"ParameterSpace(numeric={self.numeric!r}, categorical={self.categorical!r})"
@@ -181,6 +206,19 @@ class FlakinessModel:
         values = _values(case)
         self._core.observe(values, bool(passed))
         self._observed.append((values, bool(passed)))
+
+    def observe_report(self, report: CoverageReport, scenario: Optional[str] = None) -> int:
+        """Record the runs of *report* (of *scenario*, if given) that were
+        chosen in this space and recorded an outcome; returns how many."""
+        added = 0
+        for run in report.cases:
+            if run.passed is None or run.space != self.space.to_list():
+                continue
+            if scenario is not None and run.scenario != scenario:
+                continue
+            self.observe(run.values, run.passed)
+            added += 1
+        return added
 
     def metrics(self, case: Case) -> FlakyMetrics:
         """How flaky *case* is.
@@ -247,7 +285,7 @@ class FlakySearch:
             raise ValueError("FlakySearch: coverage_depth must not be negative")
         self.coverage_depth = int(coverage_depth)
         self.model = FlakinessModel(
-            ParameterSpace._from_core(sampler._core.space), observations, **model
+            ParameterSpace.of(sampler), observations, **model
         )
 
     @property
@@ -258,6 +296,11 @@ class FlakySearch:
     def observe(self, case: Case, passed: bool) -> None:
         """Record one run: its case and whether it passed."""
         self.model.observe(case, passed)
+
+    def observe_report(self, report: CoverageReport, scenario: Optional[str] = None) -> int:
+        """Record the runs of an earlier campaign (see
+        :meth:`FlakinessModel.observe_report`); returns how many."""
+        return self.model.observe_report(report, scenario)
 
     def metrics(self, case: Case) -> FlakyMetrics:
         """How flaky *case* is."""

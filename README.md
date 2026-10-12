@@ -22,7 +22,9 @@
   classification in the Rust core) and draws part of each batch where a small change
   flips the outcome, keeping the sampler's own policy for the rest. Each case gets
   `flip_probability`, `instability_confidence` and `robustness_radius`
-  ([docs/flaky.md](docs/flaky.md)).
+  ([docs/flaky.md](docs/flaky.md)). A run's coverage file can record its case, the
+  predicted flakiness and its outcome; the merged report reassesses them, and the next
+  campaign's search starts from them.
 
 What measures the attributes -- a simulator, a recorded log -- is the application's
 *backend*: a subclass of `openodd.Backend` naming its probes, how a run sets an

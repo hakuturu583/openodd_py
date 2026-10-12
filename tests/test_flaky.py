@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import openodd
@@ -205,3 +207,61 @@ def test_what_cannot_be_measured_is_refused() -> None:
 def test_it_is_exported() -> None:
     assert openodd.FlakySearch is FlakySearch
     assert OddKnob  # the sampler's knobs set the space
+
+
+def _campaign(runs: int = 30) -> list[dict]:
+    """Coverage documents of a campaign: each run records its case and outcome."""
+    s = search(explore_fraction=0.5)
+    docs = []
+    while len(docs) < runs:
+        for case in s.sample(10):
+            collector = openodd.CoverageCollector([])
+            collector.record_case(case, space=s.space)
+            collector.record_outcome(passes(case))
+            s.observe(case, passes(case))
+            docs.append(json.loads(json.dumps(collector.to_dict("cut_in"))))
+    return docs
+
+
+def test_a_run_records_its_case_and_outcome() -> None:
+    docs = _campaign(20)
+    explored = [d for d in docs if d["case"]["chosen_for"] == "instability"]
+    assert explored and all(set(d["case"]["flaky"]) == {
+        "pass_probability", "flip_probability", "instability_confidence", "robustness_radius"
+    } for d in explored)
+    first = docs[0]
+    assert first["case"]["chosen_for"] == "coverage" and first["case"]["flaky"] is None
+    assert set(first["case"]["values"]) == {"rain", "gap"}
+    assert first["outcome"] == {"passed": first["case"]["values"]["gap"] > BOUNDARY}
+    assert ParameterSpace.from_list(first["case"]["space"]) == search().space
+    assert ParameterSpace.of(search().sampler) == search().space
+    # A run that records nothing writes nothing about it.
+    blank = openodd.CoverageCollector([]).to_dict("s")
+    assert blank["case"] is None and blank["outcome"] is None
+
+
+def test_the_report_assesses_the_runs_and_carries_them_over() -> None:
+    report = openodd.merge_coverage(_campaign(30))
+    cases = report.cases
+    assert len(cases) == 30
+    assert all(c.assessed is not None and c.passed is not None for c in cases)
+    near = [c for c in cases if abs(c.values["gap"] - BOUNDARY) < 2]
+    far = [c for c in cases if abs(c.values["gap"] - BOUNDARY) > 10]
+    assert near and far
+    mean = lambda cs: sum(c.assessed["flip_probability"] for c in cs) / len(cs)  # noqa: E731
+    assert mean(near) > mean(far)
+    markdown = report.to_markdown()
+    assert "## Flaky cases" in markdown and "Chosen for instability" in markdown
+    assert "cases" in report.to_dict()
+    # The next campaign starts from them.
+    fresh = search()
+    assert fresh.observe_report(report) == 30
+    assert len(fresh.model) == 30
+    assert fresh.observe_report(report, scenario="other") == 0
+    assert all(c.flaky is not None for c in fresh.sample(4)[2:])
+
+
+def test_hiding_the_holes_keeps_the_flaky_cases() -> None:
+    report = openodd.merge_coverage(_campaign(20))
+    rows = [line for line in report.to_markdown(max_holes=0).splitlines() if "| cut_in |" in line]
+    assert len(rows) == 20

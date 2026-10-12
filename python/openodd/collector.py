@@ -31,11 +31,20 @@ The coverage file (``{scenario}_coverage.json``, schema
 :data:`~.report.COVERAGE_SCHEMA`) holds, per bucket of one run, its hits and,
 for items sampled every step, its exposure: the seconds spent in it, the
 metres the ego drove in it, and how many times it was entered.
+
+A run drawn by a sampler can also record its case
+(:meth:`CoverageCollector.record_case`: its values, buckets and settings, why
+it was chosen, the flakiness predicted when a flaky search chose it, and the
+space it was chosen in) and its outcome
+(:meth:`CoverageCollector.record_outcome`). The merged report then assesses
+the flakiness of every such run over all of them, and the next campaign's
+flaky search can start from them (:meth:`~.flaky.FlakySearch.observe_report`).
 :func:`~.report.merge_coverage` merges any number of them into a report.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import json
 import logging
@@ -118,6 +127,20 @@ def _sample_value(value: Any) -> Any:
     except (TypeError, ValueError):
         return value_label(value)
     return round(number, 6) if math.isfinite(number) else None
+
+
+def _case_value(value: Any) -> Any:
+    """A case's value, exactly: a JSON number, bool or its label."""
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            value = value.item()  # a numpy scalar: its Python value
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value_label(value)
 
 
 def _is_nan(value: Any) -> bool:
@@ -466,6 +489,32 @@ class CoverageCollector:
         # Whether anything is sampled every tick, and so measures distance.
         tick = id(SamplingEvent.TICK)
         self._timed = tick in self._items_on or tick in self._crosses_on
+        self._case: Optional[dict[str, Any]] = None
+        self._passed: Optional[bool] = None
+
+    def record_case(self, case: Any, space: Optional[Any] = None) -> None:
+        """Record the case this run ran: an :class:`~.sampler.OddSample`.
+
+        Its flakiness, when a flaky search chose it for that
+        (``case.flaky``), is the prediction made then. *space* is the
+        :class:`~.flaky.ParameterSpace` it was drawn in (``search.space``):
+        without it, the report cannot assess the run's flakiness.
+        """
+        flaky = getattr(case, "flaky", None)
+        self._case = {
+            "index": int(case.index),
+            "situation": case.situation,
+            "values": {str(k): _case_value(v) for k, v in case.values.items()},
+            "buckets": {str(k): str(v) for k, v in case.buckets.items()},
+            "overrides": list(case.overrides),
+            "chosen_for": "coverage" if flaky is None else "instability",
+            "flaky": None if flaky is None else dataclasses.asdict(flaky),
+            "space": None if space is None else space.to_list(),
+        }
+
+    def record_outcome(self, passed: bool) -> None:
+        """Record whether the run passed."""
+        self._passed = bool(passed)
 
     def start(self, context: Any, elapsed: float) -> None:
         """Sample the items on :attr:`SamplingEvent.START`."""
@@ -523,6 +572,8 @@ class CoverageCollector:
             "items": [e.to_dict() for e in self._items],
             "crosses": [c.to_dict() for c in self._crosses],
             "odd": self._odd.to_dict() if self._odd is not None else None,
+            "case": self._case,
+            "outcome": None if self._passed is None else {"passed": self._passed},
         }
 
     def write(self, path: Path, scenario: str) -> None:
