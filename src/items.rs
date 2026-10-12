@@ -65,6 +65,16 @@ impl Default for Criteria {
 }
 
 impl Criteria {
+    /// The measure a bucket's coverage is read from: `cover_by`, or with a
+    /// `min_stay` the stays long enough to count (`counted.<cover_by>`).
+    pub fn amount(&self) -> String {
+        if self.min_stay.is_some() {
+            format!("counted.{}", self.cover_by)
+        } else {
+            self.cover_by.clone()
+        }
+    }
+
     /// Refuse a criterion that cannot be met or measured on `event`.
     pub fn check(&self, what: &str, event: &str) -> Result<()> {
         if !COVER_MEASURES.contains(&self.cover_by.as_str()) {
@@ -133,6 +143,8 @@ pub struct CoverItem {
     pub edges: Vec<f64>,
     /// Bucket labels, in order.
     pub labels: Vec<String>,
+    /// The ODD attribute the item buckets, when it is one's (`odd.<name>`).
+    pub attribute: Option<String>,
 }
 
 fn duplicates(names: &[String]) -> Vec<String> {
@@ -170,6 +182,7 @@ impl CoverItem {
             values: Vec::new(),
             edges: Vec::new(),
             labels: Vec::new(),
+            attribute: None,
         };
         let name = item.name.clone();
         match buckets {
@@ -267,8 +280,11 @@ impl CoverItem {
     }
 
     /// The item's definition, as written to a coverage file.
+    ///
+    /// `amount` names the measure a bucket's coverage is read from (see
+    /// [`Criteria::amount`]); `attribute` is there for an ODD attribute's item.
     pub fn describe(&self) -> Json {
-        json!({
+        let mut out = json!({
             "name": self.name,
             "group": self.group.as_str(),
             "text": self.text,
@@ -279,7 +295,12 @@ impl CoverItem {
             "target": number_json(self.criteria.target),
             "cover_by": self.criteria.cover_by,
             "min_stay": self.criteria.min_stay,
-        })
+            "amount": self.criteria.amount(),
+        });
+        if let Some(attribute) = &self.attribute {
+            out["attribute"] = json!(attribute);
+        }
+        out
     }
 }
 

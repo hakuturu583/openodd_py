@@ -119,6 +119,8 @@ class CoverItem:
     group: CoverGroup = CoverGroup.SCENARIO
     cover_by: str = "hits"
     min_stay: Optional[float] = None
+    #: The ODD attribute the item buckets, when it is one's.
+    attribute: Optional[str] = None
 
     #: Bucket edges of a numeric item, ascending; empty for a categorical one.
     edges: list[float] = field(init=False, default_factory=list)
@@ -173,6 +175,7 @@ class CoverItem:
         self.group = group
         self.cover_by = bucketing.cover_by
         self.min_stay = bucketing.min_stay
+        self.attribute = bucketing.attribute
         self._bucketing = bucketing
         return self
 
@@ -180,6 +183,12 @@ class CoverItem:
     def numeric(self) -> bool:
         """Whether the buckets are ranges rather than values."""
         return bool(self.edges)
+
+    @property
+    def amount(self) -> str:
+        """The measure a bucket's coverage is read from: ``cover_by``, or with
+        a ``min_stay`` the stays long enough to count (``counted.<cover_by>``)."""
+        return f"counted.{self.cover_by}" if self.min_stay is not None else self.cover_by
 
     def bucket_of(self, value: Any) -> str:
         """The label of the bucket *value* falls in.
@@ -208,6 +217,8 @@ class CoverItem:
             "target": self.target,
             "cover_by": self.cover_by,
             "min_stay": self.min_stay,
+            "amount": self.amount,
+            **({"attribute": self.attribute} if self.attribute is not None else {}),
         }
 
 
@@ -267,4 +278,5 @@ class CrossItem:
             "target": self.target,
             "cover_by": self.cover_by,
             "min_stay": self.min_stay,
+            "amount": f"counted.{self.cover_by}" if self.min_stay is not None else self.cover_by,
         }
