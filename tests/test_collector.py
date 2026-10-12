@@ -362,3 +362,25 @@ class TestOdd:
         collector = CoverageCollector([], odd=_speed_odd())
         collector.write(tmp_path / "S_coverage.json", "S")
         assert not (tmp_path / "S_odd.tar.gz").exists()
+
+
+class TestReviewRegressions:
+    def test_a_numpy_nan_is_no_sample(self) -> None:
+        np = pytest.importorskip("numpy")
+        collector = CoverageCollector([_item(buckets=[0, 10], event=SamplingEvent.TICK)])
+        collector.tick(_Context(np.float32("nan")), 0.0)
+        item = collector.to_dict("S")["items"][0]
+        assert item["samples"] == 0 and item["out_of_range"] == {}
+
+    def test_a_numeric_looking_literal_stays_a_literal(self) -> None:
+        from openodd.collector import _sample_value
+
+        assert _sample_value("001") == "001"
+        assert _sample_value("nan") == "nan"
+        assert _sample_value("1e3") == "1e3"
+
+    def test_a_label_holding_the_cross_separator_is_refused(self) -> None:
+        a = _item("a", values=["x / y"], event=SamplingEvent.TICK)
+        b = _item("b", values=["z"], event=SamplingEvent.TICK)
+        with pytest.raises(ValueError, match="joins a cell's labels"):
+            CrossItem("ab", [a, b])

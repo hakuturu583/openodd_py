@@ -26,6 +26,7 @@ __all__ = [
     "ABOVE_RANGE",
     "BELOW_RANGE",
     "COVER_MEASURES",
+    "CROSS_SEPARATOR",
     "HOLDS",
     "CoverGroup",
     "CoverItem",
@@ -42,6 +43,9 @@ BELOW_RANGE = "<below>"
 ABOVE_RANGE = "<above>"
 #: The one bucket of a situation's cover item: the ODD module held.
 HOLDS = "holds"
+#: Joins the bucket labels of a cross-coverage cell (``"1 / x"``).
+CROSS_SEPARATOR = " / "
+
 #: What an item's ``target`` counts.
 COVER_MEASURES = ("hits", "seconds", "meters", "entries")
 
@@ -249,6 +253,15 @@ class CrossItem:
                 )
         if len({i.group for i in self.items}) != 1:
             raise ValueError(f"cross({self.name}): items are in different groups")
+        # A cell is its labels joined: one holding the separator would read
+        # as another cell.
+        for item in self.items:
+            joined = [label for label in item.labels if CROSS_SEPARATOR in label]
+            if joined:
+                raise ValueError(
+                    f"cross({self.name}): {item.name}'s buckets {joined} hold "
+                    f"{CROSS_SEPARATOR!r}, which joins a cell's labels"
+                )
         # The criteria are the core's to check, as for an item.
         _core.Bucketing(
             f"cross({self.name})",

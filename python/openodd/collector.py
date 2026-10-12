@@ -52,6 +52,7 @@ from .items import (
     ABOVE_RANGE,
     BELOW_RANGE,
     COVER_MEASURES,
+    CROSS_SEPARATOR,
     HOLDS,
     CoverItem,
     CrossItem,
@@ -86,8 +87,6 @@ def generator(extra: Optional[Mapping[str, Optional[str]]] = None) -> dict[str, 
     return {"openodd": __version__, **dict(extra or {})}
 
 
-#: Joins the bucket labels of a cross-coverage cell.
-CROSS_SEPARATOR = " / "
 
 #: The measures a bucket keeps, in the order a stay is recorded.
 _MEASURES = COVER_MEASURES
@@ -110,6 +109,8 @@ def _sample_value(value: Any) -> Any:
             pass
     if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, str):
+        return value  # a literal, however numeric it looks ("001", "nan")
     if isinstance(value, float):
         return round(value, 6) if math.isfinite(value) else None
     try:
@@ -117,6 +118,16 @@ def _sample_value(value: Any) -> Any:
     except (TypeError, ValueError):
         return value_label(value)
     return round(number, 6) if math.isfinite(number) else None
+
+
+def _is_nan(value: Any) -> bool:
+    """Whether *value* is a NaN: a float's, or a NumPy scalar's (float32 too)."""
+    if isinstance(value, (str, bytes, bool)):
+        return False
+    try:
+        return math.isnan(value)
+    except (TypeError, ValueError):
+        return False
 
 
 def _attribute_meta(attribute: Any) -> dict[str, Any]:
@@ -615,7 +626,7 @@ class CoverageCollector:
 
     def _count(self, entry: _ItemHits, value: Any) -> Optional[str]:
         """Count *value* for one item; the bucket it hit, or ``None`` when it hit none."""
-        if value is None or (isinstance(value, float) and math.isnan(value)):
+        if value is None or _is_nan(value):
             return None  # NaN (say, 0/0) says nothing either
         item = entry.item
         try:
