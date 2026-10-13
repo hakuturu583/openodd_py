@@ -82,17 +82,6 @@
     }
     apply(bar);
   });
-  document.addEventListener("click", function (event) {
-    var btn = event.target.closest && event.target.closest(".oo-axes [data-oo-swap]");
-    if (!btn) return;
-    var bar = btn.closest(".oo-axes"), s = picks(bar);
-    if (!s.y.value) return;
-    var x = s.x.value;
-    s.x.value = s.y.value;
-    s.y.value = x;
-    apply(bar);
-  });
-
   // The row and column headings of the cell under the pointer.
   var lit = [];
   function light(td) {

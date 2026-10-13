@@ -67,7 +67,6 @@ pub struct Labels {
     pub rows: String,
     pub columns: String,
     pub no_rows: String,
-    pub swap: String,
 }
 
 impl Labels {
@@ -111,7 +110,6 @@ impl Labels {
             "rows" => &mut self.rows,
             "columns" => &mut self.columns,
             "no_rows" => &mut self.no_rows,
-            "swap" => &mut self.swap,
             _ => return false,
         };
         *slot = value.to_string();
@@ -165,7 +163,6 @@ impl Default for Labels {
             rows: s("Rows"),
             columns: s("Columns"),
             no_rows: s("None (one row)"),
-            swap: s("Swap rows and columns"),
         }
     }
 }
@@ -524,19 +521,9 @@ fn axes_parts(m: &Matrix, free: &[String], ui: &AxesUi, opts: &Options) -> AxesP
         out.push_str("</select></label>");
         out
     };
-    let swap = format!(
-        "<button type=\"button\" class=\"oo-swap\" data-oo-swap title=\"{0}\" aria-label=\"{0}\"{1}>\
-         <svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" aria-hidden=\"true\"><path d=\"M3 5h10M13 5l-2.5-2.5M13 5l-2.5 2.5M13 11H3M3 11l2.5-2.5M3 11l2.5 2.5\" \
-         fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg></button>",
-        escape(&labels.swap),
-        if y_name.is_empty() { " disabled" } else { "" }
-    );
     AxesParts {
         attrs,
-        rows: format!(
-            "<div class=\"oo-yctl\">{}{swap}</div>",
-            select("y", &labels.rows, "\u{2193}", y_name, Some(&labels.no_rows))
-        ),
+        rows: select("y", &labels.rows, "\u{2193}", y_name, Some(&labels.no_rows)),
         columns: select("x", &labels.columns, "\u{2192}", &x.name, None),
     }
 }
