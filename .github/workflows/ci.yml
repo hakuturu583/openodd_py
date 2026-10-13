@@ -30,9 +30,32 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q
+
+  # The browser build: the core without its `native` feature and the
+  # wasm-bindgen crate, for wasm32-unknown-unknown, and the viewer's tests run
+  # as WebAssembly in Node.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - run: cargo build -p openodd --no-default-features --target wasm32-unknown-unknown
+      - run: cargo build -p openodd-wasm --release --target wasm32-unknown-unknown
+      - run: wasm-pack test --node crates/openodd-wasm
+      - run: wasm-pack build crates/openodd-wasm --release --target web --out-dir "$RUNNER_TEMP/pkg" --no-pack
+      - run: ls -l "$RUNNER_TEMP/pkg"
 
   # The Rust tests and the Python suite on Windows, once: abi3 means one interpreter
   # covers the wheel, and the Linux matrix already spans the Python versions.
@@ -46,6 +69,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: cargo test --workspace
-      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q

@@ -601,6 +601,33 @@ impl Classifier {
         let (mean, cov) = self.latent(&[point.to_vec()]);
         norm_cdf(mean[0] / (1.0 + cov[(0, 0)].max(0.0)).sqrt())
     }
+
+    /// [`Self::pass_probability`] at each of *points*, in one solve: only
+    /// the variance of each point is formed, not their covariance.
+    pub fn pass_probabilities(&self, points: &[Vec<f64>]) -> Vec<f64> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let ks = self.cross(points);
+        let mean = ks.transpose() * &self.grad;
+        let mut v = ks;
+        for (i, mut row) in v.row_iter_mut().enumerate() {
+            row *= self.sqrt_w[i];
+        }
+        let v = self
+            .l
+            .solve_lower_triangular(&v)
+            .expect("the Cholesky factor has a positive diagonal");
+        points
+            .iter()
+            .enumerate()
+            .map(|(j, p)| {
+                let prior = kernel(p, p, &self.coordinate_scales, self.amplitude);
+                let var = prior - v.column(j).norm_squared();
+                norm_cdf(mean[j] / (1.0 + var.max(0.0)).sqrt())
+            })
+            .collect()
+    }
 }
 
 /// The length scale of a GP regression on the ±1 outcomes, fitted by
@@ -869,7 +896,17 @@ impl FlakinessModel {
     /// The metrics of a coded case.
     pub fn metrics_at(&mut self, x: &[f64]) -> Result<Metrics> {
         let config = self.config;
-        self.measure(x, config.perturbations, config.draws, true)
+        self.measure(x, config.perturbations, config.draws, true, None)
+    }
+
+    /// The metrics of points of a map, without the robustness radius
+    /// (`None`). Every point draws its small changes and posterior samples
+    /// from the same stream (common random numbers), so neighbouring points
+    /// differ by the model, not by Monte Carlo noise, and a map's regions
+    /// have smooth edges.
+    pub fn map_metrics_at(&mut self, x: &[f64]) -> Result<Metrics> {
+        let config = self.config;
+        self.measure(x, config.perturbations, config.draws, false, Some("map"))
     }
 
     fn measure(
@@ -878,6 +915,7 @@ impl FlakinessModel {
         perturbations: usize,
         draws: usize,
         with_radius: bool,
+        stream: Option<&str>,
     ) -> Result<Metrics> {
         if x.len() != self.space.width() {
             return Err(Error::value("flaky: a coded case of the wrong width"));
@@ -887,7 +925,10 @@ impl FlakinessModel {
         let config = self.config;
         // The same point gives the same metrics, whatever was measured before.
         let bits: String = x.iter().map(|v| format!("{:016x}", v.to_bits())).collect();
-        let mut rng = rng_for(&format!("{}/{bits}", self.seed));
+        let mut rng = match stream {
+            Some(name) => rng_for(&format!("{}/{name}", self.seed)),
+            None => rng_for(&format!("{}/{bits}", self.seed)),
+        };
         let classifier = self.classifier()?;
 
         let mut points = vec![x.to_vec()];
@@ -1261,7 +1302,7 @@ pub fn search(
     let mut candidates: Vec<Candidate> = Vec::new();
     for sample in drawn.into_iter().chain(moved) {
         let x = model.space().encode(&sample.values)?;
-        let metrics = model.measure(&x, cheap_perturbations, cheap_draws, false)?;
+        let metrics = model.measure(&x, cheap_perturbations, cheap_draws, false, None)?;
         let categories = model.space().categories(&x);
         candidates.push(Candidate {
             sample,

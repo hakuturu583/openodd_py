@@ -189,6 +189,24 @@ impl Options {
     }
 }
 
+/// JSON to put inside a `<script>` element: `<`, `>` and `&` as `\u003c`,
+/// `\u003e` and `\u0026`, so no value (`</script>`, `<!--<script>`) can
+/// end the element or put the HTML parser in a script-escape state. The
+/// text is still the same JSON to `JSON.parse`.
+pub fn script_json(value: &serde_json::Value) -> String {
+    let json = value.to_string();
+    let mut out = String::with_capacity(json.len());
+    for ch in json.chars() {
+        match ch {
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// HTML-escape text (and attribute values).
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -969,7 +987,7 @@ pub fn page(title: &str, body: &str) -> String {
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <meta name=\"color-scheme\" content=\"light dark\"><title>{}</title>\
-         <style>:root{{color-scheme:light dark}}body{{margin:0;padding:32px;background:#f2f4f7}}@media (prefers-color-scheme:dark){{body{{background:#0b0e12}}}}</style>\
+         <style>:root{{color-scheme:light dark}}body{{margin:0;padding:32px;background:#f2f4f7}}@media (max-width:600px){{body{{padding:12px}}}}@media (prefers-color-scheme:dark){{body{{background:#0b0e12}}}}</style>\
          <style>{}</style></head><body>{}<script>{}</script></body></html>\n",
         escape(title),
         styles(),

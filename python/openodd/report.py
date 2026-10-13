@@ -415,6 +415,22 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
     )
     parser.add_argument("--html-depth", type=int, default=2, metavar="N",
                         help="levels below the top matrix the HTML page holds (default: 2)")
+    parser.add_argument(
+        "--cases-html",
+        type=Path,
+        metavar="FILE",
+        help="also write the drawn cases (each run's recorded case, by outcome) as a "
+        "standalone HTML scatter here, with a table of the cases run more than once",
+    )
+    parser.add_argument("--cases-x", metavar="ATTRIBUTE",
+                        help="the case plot's horizontal attribute (default: the first numeric one)")
+    parser.add_argument("--cases-y", metavar="ATTRIBUTE",
+                        help="the case plot's vertical attribute (default: the next one)")
+    parser.add_argument("--cases-no-prediction", action="store_true",
+                        help="leave out the case plot's background (what the flaky model "
+                        "fitted to the runs predicts)")
+    parser.add_argument("--cases-rings", action="store_true",
+                        help="outline the cases chosen for instability in the case plot")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     documents = load_coverage_files(args.paths)
@@ -441,6 +457,21 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
         args.html.parent.mkdir(parents=True, exist_ok=True)
         view = CoverageView([doc for _, doc in documents])
         args.html.write_text(view.page(depth=max(0, args.html_depth)), encoding="utf-8")
+    if args.cases_html is not None:
+        from .view import CasePlot  # noqa: PLC0415 - view imports nothing of the report
+
+        plot = CasePlot([doc for _, doc in documents])
+        if plot.cases == 0:
+            logging.warning("coverage: no run recorded a case and an outcome; %s shows none",
+                            args.cases_html)
+        for name, asked in (("--cases-x", args.cases_x), ("--cases-y", args.cases_y)):
+            if asked is not None and asked not in plot.attributes:
+                logging.warning("coverage: %s %s: no case has it (cases have: %s)",
+                                name, asked, ", ".join(plot.attributes) or "none")
+        args.cases_html.parent.mkdir(parents=True, exist_ok=True)
+        args.cases_html.write_text(plot.page(
+            x=args.cases_x, y=args.cases_y, prediction=not args.cases_no_prediction,
+            instability_rings=args.cases_rings), encoding="utf-8")
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")

@@ -33,5 +33,18 @@ let explorer = html::explorer(&data, &Query::default(), 2, &html::Options::defau
 let page = html::page("Coverage", &explorer);          // standalone
 ```
 
+The crate also draws the **drawn cases** of a sweep (each run's recorded `case`):
+`cases::CaseSet` groups the runs of each case, and `case_plot` renders them as a
+scatter over any two attributes, with a table of the cases run more than once
+([docs/case_plot.md](../../docs/case_plot.md)):
+
+```rust
+use openodd_coverage_view::{case_plot, cases::{CaseQuery, CaseSet}};
+
+let set = CaseSet::from_documents(&documents);
+let plot = set.plot(&CaseQuery::default());
+let fragment = case_plot::fragment(&set, &plot, &case_plot::Options::default());
+```
+
 No I/O and no framework: JSON in, strings out. See
 [docs/coverage_view.md](../../docs/coverage_view.md) for embedding.

@@ -62,7 +62,7 @@ from .report import (
     wilson_interval,
 )
 from . import view
-from .view import CoverageView
+from .view import CasePlot, CoverageView
 from .sampler import OddDraws, OddKnob, OddSample, OddSampler, knobs_from_mapping
 from .flaky import FlakinessModel, FlakyMetrics, FlakySearch, ParameterSpace
 from .model import (
@@ -91,6 +91,7 @@ __all__ = [
     "ParameterSpace",
     "CROSS_SEPARATOR",
     "CodExport",
+    "CasePlot",
     "CoverageView",
     "CoverageCollector",
     "MISSING",

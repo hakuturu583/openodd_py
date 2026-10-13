@@ -28,6 +28,11 @@ cancelable ``openodd:drill`` DOM event whose ``detail.conditions`` is the
 list of ``[attribute, bucket]``. :meth:`CoverageView.explorer_html` instead
 renders the levels below ahead of time, for a static report
 (``openodd-coverage --html``).
+
+:class:`CasePlot` shows the drawn cases of a sweep instead: every case at
+the values it was drawn with, along any two attributes, marked by what its
+runs did (``openodd-coverage --cases-html``). It shares the styles and the
+script.
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ from typing import Any, Optional, Union
 
 from . import _core
 
-__all__ = ["ANY", "CoverageView", "page", "parse_conditions", "script", "styles"]
+__all__ = ["ANY", "CasePlot", "CoverageView", "page", "parse_conditions", "script", "styles"]
 
 Conditions = Union[Mapping[str, str], Iterable[Sequence[str]]]
 
@@ -47,12 +52,14 @@ ANY = object()
 
 
 def styles() -> str:
-    """The component's CSS, scoped under ``.oo-cov``; once per page."""
+    """The components' CSS (:class:`CoverageView` and :class:`CasePlot`),
+    scoped under ``.oo-cov``; once per page."""
     return str(_core.coverage_view_styles())
 
 
 def script() -> str:
-    """The component's script (drill events, explorer panels); once per page."""
+    """The components' script (drill and axes events, explorer panels,
+    tooltip cards); once per page."""
     return str(_core.coverage_view_script())
 
 
@@ -215,3 +222,187 @@ class CoverageView:
     def page(self, title: str = "ODD coverage", *, depth: int = 2, **query: Any) -> str:
         """A standalone page with the explorer (:meth:`explorer_html`)."""
         return page(title, self.explorer_html(depth=depth, **query))
+
+
+class CasePlot:
+    """The drawn cases of a sweep, as a scatter: every distinct case at the
+    values it was drawn with, along any two attributes of its space.
+
+    It reads the ``case`` block of coverage documents
+    (:meth:`~.collector.CoverageCollector.record_case`) and their
+    ``outcome``. Runs with the same overrides ran the same case and are one
+    mark: a filled circle if they all passed, a cross if they all failed, a
+    ring in the flaky colour (with ``passes/runs``) if they did both.
+    Behind them, the plot is shaded by what the flaky model fitted to the
+    runs predicts (:meth:`prediction`). Documents without a case or without
+    an outcome are skipped and counted in a note.
+
+    The component shares the coverage view's root class, styles and script:
+    put :func:`styles` and :func:`script` on the page once for both.
+    """
+
+    def __init__(self, documents: Sequence[Mapping[str, Any]]) -> None:
+        self._core = _core.CasePlot(json.dumps(list(documents)))
+
+    @property
+    def attributes(self) -> list[str]:
+        """The attributes of the cases' space, in the order first seen."""
+        return list(self._core.attributes)
+
+    @property
+    def scenarios(self) -> list[str]:
+        return list(self._core.scenarios)
+
+    @property
+    def cases(self) -> int:
+        """Distinct cases with a run that recorded an outcome."""
+        return int(self._core.cases)
+
+    @property
+    def runs(self) -> int:
+        """Runs placed: with a case and an outcome."""
+        return int(self._core.runs)
+
+    @property
+    def skipped(self) -> tuple[int, int]:
+        """Documents not placed: ``(without a case, without an outcome)``."""
+        a, b = self._core.skipped
+        return int(a), int(b)
+
+    @staticmethod
+    def _query(x: Optional[str], y: Optional[str], scenario: Optional[str], environment: Any) -> str:
+        q: dict[str, Any] = {"x": x, "y": y, "scenario": scenario}
+        if environment is not ANY:
+            q["environment"] = environment
+        return json.dumps(q)
+
+    def data(
+        self,
+        *,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        scenario: Optional[str] = None,
+        environment: Any = ANY,
+        prediction: bool = True,
+    ) -> dict[str, Any]:
+        """The plot as a dict, for a host that draws it its own way: both
+        axes (``kind``, ``domain``, ``labels``, the ODD ``buckets``) and every
+        case (``values``, ``buckets``, ``runs``, ``passes``, ``verdict``,
+        ``chosen_for``, ``flaky``, ...).
+
+        With *prediction*, also ``prediction``: the grid the background is
+        drawn from (:meth:`prediction`), and each case's
+        ``predicted_pass_probability``.
+
+        Args:
+            x: The horizontal attribute; the first free one (numeric first)
+                if ``None``.
+            y: The vertical attribute; the next one if ``None``.
+            scenario: Only this scenario's cases.
+            environment: Only this environment's runs (``None``: those that
+                recorded none); every environment when left out (:data:`ANY`).
+            prediction: Whether to fit the flaky model and add its grid.
+        """
+        q = self._query(x, y, scenario, environment)
+        out: dict[str, Any] = json.loads(self._core.data_json(q, bool(prediction)))
+        return out
+
+    def prediction(
+        self,
+        *,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        scenario: Optional[str] = None,
+        environment: Any = ANY,
+    ) -> dict[str, Any]:
+        """What the flaky model fitted to the plot's runs predicts over *x*
+        and *y*: the background's grid, as data.
+
+        The model is :class:`~.flaky.FlakinessModel`'s Gaussian-process
+        classifier with its defaults, fitted to every run with an outcome
+        (seed ``"report"``, as the merged report assesses runs). The result
+        holds ``x`` and ``y`` (``edges`` of a numeric axis's cells, or the
+        ``labels`` of a categorical one), ``cells`` (rows along *y*, columns
+        along *x*: ``pass_probability``, ``flip_probability``,
+        ``instability_confidence`` and ``state``), ``held`` (each attribute
+        not plotted and the value it is held at: the runs' median, or most
+        common label) and ``runs``; or ``{"unavailable": why}`` when there
+        are too few runs, or runs of one outcome only.
+
+        The background's colour is each cell's ``pass_probability`` (red at
+        0, yellow at 0.5, green at 1). ``state`` follows the report's rule --
+        ``flaky`` where ``instability_confidence`` is above 0.5, else
+        ``pass`` / ``fail`` by ``pass_probability`` -- and is data only.
+        """
+        out: dict[str, Any] = self.data(x=x, y=y, scenario=scenario, environment=environment)["prediction"]
+        return out
+
+    def html(
+        self,
+        *,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        scenario: Optional[str] = None,
+        environment: Any = ANY,
+        id: str = "",
+        link: Optional[str] = None,
+        table: bool = True,
+        prediction: bool = True,
+        instability_rings: bool = False,
+        labels: Optional[Mapping[str, str]] = None,
+    ) -> str:
+        """One plot as an HTML fragment, host-driven: the axis pickers
+        dispatch a cancelable ``openodd:axes`` event (``detail.view`` is
+        ``"cases"``) and, with *link* (``{axes}`` is replaced by
+        ``x=...&y=...``), go there. *table* adds the repeated cases' table
+        below; *labels* overrides the component's words by name (``title``,
+        ``state_flaky``, ...). The other arguments are :meth:`data`'s.
+
+        *prediction* shades the plot by the pass probability the flaky
+        model predicts (:meth:`prediction`), red low to yellow ~50% to green
+        high, when the runs allow it -- runs of both outcomes,
+        at least three -- and otherwise says why there is no background.
+        *instability_rings* outlines the cases chosen for instability."""
+        q = self._query(x, y, scenario, environment)
+        return str(self._core.fragment(q, id, link, bool(table), bool(prediction),
+                                       bool(instability_rings), dict(labels) if labels else None))
+
+    def table_html(
+        self,
+        *,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        scenario: Optional[str] = None,
+        environment: Any = ANY,
+        id: str = "",
+        labels: Optional[Mapping[str, str]] = None,
+    ) -> str:
+        """The cases run more than once, on their own: their values (*x* and
+        *y* first), their outcomes in order and their verdict."""
+        q = self._query(x, y, scenario, environment)
+        return str(self._core.table(q, id, dict(labels) if labels else None))
+
+    def explorer_html(
+        self,
+        *,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        scenario: Optional[str] = None,
+        environment: Any = ANY,
+        id: str = "",
+        table: bool = True,
+        prediction: bool = True,
+        instability_rings: bool = False,
+        labels: Optional[Mapping[str, str]] = None,
+    ) -> str:
+        """The plot of *x* and *y* and, as hidden panels the axis pickers
+        show, every other pair of attributes (at most 100): self-contained,
+        for a static report (needs :func:`script` on the page). The model
+        behind *prediction* is fitted once for every pair."""
+        q = self._query(x, y, scenario, environment)
+        return str(self._core.explorer(q, id, bool(table), bool(prediction), bool(instability_rings),
+                                       dict(labels) if labels else None))
+
+    def page(self, title: str = "Drawn cases", **query: Any) -> str:
+        """A standalone page with the explorer (:meth:`explorer_html`)."""
+        return page(title, self.explorer_html(**query))

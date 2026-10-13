@@ -24,6 +24,7 @@
 //! revision and the ODD read back from it exactly.
 
 use std::collections::BTreeMap;
+#[cfg(feature = "native")]
 use std::io::Read;
 
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,10 @@ use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
+
+/// What an archive says in a build without the `native` feature.
+#[cfg(not(feature = "native"))]
+const NO_ARCHIVES: &str = "ODD archives need the `native` feature of openodd";
 
 /// The schema of a transmission's manifest.
 pub const MANIFEST_SCHEMA: &str = "openodd.transmission/1";
@@ -184,8 +189,21 @@ impl Transmission {
         }
     }
 
+    /// Without the `native` feature (no tar, no gzip), an error.
+    #[cfg(not(feature = "native"))]
+    pub fn to_archive(&self) -> Result<Vec<u8>> {
+        Err(Error::open_odd(NO_ARCHIVES))
+    }
+
+    /// Without the `native` feature, an error.
+    #[cfg(not(feature = "native"))]
+    pub fn from_archive(_bytes: &[u8]) -> Result<Self> {
+        Err(Error::open_odd(NO_ARCHIVES))
+    }
+
     /// The transmission as a deterministic `.tar.gz`: the manifest, then the
     /// files by name, with fixed times, owners and modes.
+    #[cfg(feature = "native")]
     pub fn to_archive(&self) -> Result<Vec<u8>> {
         let manifest = serde_json::to_vec_pretty(&self.manifest()).expect("a manifest serializes");
         let mut entries: Vec<(&str, &[u8])> = vec![(MANIFEST_NAME, &manifest)];
@@ -214,6 +232,7 @@ impl Transmission {
 
     /// A transmission back from [`Transmission::to_archive`]'s bytes, checked
     /// against its manifest.
+    #[cfg(feature = "native")]
     pub fn from_archive(bytes: &[u8]) -> Result<Self> {
         let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
         let mut manifest: Option<Manifest> = None;

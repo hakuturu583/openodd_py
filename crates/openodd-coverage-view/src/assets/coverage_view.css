@@ -117,7 +117,12 @@
 .oo-cov .oo-grid th.oo-row.oo-hl { background: color-mix(in oklab, var(--oo-accent) 10%, var(--oo-surface)); }
 
 /* The grid */
-.oo-cov .oo-scroll { overflow: auto; margin-top: 18px; max-width: 100%; }
+/* The grid scrolls in its own box; inline-size containment keeps its width
+   out of the card's minimum, so a host's grid or flex column does not grow
+   to fit it (the case plot's table does the same). */
+.oo-cov { min-width: 0; max-width: 100%; }
+.oo-cov .oo-scroll { overflow-x: auto; overflow-y: hidden; margin-top: 18px; max-width: 100%; container-type: inline-size;
+  padding: 4px 0; }
 .oo-cov table.oo-grid { border-collapse: separate; border-spacing: 4px; margin: -4px; }
 .oo-cov .oo-grid th { font-weight: 500; white-space: nowrap; color: var(--oo-ink-2); }
 .oo-cov .oo-col { padding: 0 2px 4px; text-align: center; font: 500 11.5px var(--oo-mono); min-width: 84px; vertical-align: bottom; }
@@ -195,3 +200,151 @@
 .oo-tip dl { display: grid; grid-template-columns: 1fr auto; gap: 2px 16px; margin: 0; }
 .oo-tip dt { color: var(--oo-ink-2); } .oo-tip dd { margin: 0; text-align: right; font-weight: 600; }
 .oo-tip .oo-tip-note { margin-top: 6px; color: var(--oo-ink-3); font-size: 11.5px; }
+.oo-tip.oo-tip-wide { max-width: min(380px, calc(100vw - 16px)); }
+.oo-tip.oo-tip-wide dd { word-break: break-word; }
+
+/* The drawn cases (case_plot): a scatter of a sweep, on the same root. */
+.oo-cov .oo-case-axes { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 14px; }
+.oo-cov .oo-case-axes .oo-pick select { max-width: min(320px, 62vw); }
+.oo-cov .oo-plot { container-type: inline-size; margin-top: 12px; }
+.oo-cov .oo-svg { display: block; width: 100%; height: auto; overflow: visible; }
+.oo-cov .oo-plot-wide { max-width: 1040px; margin: 0 auto; }
+.oo-cov .oo-plot-compact { display: none; }
+@container (max-width: 560px) {
+  .oo-cov .oo-plot-wide { display: none; }
+  .oo-cov .oo-plot-compact { display: block; }
+}
+.oo-cov .oo-frame { fill: var(--oo-surface-2); stroke: var(--oo-border); }
+.oo-cov .oo-gl { stroke: var(--oo-border-strong); stroke-width: 1; stroke-dasharray: 3 3; opacity: .7; }
+.oo-cov .oo-tk { stroke: var(--oo-border-strong); }
+.oo-cov .oo-svg text { font-family: var(--oo-font); }
+.oo-cov .oo-tl { font-size: 12px; fill: var(--oo-ink-2); font-family: var(--oo-mono); }
+.oo-cov .oo-plot-compact .oo-tl { font-size: 11.5px; }
+.oo-cov .oo-bl { font-size: 11px; fill: var(--oo-ink-3); font-family: var(--oo-mono); }
+.oo-cov .oo-plot-compact .oo-bl { font-size: 10.5px; }
+.oo-cov .oo-atitle { font-size: 12px; font-weight: 600; fill: var(--oo-ink); }
+.oo-cov .oo-lead { stroke: var(--oo-ink-3); stroke-width: 1; }
+.oo-cov .oo-lead-tag { stroke-dasharray: 2 2; }
+.oo-cov .oo-dot { fill: var(--oo-ink-3); }
+/* Marks: a filled circle passes, a cross fails, a ring is flaky. */
+.oo-cov .oo-case { cursor: default; outline: none; }
+.oo-cov .oo-case .oo-hit { fill: transparent; stroke: none; }
+.oo-cov .oo-case.oo-pass .oo-m { fill: var(--oo-pass); stroke: var(--oo-surface); stroke-width: 1.5; }
+.oo-cov .oo-case.oo-fail .oo-m { fill: none; stroke: var(--oo-fail); stroke-width: 2.6; stroke-linecap: round; }
+.oo-cov .oo-case.oo-flaky .oo-m { fill: var(--oo-flaky-fill); stroke: var(--oo-flaky); stroke-width: 3; }
+/* Chosen for instability: a dashed outline. */
+.oo-cov .oo-case .oo-inst { fill: none; stroke: var(--oo-ink-2); stroke-width: 1.2; stroke-dasharray: 2.2 1.8; }
+.oo-cov .oo-svg .oo-case:hover .oo-hit, .oo-cov .oo-svg .oo-case:focus-visible .oo-hit {
+  fill: color-mix(in oklab, var(--oo-accent) 14%, transparent); stroke: var(--oo-accent); stroke-width: 1.5; }
+.oo-cov .oo-nm { font-size: 11px; font-weight: 650; fill: var(--oo-ink-2); paint-order: stroke;
+  stroke: var(--oo-surface-2); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+.oo-cov .oo-plot-compact .oo-nm { font-size: 10.5px; }
+.oo-cov .oo-nm-flaky { fill: var(--oo-flaky-ink); }
+.oo-cov .oo-nm-fail { fill: var(--oo-fail); }
+.oo-cov .oo-key { flex: none; overflow: visible; }
+.oo-cov .oo-nm-key { font: 650 11px var(--oo-font); font-style: normal; color: var(--oo-ink-2); }
+/* The predicted background: the pass probability the model predicts, on a
+   diverging scale -- red at 0, yellow (the flaky colour) at 0.5, green at 1 --
+   in 21 steps, tinted opaque into the plot's surface (cells that touch never
+   darken where they overlap). */
+.oo-cov { --oo-pred-tint: 30%; }
+@media (prefers-color-scheme: dark) { .oo-cov:not([data-oo-theme="light"]) { --oo-pred-tint: 26%; } }
+.oo-cov[data-oo-theme="dark"] { --oo-pred-tint: 26%; }
+.oo-cov { --oo-pp-0: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 0%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-1: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 10%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-2: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 20%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-3: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 30%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-4: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 40%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-5: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 50%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-6: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 60%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-7: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 70%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-8: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 80%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-9: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 90%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-10: color-mix(in oklab, color-mix(in oklab, var(--oo-flaky) 100%, var(--oo-fail)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-11: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 10%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-12: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 20%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-13: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 30%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-14: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 40%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-15: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 50%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-16: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 60%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-17: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 70%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-18: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 80%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-19: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 90%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov { --oo-pp-20: color-mix(in oklab, color-mix(in oklab, var(--oo-pass) 100%, var(--oo-flaky)) var(--oo-pred-tint), var(--oo-surface-2)); }
+.oo-cov rect.oo-pp-0 { fill: var(--oo-pp-0); }
+.oo-cov rect.oo-pp-1 { fill: var(--oo-pp-1); }
+.oo-cov rect.oo-pp-2 { fill: var(--oo-pp-2); }
+.oo-cov rect.oo-pp-3 { fill: var(--oo-pp-3); }
+.oo-cov rect.oo-pp-4 { fill: var(--oo-pp-4); }
+.oo-cov rect.oo-pp-5 { fill: var(--oo-pp-5); }
+.oo-cov rect.oo-pp-6 { fill: var(--oo-pp-6); }
+.oo-cov rect.oo-pp-7 { fill: var(--oo-pp-7); }
+.oo-cov rect.oo-pp-8 { fill: var(--oo-pp-8); }
+.oo-cov rect.oo-pp-9 { fill: var(--oo-pp-9); }
+.oo-cov rect.oo-pp-10 { fill: var(--oo-pp-10); }
+.oo-cov rect.oo-pp-11 { fill: var(--oo-pp-11); }
+.oo-cov rect.oo-pp-12 { fill: var(--oo-pp-12); }
+.oo-cov rect.oo-pp-13 { fill: var(--oo-pp-13); }
+.oo-cov rect.oo-pp-14 { fill: var(--oo-pp-14); }
+.oo-cov rect.oo-pp-15 { fill: var(--oo-pp-15); }
+.oo-cov rect.oo-pp-16 { fill: var(--oo-pp-16); }
+.oo-cov rect.oo-pp-17 { fill: var(--oo-pp-17); }
+.oo-cov rect.oo-pp-18 { fill: var(--oo-pp-18); }
+.oo-cov rect.oo-pp-19 { fill: var(--oo-pp-19); }
+.oo-cov rect.oo-pp-20 { fill: var(--oo-pp-20); }
+.oo-cov .oo-pred rect { stroke: none; shape-rendering: crispEdges; }
+/* The 30% and 70% contours: the fail and pass colours, darkened towards the
+   ink so they keep their contrast on the tinted background, over a halo of
+   the card's colour; labelled on the line. */
+.oo-cov { --oo-cl-low: color-mix(in oklab, var(--oo-fail) 78%, var(--oo-ink));
+  --oo-cl-high: color-mix(in oklab, var(--oo-pass) 70%, var(--oo-ink)); }
+.oo-cov .oo-cl, .oo-cov .oo-cl-halo { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.oo-cov .oo-cl-halo { stroke: var(--oo-surface); stroke-width: 4.5; stroke-opacity: .9; }
+.oo-cov .oo-cl { stroke-width: 2; stroke-dasharray: 9 3; }
+.oo-cov .oo-cl.oo-cl-low { stroke: var(--oo-cl-low); }
+.oo-cov .oo-cl.oo-cl-high { stroke: var(--oo-cl-high); }
+.oo-cov .oo-cl-label { font-size: 12px; font-weight: 700; paint-order: stroke; stroke: var(--oo-surface);
+  stroke-width: 4px; stroke-linejoin: round; font-family: var(--oo-font); }
+.oo-cov .oo-plot-compact .oo-cl-label { font-size: 11.5px; }
+.oo-cov .oo-cl-label.oo-cl-low { fill: var(--oo-cl-low); }
+.oo-cov .oo-cl-label.oo-cl-high { fill: var(--oo-cl-high); }
+.oo-cov .oo-pred-legend { flex-wrap: wrap; }
+.oo-cov .oo-pred-scale { display: inline-flex; flex-direction: column; gap: 2px; min-width: 150px; }
+.oo-cov .oo-pred-bar { display: block; height: 9px; border-radius: 3px; border: 1px solid var(--oo-border);
+  background: linear-gradient(90deg, var(--oo-pp-0), var(--oo-pp-5), var(--oo-pp-10), var(--oo-pp-15), var(--oo-pp-20)); }
+.oo-cov .oo-pred-ticks { display: flex; justify-content: space-between; gap: 8px; font-size: 10.5px; color: var(--oo-ink-3); white-space: nowrap; }
+
+.oo-cov .oo-pred-note { margin-top: 8px; font-size: 11.5px; }
+
+/* The repeated cases' table: it scrolls in its own box rather than squash. */
+.oo-cov .oo-case-table { margin-top: 18px; }
+.oo-cov .oo-case-table h4 { margin: 0; font-size: 13.5px; font-weight: 650; }
+/* The card never grows past its container: in a host's grid or flex column
+   (min-width: auto), the table's unwrapped width would otherwise become the
+   card's minimum, and the tiles, legend and plot would overflow with it.
+   Size containment keeps the table's width out of the card's minimum; the
+   table scrolls in its own box instead. */
+.oo-cov.oo-cases { min-width: 0; max-width: 100%; }
+.oo-cov .oo-table-scroll { margin-top: 8px; border: 1px solid var(--oo-border); border-radius: 10px;
+  container-type: inline-size; }
+.oo-cov table.oo-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.oo-cov .oo-table th, .oo-cov .oo-table td { padding: 7px 12px; text-align: left; white-space: nowrap;
+  border-bottom: 1px solid var(--oo-border); vertical-align: middle; }
+.oo-cov .oo-table tbody tr:last-child > * { border-bottom: none; }
+.oo-cov .oo-table thead th { font-size: 11.5px; font-weight: 600; color: var(--oo-ink-3); background: var(--oo-surface-2); }
+.oo-cov .oo-table thead th.oo-plotted { color: var(--oo-accent); }
+.oo-cov .oo-table .oo-val { font-family: var(--oo-mono); font-size: 12px; }
+.oo-cov .oo-table td.oo-plotted { font-weight: 600; }
+.oo-cov .oo-table th:first-child { position: sticky; left: 0; z-index: 1; }
+.oo-cov .oo-table tbody th:first-child { background: var(--oo-surface); font-weight: 600; }
+.oo-cov .oo-verdict { display: inline-flex; align-items: center; gap: 6px; }
+.oo-cov .oo-row-flaky .oo-v-cell { color: var(--oo-flaky-ink); }
+.oo-cov .oo-row-fail .oo-v-cell { color: var(--oo-fail); }
+.oo-cov .oo-seq { display: inline-flex; gap: 3px; }
+.oo-cov .oo-o { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 3px; border-radius: 5px;
+  font: 700 10.5px/1 var(--oo-font); }
+.oo-cov .oo-o-pass { background: var(--oo-pass-fill); color: var(--oo-pass); }
+.oo-cov .oo-o-fail { background: var(--oo-fail-fill); color: var(--oo-fail); }
+@media (max-width: 480px) {
+  .oo-cov.oo-cases { padding: 16px 14px 14px; }
+}
