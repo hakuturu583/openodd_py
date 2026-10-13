@@ -14,8 +14,8 @@
 //! (`outcome.environment`, an opaque ID: runs of different software must not
 //! be pooled, or a regression reads as flakiness; runs without one form their
 //! own group) and the same list of ODD attributes (cells of different lists
-//! are different things). Runs without an outcome, and runs without cells,
-//! are left out.
+//! are different things). Runs without an outcome, and runs without a cells
+//! table, are left out; a run of no steps counts in its group, in no cell.
 //!
 //! This is not the per-case flakiness of `crate::flaky`: that one is a model
 //! over the parameters a run was *chosen* with; this one counts outcomes over
@@ -79,6 +79,17 @@ pub enum CellStatus {
 }
 
 impl CellStatus {
+    /// Where its cells sort: what most needs a look first.
+    pub fn rank(&self) -> u8 {
+        match self {
+            CellStatus::Flaky => 0,
+            CellStatus::Failing => 1,
+            CellStatus::Mixed => 2,
+            CellStatus::TooFew => 3,
+            CellStatus::Passing => 4,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             CellStatus::Flaky => "flaky",
@@ -188,7 +199,7 @@ pub struct CellFlakiness {
     pub runs_failed: u64,
     /// Failed runs that recorded the cell they failed in.
     pub failures_located: u64,
-    /// The cells visited, flakiest first (see [`CellFlakiness::sort`]).
+    /// The cells visited, in the order of [`CellFlakiness::sort`].
     pub rows: Vec<CellRow>,
 }
 
@@ -197,13 +208,16 @@ impl CellFlakiness {
         self.documents.len() as u64
     }
 
-    /// Flakiest first ([`CellRow::flakiness`]), then the higher failure rate
-    /// (so a cell that always fails comes before one that never does), then
-    /// by labels.
+    /// By status with the default thresholds ([`CellStatus::rank`]: flaky,
+    /// failing, mixed, too few runs, passing), so a table cut short still
+    /// shows the cells it counts as flaky or failing; then flakiest first
+    /// ([`CellRow::flakiness`]), then the higher failure rate, then by labels.
     fn sort(&mut self) {
         self.rows.sort_by(|a, b| {
-            b.flakiness()
-                .total_cmp(&a.flakiness())
+            let rank = |r: &CellRow| r.status(MIN_RUNS, BAND).rank();
+            rank(a)
+                .cmp(&rank(b))
+                .then(b.flakiness().total_cmp(&a.flakiness()))
                 .then(b.fail_rate().total_cmp(&a.fail_rate()))
                 .then_with(|| a.labels.cmp(&b.labels))
         });
@@ -283,10 +297,13 @@ impl RunCells {
         };
         Some(RunCells {
             passed,
-            environment: outcome
-                .get("environment")
-                .and_then(Json::as_str)
-                .map(String::from),
+            // Another writer's number or bool is still an environment of its
+            // own, never pooled with the runs that recorded none.
+            environment: match outcome.get("environment") {
+                None | Some(Json::Null) => None,
+                Some(Json::String(e)) => Some(e.clone()),
+                Some(other) => Some(other.to_string()),
+            },
             attributes,
             cells,
             failed_cell,
@@ -478,15 +495,21 @@ pub fn markdown(groups: &[CellFlakiness], max_rows: usize) -> Vec<String> {
             ),
             "|---|---|---|---|---|---|---|---|---|".into(),
         ]);
+        let cell = |labels: &[String]| -> String {
+            if labels.is_empty() {
+                return "-".into();
+            }
+            labels
+                .iter()
+                .map(|l| l.replace('|', "\\|"))
+                .collect::<Vec<_>>()
+                .join(" x ")
+        };
         for r in g.rows.iter().take(max_rows) {
             let (low, high) = r.interval();
             lines.push(format!(
                 "| {} | {} | {} | {} | {} | {}-{} | {} | {:.1} | {:.0} |",
-                if r.labels.is_empty() {
-                    "-".to_string()
-                } else {
-                    r.labels.join(" x ")
-                },
+                cell(&r.labels),
                 r.status(MIN_RUNS, BAND).as_str().replace('_', " "),
                 r.runs_visited,
                 r.runs_failed,
@@ -585,9 +608,9 @@ mod tests {
             (rb.runs_visited, rb.runs_failed, rb.fail_at_cell),
             (2, 1, 1)
         );
-        // 1 of 2 (9.5% .. 90.5%: the rarer outcome at least 9.5%) is flakier than
-        // 2 of 3 (20.8% .. 93.9%: the rarer outcome at least 6.1%).
-        assert_eq!(g.rows[0].labels, ["[30, 60]", "heavy"]);
+        // 2 of 3 is flaky (20.8% .. 93.9%); 1 of 2 is too few runs, though its
+        // interval alone (9.5% .. 90.5%) would rank it flakier.
+        assert_eq!(g.rows[0].labels, ["[0, 30)", "none"]);
     }
 
     #[test]
@@ -621,6 +644,64 @@ mod tests {
         assert!(markdown(&groups, 20)
             .join("\n")
             .contains("measured different ODD attributes"));
+    }
+
+    #[test]
+    fn flaky_and_failing_cells_sort_before_the_rest() {
+        // F: 1 of 3 failed (flaky); B: 3 of 3 (failing); T0..T24: 1 of 2
+        // each (too few runs, but flakier by the interval alone). The cells
+        // the table counts must not be cut off by the 20-row limit.
+        let r = |l: &str| json!([[l, "x"], 1, 0.1, 0.0]);
+        let ts = || (0..25).map(|k| r(&format!("T{k}"))).collect::<Vec<_>>();
+        let with = |mut rows: Vec<Json>, more: Vec<Json>| {
+            rows.extend(more);
+            cells(json!(rows))
+        };
+        let docs = vec![
+            run("s", None, true, with(vec![r("F")], ts()), None),
+            run("s", None, false, with(vec![r("F"), r("B")], ts()), None),
+            run("s", None, false, cells(json!([r("B")])), None),
+            run("s", None, false, cells(json!([r("B")])), None),
+            run("s", None, true, cells(json!([r("F")])), None),
+        ];
+        let g = &cell_flakiness(&docs)[0];
+        let status = |i: usize| g.rows[i].status(MIN_RUNS, BAND);
+        assert_eq!(
+            (g.rows[0].labels[0].as_str(), status(0)),
+            ("F", CellStatus::Flaky)
+        );
+        assert_eq!(
+            (g.rows[1].labels[0].as_str(), status(1)),
+            ("B", CellStatus::Failing)
+        );
+        assert_eq!(status(2), CellStatus::TooFew);
+        let md = markdown(&cell_flakiness(&docs), 20).join("\n");
+        assert!(
+            md.contains("| F x x | flaky |") && md.contains("| B x x | failing |"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn an_environment_that_is_not_a_string_is_still_one() {
+        let mut a = run(
+            "s",
+            None,
+            true,
+            cells(json!([[["a", "b"], 1, 0.1, 0.0]])),
+            None,
+        );
+        a["outcome"]["environment"] = json!(123);
+        let b = run(
+            "s",
+            None,
+            false,
+            cells(json!([[["a", "b"], 1, 0.1, 0.0]])),
+            None,
+        );
+        let groups = cell_flakiness(&[a, b]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].environment.as_deref(), Some("123"));
     }
 
     #[test]

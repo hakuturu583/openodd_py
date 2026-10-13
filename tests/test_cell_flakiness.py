@@ -199,6 +199,10 @@ def test_the_interval_matches_the_reference(case: tuple[int, int]) -> None:
             assert r.status(min_runs, band) == reference_status(runs, failed, min_runs, band)
 
 
+def test_the_interval_takes_its_z() -> None:
+    assert wilson_interval(5, 10, z=1.0)[0] > wilson_interval(5, 10)[0]
+
+
 def test_more_failures_than_runs_is_refused() -> None:
     with pytest.raises(ValueError):
         wilson_interval(3, 2)
@@ -267,6 +271,33 @@ def test_different_attribute_lists_are_reported_apart_with_a_warning(
     assert "measured different ODD attributes" in caplog.text
     assert "documents [0, 2]" in caplog.text and "documents [1]" in caplog.text
     assert "measured different ODD attributes" in report.to_markdown()
+
+
+def test_an_environment_that_is_not_a_string_is_not_no_environment() -> None:
+    d = doc([row(SLOW)], passed=True)
+    d["outcome"]["environment"] = 123
+    groups = merge_coverage([d, doc([row(SLOW)], passed=False)]).cell_flakiness
+    assert [g.environment for g in groups] == ["123", None]
+
+
+def test_the_row_limit_never_hides_a_flaky_or_failing_cell() -> None:
+    many = [row([f"T{k}", "none"]) for k in range(25)]
+    docs = [
+        doc([row(SLOW)] + many, passed=True),
+        doc([row(SLOW), row(FAST)] + many, passed=False),
+        doc([row(FAST)], passed=False),
+        doc([row(FAST)], passed=False),
+        doc([row(SLOW)], passed=True),
+    ]
+    g = only(merge_coverage(docs))
+    assert [r.status() for r in g.rows[:3]] == ["flaky", "failing", "too_few"]
+    section = merge_coverage(docs).to_markdown().split("## Flakiness per ODD cell", 1)[1]
+    assert "| [0, 30) x none | flaky |" in section and "| [30, 60] x heavy | failing |" in section
+
+
+def test_a_label_with_a_bar_does_not_break_the_table() -> None:
+    md = merge_coverage([doc([row(["a|b", "none"])], passed=True)]).to_markdown()
+    assert "| a\\|b x none |" in md
 
 
 def test_a_row_of_the_wrong_length_is_skipped() -> None:
@@ -362,8 +393,9 @@ def test_the_collector_writes_only_what_was_given(caplog: pytest.LogCaptureFixtu
         collector.record_outcome(True, failed_at=0.2)
     assert collector.to_dict("s")["outcome"] == {"passed": True}
     assert "of a run that passed is ignored" in caplog.text
-    collector.record_outcome(False, failed_at=float("nan"))
-    assert collector.to_dict("s")["outcome"] == {"passed": False}
+    for bad in (float("nan"), float("inf"), True, "0.2", None):
+        collector.record_outcome(False, failed_at=bad)  # type: ignore[arg-type]
+        assert collector.to_dict("s")["outcome"] == {"passed": False}
     collector.record_outcome(False, environment="e")
     assert collector.to_dict("s")["outcome"] == {"passed": False, "environment": "e"}
     # Without an ODD, the time is kept and no cell is.
@@ -374,6 +406,24 @@ def test_the_collector_writes_only_what_was_given(caplog: pytest.LogCaptureFixtu
     empty = CoverageCollector([], odd=_odd())
     empty.record_outcome(False, failed_at=0.0)
     assert empty.to_dict("s")["outcome"] == {"passed": False, "failed_at": 0.0}
+
+
+def test_the_failure_is_never_put_in_a_later_tick() -> None:
+    # Rounded, 0.9995 and 0.9996 are both 1.0: compared unrounded, the tick
+    # at 0.9996 came after the failure.
+    collector = CoverageCollector([], odd=_odd())
+    _drive(collector, [(0.5, 10.0, "none"), (0.9996, 40.0, "heavy")])
+    collector.record_outcome(False, failed_at=0.9995)
+    outcome = collector.to_dict("s")["outcome"]
+    assert outcome["failed_cell"] == ["[0, 30)", "none"] and outcome["failed_at"] == 1.0
+
+
+def test_a_tick_that_could_not_be_counted_keeps_the_others_in_place() -> None:
+    collector = CoverageCollector([], odd=_odd())
+    _drive(collector, [(0.1, 10.0, "none"), (0.2, object(), "heavy"), (0.3, 40.0, "heavy")])
+    for at, cell in ((0.15, ["[0, 30)", "none"]), (0.35, ["[30, 60]", "heavy"])):
+        collector.record_outcome(False, failed_at=at)
+        assert collector.to_dict("s")["outcome"].get("failed_cell") == cell
 
 
 def test_cells_add_returns_the_cell() -> None:
@@ -454,7 +504,9 @@ def reference_cells(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for labels, (n, k, at, s, m) in g["rows"].items():
             low, high = reference_wilson(k, n)
             rows.append([list(labels), n, k, k / n, low, high, at, round(s, 3), round(m, 3)])
-        rows.sort(key=lambda r: (-min(r[4], 1 - r[5]), -r[3], r[0]))
+        rank = ["flaky", "failing", "mixed", "too_few", "passing"]
+        rows.sort(key=lambda r: (rank.index(reference_status(r[1], r[2], CELL_MIN_RUNS, CELL_BAND)),
+                                 -min(r[4], 1 - r[5]), -r[3], r[0]))
         out.append({"scenario": scenario, "environment": env, "attributes": list(attrs),
                     "runs": len(g["documents"]), "runs_failed": g["failed"],
                     "failures_located": g["located"], "documents": g["documents"], "rows": rows})

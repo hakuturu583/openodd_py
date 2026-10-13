@@ -263,8 +263,12 @@ first tick, a run without an ODD, a tick whose cell could not be counted, or a
 file from another writer without `failed_cell` leaves the failure *unlocated*: the
 run still counts in `runs_failed` of every cell it visited, and in no cell's
 `fail_at_cell` (the group's `failures_located` says how many were located). A
-`failed_at` after the last tick takes the last tick's cell. `failed_at` on a run
-that passed is ignored with a warning.
+`failed_at` after the last tick takes the last tick's cell. It is compared
+unrounded (and written to 3 decimals, as the samples' times are), and "last" is in
+the order ticked: after a clock that went back, the later tick wins. `failed_at`
+on a run that passed, or one that is not a finite number, is ignored with a
+warning. Each `record_outcome()` call replaces the previous one's, environment
+included.
 
 ### Groups: scenario, environment, attributes
 
@@ -299,10 +303,12 @@ Each cell has a status, from two explicit parameters, `min_runs` (default
 | `passing` | no run failed |
 | `too_few` | fewer than `min_runs` runs |
 
-`band=(0, 1)` calls every mixed cell flaky. The rows are sorted flakiest first:
-by the lower bound on the rarer outcome, `min(ci_low, 1 - ci_high)` (it exceeds
-`b` exactly when the interval lies inside `(b, 1 - b)`), then by failure rate (so
-always-failing cells come before always-passing ones), then by labels.
+`band=(0, 1)` calls every mixed cell flaky. The rows are sorted by status with
+the default thresholds -- flaky, failing, mixed, too few runs, passing -- so a
+table cut short at its row limit still shows every cell it counts as flaky or
+failing; then flakiest first, by the lower bound on the rarer outcome,
+`min(ci_low, 1 - ci_high)` (it exceeds `b` exactly when the interval lies inside
+`(b, 1 - b)`); then by failure rate; then by labels.
 
 `fail_rate` says how often runs that *passed through* a cell failed;
 `fail_at_cell` says how many were *in* it when they failed. A run drives through

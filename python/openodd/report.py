@@ -76,10 +76,14 @@ CELL_MIN_RUNS: int = _core.CELL_MIN_RUNS
 CELL_BAND: tuple[float, float] = tuple(_core.CELL_BAND)  # type: ignore[assignment]
 
 
-def wilson_interval(failed: int, runs: int) -> tuple[float, float]:
-    """The 95% Wilson score interval of *failed* failures in *runs* runs
-    (``(0.0, 1.0)`` for no runs)."""
-    low, high = _core.wilson_interval(int(failed), int(runs))
+#: The z of a two-sided 95% interval.
+Z95: float = 1.959963984540054
+
+
+def wilson_interval(failed: int, runs: int, z: float = Z95) -> tuple[float, float]:
+    """The Wilson score interval of *failed* failures in *runs* runs, 95% by
+    default (``(0.0, 1.0)`` for no runs)."""
+    low, high = _core.wilson_interval(int(failed), int(runs), float(z))
     return float(low), float(high)
 
 
@@ -212,7 +216,9 @@ class CellFlakiness:
         runs_failed: Of those, how many failed.
         failures_located: Failed runs that recorded the cell they failed in.
         documents: The coverage files pooled (their indices in the merge).
-        rows: The cells visited, flakiest first, then by labels.
+        rows: The cells visited: by status (flaky, failing, mixed, passing,
+            too few runs, with the default thresholds), then flakiest
+            first, then by failure rate, then by labels.
     """
 
     scenario: str
@@ -299,7 +305,8 @@ class CoverageReport:
     def cell_flakiness(self) -> list[CellFlakiness]:
         """The runs' outcomes per ODD cell: one :class:`CellFlakiness` per
         scenario, environment and attribute list, in the order merged. Empty
-        when no run recorded both an outcome and the ODD's cells."""
+        when no run recorded both an outcome and the ODD's cells table (a run
+        of no steps has one, and counts with no cell visited)."""
         return [CellFlakiness.from_dict(raw) for raw in json.loads(self._core.cell_flakiness_json())]
 
     def flaky_cells(self, min_runs: int = CELL_MIN_RUNS,

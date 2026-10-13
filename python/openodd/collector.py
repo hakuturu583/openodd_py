@@ -208,14 +208,17 @@ class _OddMonitor:
         #: buckets (``odd.cells``).
         self.cells = OddCells(odd)
         self._cell_failed = False
-        #: Each tick's cell (an index into ``_cell_labels``; ``None`` when it
-        #: could not be counted), in the order of :attr:`rows`.
-        self._tick_cells: list[Optional[int]] = []
+        #: Each tick's time (as given, unrounded) and cell (an index into
+        #: ``_cell_labels``; ``None`` when it could not be counted), in order.
+        self._tick_cells: list[tuple[float, Optional[int]]] = []
         self._cell_index: dict[tuple[str, ...], int] = {}
         self._cell_labels: list[list[str]] = []
 
-    def count(self, values: dict[str, Any], seconds: float, meters: float) -> None:
-        """Count one step in its cell (best effort, logged once)."""
+    def count(
+        self, values: dict[str, Any], seconds: float, meters: float, elapsed: float
+    ) -> None:
+        """Count one step, which ended at *elapsed*, in its cell (best effort,
+        logged once)."""
         try:
             cell = self.cells.add(
                 [values.get(a.name) for a in self.odd.attributes], seconds, meters
@@ -224,9 +227,9 @@ class _OddMonitor:
             if key not in self._cell_index:
                 self._cell_index[key] = len(self._cell_labels)
                 self._cell_labels.append(cell)
-            self._tick_cells.append(self._cell_index[key])
+            self._tick_cells.append((elapsed, self._cell_index[key]))
         except Exception:
-            self._tick_cells.append(None)
+            self._tick_cells.append((elapsed, None))
             if not self._cell_failed:
                 self._cell_failed = True
                 logger.warning(
@@ -276,11 +279,12 @@ class _OddMonitor:
         return verdict
 
     def cell_at(self, elapsed: float) -> Optional[list[str]]:
-        """The cell of the last tick at or before *elapsed* (the samples'
-        clock); ``None`` before the first tick, or if it was not counted."""
-        for i in range(min(len(self.rows), len(self._tick_cells)) - 1, -1, -1):
-            if self.rows[i][0] <= elapsed:
-                index = self._tick_cells[i]
+        """The cell of the last tick, in the order ticked, that ended at or
+        before *elapsed* (the samples' clock; after a clock that went back,
+        a later tick wins); ``None`` before the first tick, or if it was not
+        counted."""
+        for at, index in reversed(self._tick_cells):
+            if at <= elapsed:
                 return None if index is None else list(self._cell_labels[index])
         return None
 
@@ -557,24 +561,27 @@ class CoverageCollector:
                 ``started_at`` when that clock starts at zero. With an ODD,
                 the cell of the last tick at or before it is written too
                 (``outcome.failed_cell``). Ignored, with a warning, for a run
-                that passed, or if not a finite number of seconds.
+                that passed, or if not a finite number (a bool or a string is
+                not one).
             environment: What the run ran on, as an opaque ID (a digest of
                 the software and its dependencies' versions): the report
                 pools per-cell outcomes only over runs of the same one.
+
+        Each call replaces what an earlier one recorded, the time and the
+        environment included.
         """
         self._passed = bool(passed)
         self._failed_at = None
         if failed_at is not None:
-            try:
+            at = math.nan
+            if isinstance(failed_at, (int, float)) and not isinstance(failed_at, bool):
                 at = float(failed_at)
-            except (TypeError, ValueError):
-                at = math.nan
             if self._passed:
                 logger.warning("coverage: failed_at=%r of a run that passed is ignored", failed_at)
             elif not math.isfinite(at):
                 logger.warning("coverage: failed_at=%r is not a time; ignored", failed_at)
             else:
-                self._failed_at = round(at, 3)  # as the samples' times are kept
+                self._failed_at = at  # compared unrounded; written as the samples' times are
         self._environment = None if environment is None else str(environment)
 
     def _outcome(self) -> Optional[dict[str, Any]]:
@@ -583,7 +590,7 @@ class CoverageCollector:
             return None
         outcome: dict[str, Any] = {"passed": self._passed}
         if self._failed_at is not None:
-            outcome["failed_at"] = self._failed_at
+            outcome["failed_at"] = round(self._failed_at, 3)
             cell = self._odd.cell_at(self._failed_at) if self._odd is not None else None
             if cell is not None:
                 outcome["failed_cell"] = cell
@@ -614,7 +621,7 @@ class CoverageCollector:
                 values[item] = _situation_value(verdict.modules.get(module))
         step = self._step(context, elapsed)
         if self._odd is not None:
-            self._odd.count(attributes, step.seconds, step.meters)
+            self._odd.count(attributes, step.seconds, step.meters, elapsed)
         self._sample_event(context, SamplingEvent.TICK, values, step)
         for key, entry in self._conditions.items():
             condition, was_satisfied = entry
