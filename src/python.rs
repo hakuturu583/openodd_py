@@ -1442,6 +1442,120 @@ fn coverage_view_page(title: &str, body: &str) -> String {
     openodd_coverage_view::html::page(title, body)
 }
 
+/// The drawn cases of coverage documents, read once, for the case plot.
+#[pyclass(frozen, module = "openodd._core")]
+struct CasePlot {
+    inner: openodd_coverage_view::CaseSet,
+}
+
+fn case_query(query_json: &str) -> PyResult<openodd_coverage_view::CaseQuery> {
+    let raw: serde_json::Value =
+        serde_json::from_str(query_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    openodd_coverage_view::CaseQuery::from_json(&raw).map_err(PyValueError::new_err)
+}
+
+fn case_options(
+    id: &str,
+    link: Option<String>,
+    table: bool,
+    labels: Option<indexmap::IndexMap<String, String>>,
+) -> PyResult<openodd_coverage_view::case_plot::Options> {
+    let mut opts = openodd_coverage_view::case_plot::Options {
+        id: id.to_string(),
+        link,
+        table,
+        ..Default::default()
+    };
+    for (k, v) in labels.unwrap_or_default() {
+        if !opts.labels.set(&k, &v) {
+            return Err(PyValueError::new_err(format!("no such label: {k}")));
+        }
+    }
+    Ok(opts)
+}
+
+#[pymethods]
+impl CasePlot {
+    #[new]
+    fn new(documents_json: &str) -> PyResult<Self> {
+        let docs: Vec<serde_json::Value> = serde_json::from_str(documents_json)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(CasePlot {
+            inner: openodd_coverage_view::CaseSet::from_documents(&docs),
+        })
+    }
+    #[getter]
+    fn attributes(&self) -> Vec<String> {
+        self.inner.attributes()
+    }
+    #[getter]
+    fn scenarios(&self) -> Vec<String> {
+        self.inner.scenarios()
+    }
+    #[getter]
+    fn cases(&self) -> usize {
+        self.inner.cases.len()
+    }
+    #[getter]
+    fn runs(&self) -> usize {
+        self.inner.runs()
+    }
+    #[getter]
+    fn skipped(&self) -> (usize, usize) {
+        (self.inner.without_case, self.inner.without_outcome)
+    }
+    fn data_json(&self, query_json: &str) -> PyResult<String> {
+        Ok(self
+            .inner
+            .plot(&case_query(query_json)?)
+            .to_json()
+            .to_string())
+    }
+    #[pyo3(signature = (query_json, id="", link=None, table=true, labels=None))]
+    fn fragment(
+        &self,
+        query_json: &str,
+        id: &str,
+        link: Option<String>,
+        table: bool,
+        labels: Option<indexmap::IndexMap<String, String>>,
+    ) -> PyResult<String> {
+        let plot = self.inner.plot(&case_query(query_json)?);
+        Ok(openodd_coverage_view::case_plot::fragment(
+            &self.inner,
+            &plot,
+            &case_options(id, link, table, labels)?,
+        ))
+    }
+    #[pyo3(signature = (query_json, id="", labels=None))]
+    fn table(
+        &self,
+        query_json: &str,
+        id: &str,
+        labels: Option<indexmap::IndexMap<String, String>>,
+    ) -> PyResult<String> {
+        let plot = self.inner.plot(&case_query(query_json)?);
+        Ok(openodd_coverage_view::case_plot::table(
+            &plot,
+            &case_options(id, None, true, labels)?,
+        ))
+    }
+    #[pyo3(signature = (query_json, id="", table=true, labels=None))]
+    fn explorer(
+        &self,
+        query_json: &str,
+        id: &str,
+        table: bool,
+        labels: Option<indexmap::IndexMap<String, String>>,
+    ) -> PyResult<String> {
+        Ok(openodd_coverage_view::case_plot::explorer(
+            &self.inner,
+            &case_query(query_json)?,
+            &case_options(id, None, table, labels)?,
+        ))
+    }
+}
+
 /// The Wilson score interval of `failed` failures in `runs` runs.
 #[pyfunction]
 #[pyo3(signature = (failed, runs, z=crate::cell_flakiness::Z95))]
@@ -1953,6 +2067,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MergedEntry>()?;
     m.add_class::<CoverageReport>()?;
     m.add_class::<CoverageView>()?;
+    m.add_class::<CasePlot>()?;
     m.add_class::<Knob>()?;
     m.add_class::<Sample>()?;
     m.add_class::<Sampler>()?;
