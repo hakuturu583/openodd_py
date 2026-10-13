@@ -288,14 +288,27 @@
 .oo-cov rect.oo-pp-19 { fill: var(--oo-pp-19); }
 .oo-cov rect.oo-pp-20 { fill: var(--oo-pp-20); }
 .oo-cov .oo-pred rect { stroke: none; shape-rendering: crispEdges; }
-.oo-cov .oo-pred-contour { fill: none; stroke: var(--oo-ink-2); stroke-opacity: .55; stroke-width: 1;
-  stroke-dasharray: 3 2.5; stroke-linecap: round; }
+/* The 30% and 70% contours: the fail and pass colours, darkened towards the
+   ink so they keep their contrast on the tinted background, over a halo of
+   the card's colour; labelled on the line. */
+.oo-cov { --oo-cl-low: color-mix(in oklab, var(--oo-fail) 78%, var(--oo-ink));
+  --oo-cl-high: color-mix(in oklab, var(--oo-pass) 70%, var(--oo-ink)); }
+.oo-cov .oo-cl, .oo-cov .oo-cl-halo { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.oo-cov .oo-cl-halo { stroke: var(--oo-surface); stroke-width: 4.5; stroke-opacity: .9; }
+.oo-cov .oo-cl { stroke-width: 2; stroke-dasharray: 9 3; }
+.oo-cov .oo-cl.oo-cl-low { stroke: var(--oo-cl-low); }
+.oo-cov .oo-cl.oo-cl-high { stroke: var(--oo-cl-high); }
+.oo-cov .oo-cl-label { font-size: 12px; font-weight: 700; paint-order: stroke; stroke: var(--oo-surface);
+  stroke-width: 4px; stroke-linejoin: round; font-family: var(--oo-font); }
+.oo-cov .oo-plot-compact .oo-cl-label { font-size: 11.5px; }
+.oo-cov .oo-cl-label.oo-cl-low { fill: var(--oo-cl-low); }
+.oo-cov .oo-cl-label.oo-cl-high { fill: var(--oo-cl-high); }
 .oo-cov .oo-pred-legend { flex-wrap: wrap; }
 .oo-cov .oo-pred-scale { display: inline-flex; flex-direction: column; gap: 2px; min-width: 150px; }
 .oo-cov .oo-pred-bar { display: block; height: 9px; border-radius: 3px; border: 1px solid var(--oo-border);
   background: linear-gradient(90deg, var(--oo-pp-0), var(--oo-pp-5), var(--oo-pp-10), var(--oo-pp-15), var(--oo-pp-20)); }
 .oo-cov .oo-pred-ticks { display: flex; justify-content: space-between; gap: 8px; font-size: 10.5px; color: var(--oo-ink-3); white-space: nowrap; }
-.oo-cov .oo-pred-line { display: inline-block; width: 18px; border-top: 1.5px dashed var(--oo-ink-2); opacity: .6; }
+
 .oo-cov .oo-pred-note { margin-top: 8px; font-size: 11.5px; }
 
 /* The repeated cases' table: it scrolls in its own box rather than squash. */

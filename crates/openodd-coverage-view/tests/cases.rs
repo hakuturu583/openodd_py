@@ -343,9 +343,11 @@ fn the_background_is_what_the_predictor_gives() {
         );
     }
     assert!(html.find("<rect class=\"oo-pp-").unwrap() < html.find("role=\"img\"").unwrap());
-    // Dashed lines where it crosses 30% (between 0.2 and 0.9, 0.1 and 0.5)
-    // and 70% (between 0.5 and 0.9, 0.2 and 0.9).
-    assert_eq!(html.matches("class=\"oo-pred-contour\"").count(), 4);
+    // Smooth contours at 30% (fail colour) and 70% (pass colour), in both
+    // sizes, with their legend keys.
+    assert!(html.matches("class=\"oo-cl oo-cl-low\"").count() >= 2);
+    assert!(html.matches("class=\"oo-cl oo-cl-high\"").count() >= 2);
+    assert!(html.contains("30% predicted pass") && html.contains("70% predicted pass"));
     assert!(html.contains("Predicted pass rate") && html.contains("50% unstable"));
     assert!(!html.contains("Predicted: flaky"));
     assert!(html.contains("fitted to these 8 runs"));

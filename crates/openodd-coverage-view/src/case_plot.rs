@@ -202,11 +202,11 @@ impl Default for Labels {
             predicted_low: s("low"),
             predicted_mid: s("unstable"),
             predicted_high: s("high"),
-            predicted_contours: s("30% and 70%"),
+            predicted_contours: s("{p} predicted pass"),
             predicted_caption: s(
                 "Background: the pass probability that a Gaussian-process classifier fitted to these \
                  {runs} runs predicts at each point: green where it predicts a high pass rate, red where \
-                 low, yellow around 50% (unstable); dashed lines at 30% and 70%. Where runs are few the \
+                 low, yellow around 50% (unstable); lines at 30% (red) and 70% (green). Where runs are few the \
                  model is unsure, so the colour stays near yellow there.",
             ),
             held: s("Attributes not plotted are held at the cases' typical values: {held}."),
@@ -1140,8 +1140,7 @@ fn level(p: f64) -> usize {
 }
 
 /// The predicted pass probability, as faint rectangles behind everything
-/// else (each row's runs of one colour step as one rectangle), and dashed
-/// lines where it crosses [`CONTOURS`].
+/// else: each row's runs of one colour step as one rectangle.
 fn background(out: &mut String, lay: &Layout, grid: &Grid) {
     let (l, t, r, b) = lay.area;
     if lay.x.axis.map(|a| a.name.as_str()) != Some(grid.x.name())
@@ -1181,45 +1180,259 @@ fn background(out: &mut String, lay: &Layout, grid: &Grid) {
             c = end + 1;
         }
     }
-    // The contours: a segment on every cell edge the probability crosses.
-    let p = |r: usize, c: usize| -> Option<f64> {
-        grid.cells.get(r)?.get(c)?.map(|x| x.pass_probability)
+    out.push_str("</g>");
+}
+
+/// A contour of the predicted pass probability: its level and its lines,
+/// each a polyline in the SVG's units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Contour {
+    pub level: f64,
+    pub lines: Vec<Vec<(f64, f64)>>,
+}
+
+/// The lattice the contours are traced on: the cells' centres (in the SVG's
+/// units, ascending), padded with the frame's edges so the lines reach it,
+/// and the grid index of each.
+fn lattice(spans: &[Option<(f64, f64)>], frame: (f64, f64)) -> Vec<(f64, usize)> {
+    let mut centres: Vec<(f64, usize)> = spans
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.map(|(a, b)| ((a + b) / 2.0, i)))
+        .collect();
+    centres.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (Some(&first), Some(&last)) = (centres.first(), centres.last()) else {
+        return centres;
     };
-    let span = |v: &[Option<(f64, f64)>], i: usize| v.get(i).copied().flatten();
-    for t in CONTOURS {
-        let crosses = |a: f64, b: f64| (a < t) != (b < t);
-        let mut d = String::new();
-        for (r, row) in grid.cells.iter().enumerate() {
-            let Some((y0, y1)) = span(&ys, r) else {
+    let (lo, hi) = (frame.0.min(frame.1), frame.0.max(frame.1));
+    let mut out = Vec::with_capacity(centres.len() + 2);
+    if first.0 - lo > 0.5 {
+        out.push((lo, first.1));
+    }
+    out.extend(centres);
+    if hi - last.0 > 0.5 {
+        out.push((hi, last.1));
+    }
+    out
+}
+
+/// Marching squares over a lattice of values: the segments where `v`
+/// crosses `t`, each end interpolated linearly along its square's edge. A
+/// saddle is split by the square's mean.
+pub fn march(
+    xs: &[f64],
+    ys: &[f64],
+    v: &dyn Fn(usize, usize) -> Option<f64>,
+    t: f64,
+) -> Vec<((f64, f64), (f64, f64))> {
+    let mut out = Vec::new();
+    for r in 0..ys.len().saturating_sub(1) {
+        for c in 0..xs.len().saturating_sub(1) {
+            // Corners: a top-left, b top-right, c bottom-right, d bottom-left.
+            let (Some(a), Some(b), Some(cc), Some(d)) =
+                (v(r, c), v(r, c + 1), v(r + 1, c + 1), v(r + 1, c))
+            else {
                 continue;
             };
-            for c in 0..row.len() {
-                let (Some(a), Some((x0, x1))) = (p(r, c), span(&xs, c)) else {
-                    continue;
-                };
-                if let (Some(b), Some(_)) = (p(r, c + 1), span(&xs, c + 1)) {
-                    if crosses(a, b) {
-                        let _ = write!(d, "M{x1:.1} {y0:.1}V{y1:.1}");
+            let (x0, x1, y0, y1) = (xs[c], xs[c + 1], ys[r], ys[r + 1]);
+            let at = |p: f64, q: f64| {
+                if (q - p).abs() < 1e-12 {
+                    0.5
+                } else {
+                    ((t - p) / (q - p)).clamp(0.0, 1.0)
+                }
+            };
+            // Where each edge is crossed, if it is.
+            let high = |x: f64| x >= t;
+            let edge = |k: usize| -> Option<(f64, f64)> {
+                match k {
+                    0 if high(a) != high(b) => Some((x0 + (x1 - x0) * at(a, b), y0)),
+                    1 if high(b) != high(cc) => Some((x1, y0 + (y1 - y0) * at(b, cc))),
+                    2 if high(cc) != high(d) => Some((x1 + (x0 - x1) * at(cc, d), y1)),
+                    3 if high(d) != high(a) => Some((x0, y1 + (y0 - y1) * at(d, a))),
+                    _ => None,
+                }
+            };
+            let crossed: Vec<usize> = (0..4).filter(|k| edge(*k).is_some()).collect();
+            let mut pair = |k1: usize, k2: usize| {
+                if let (Some(p), Some(q)) = (edge(k1), edge(k2)) {
+                    out.push((p, q));
+                }
+            };
+            match crossed.len() {
+                2 => pair(crossed[0], crossed[1]),
+                4 => {
+                    // A saddle: cut off the corners on the other side of the
+                    // mean from it. Corner a touches edges 3 and 0, b 0 and
+                    // 1, c 1 and 2, d 2 and 3.
+                    let mean = high((a + b + cc + d) / 4.0);
+                    for (corner, k1, k2) in [(a, 3, 0), (b, 0, 1), (cc, 1, 2), (d, 2, 3)] {
+                        if high(corner) != mean {
+                            pair(k1, k2);
+                        }
                     }
                 }
-                if let (Some(b), Some((u0, u1))) = (p(r + 1, c), span(&ys, r + 1)) {
-                    if crosses(a, b) {
-                        // The edge shared with the next row.
-                        let y = if (u0 - y1).abs() < (u1 - y0).abs() {
-                            y1
-                        } else {
-                            y0
-                        };
-                        let _ = write!(d, "M{x0:.1} {y:.1}H{x1:.1}");
-                    }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Join segments that share ends into polylines.
+fn chain(segments: Vec<((f64, f64), (f64, f64))>) -> Vec<Vec<(f64, f64)>> {
+    let key = |p: (f64, f64)| ((p.0 * 100.0).round() as i64, (p.1 * 100.0).round() as i64);
+    let mut ends: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (i, (p, q)) in segments.iter().enumerate() {
+        ends.entry(key(*p)).or_default().push(i);
+        ends.entry(key(*q)).or_default().push(i);
+    }
+    let mut used = vec![false; segments.len()];
+    let mut lines = Vec::new();
+    for start in 0..segments.len() {
+        if used[start] {
+            continue;
+        }
+        used[start] = true;
+        let mut line = vec![segments[start].0, segments[start].1];
+        // Grow at the tail, then at the head.
+        for _ in 0..2 {
+            loop {
+                let tail = *line.last().expect("two points");
+                let next = ends
+                    .get(&key(tail))
+                    .and_then(|l| l.iter().copied().find(|j| !used[*j]));
+                let Some(j) = next else { break };
+                used[j] = true;
+                let (p, q) = segments[j];
+                line.push(if key(p) == key(tail) { q } else { p });
+            }
+            line.reverse();
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// The contours of `grid` at [`CONTOURS`], laid out on `lay`.
+fn contours(lay: &Layout, grid: &Grid) -> Vec<Contour> {
+    let (l, t, r, b) = lay.area;
+    let xs = lattice(&grid_spans(&lay.x, &grid.x, (l, r)), (l, r));
+    let ys = lattice(&grid_spans(&lay.y, &grid.y, (b, t)), (t, b));
+    let px: Vec<f64> = xs.iter().map(|x| x.0).collect();
+    let py: Vec<f64> = ys.iter().map(|y| y.0).collect();
+    let v = |ri: usize, ci: usize| -> Option<f64> {
+        let row = grid.cells.get(ys[ri].1)?;
+        row.get(xs[ci].1)
+            .copied()
+            .flatten()
+            .map(|c| c.pass_probability)
+    };
+    CONTOURS
+        .iter()
+        .map(|&level| Contour {
+            level,
+            lines: chain(march(&px, &py, &v, level)),
+        })
+        .filter(|c| !c.lines.is_empty())
+        .collect()
+}
+
+/// A contour's label: where it goes on its line.
+struct ContourLabel {
+    level: f64,
+    x: f64,
+    y: f64,
+}
+
+/// Up to two labels per line, on the line, clear of the marks, the
+/// `n/m` labels, each other and the plot's edges.
+fn contour_labels(lay: &Layout, found: &[Contour]) -> Vec<ContourLabel> {
+    let g = &lay.g;
+    let (w, h) = (text_width("70%", g.font) + 6.0, g.font + 4.0);
+    let (l, t, r, b) = lay.area;
+    let mut taken: Vec<Rect> = lay
+        .marks
+        .iter()
+        .map(|m| {
+            let p = g.r + 4.0;
+            (m.at.0 - p, m.at.1 - p, m.at.0 + p, m.at.1 + p)
+        })
+        .collect();
+    for tag in &lay.tags {
+        let tw = text_width(&tag.text, g.small) + 4.0;
+        taken.push((
+            tag.x - tw / 2.0,
+            tag.y - g.small,
+            tag.x + tw / 2.0,
+            tag.y + 3.0,
+        ));
+    }
+    let mut out = Vec::new();
+    for c in found {
+        for line in &c.lines {
+            // Points along the line, every few units, with their distance.
+            let mut pts: Vec<(f64, f64, f64)> = vec![(line[0].0, line[0].1, 0.0)];
+            for wnd in line.windows(2) {
+                let (p, q) = (wnd[0], wnd[1]);
+                let len = (q.0 - p.0).hypot(q.1 - p.1);
+                let steps = (len / 4.0).ceil().max(1.0) as usize;
+                let s0 = pts.last().map(|x| x.2).unwrap_or(0.0);
+                for k in 1..=steps {
+                    let f = k as f64 / steps as f64;
+                    pts.push((p.0 + (q.0 - p.0) * f, p.1 + (q.1 - p.1) * f, s0 + len * f));
+                }
+            }
+            let total = pts.last().map(|p| p.2).unwrap_or(0.0);
+            if total < w * 1.5 {
+                continue;
+            }
+            let targets: &[f64] = if total > 260.0 { &[0.3, 0.75] } else { &[0.5] };
+            for target in targets {
+                let goal = total * target;
+                let mut order: Vec<&(f64, f64, f64)> = pts.iter().collect();
+                order.sort_by(|a, b| (a.2 - goal).abs().total_cmp(&(b.2 - goal).abs()));
+                let spot = order.into_iter().find(|(x, y, _)| {
+                    let rect = (x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0);
+                    rect.0 >= l + 3.0
+                        && rect.2 <= r - 3.0
+                        && rect.1 >= t + 3.0
+                        && rect.3 <= b - 3.0
+                        && taken.iter().all(|o| overlap(rect, *o) == 0.0)
+                });
+                if let Some(&(x, y, _)) = spot {
+                    taken.push((
+                        x - w / 2.0 - 2.0,
+                        y - h / 2.0 - 2.0,
+                        x + w / 2.0 + 2.0,
+                        y + h / 2.0 + 2.0,
+                    ));
+                    out.push(ContourLabel {
+                        level: c.level,
+                        x,
+                        y,
+                    });
                 }
             }
         }
-        if !d.is_empty() {
-            let _ = write!(out, "<path class=\"oo-pred-contour\" d=\"{d}\"/>");
-        }
     }
-    out.push_str("</g>");
+    out
+}
+
+fn contour_class(level: f64) -> &'static str {
+    if level < 0.5 {
+        "oo-cl-low"
+    } else {
+        "oo-cl-high"
+    }
+}
+
+fn path_d(line: &[(f64, f64)]) -> String {
+    let mut d = String::new();
+    for (i, (x, y)) in line.iter().enumerate() {
+        let _ = write!(d, "{}{x:.1} {y:.1}", if i == 0 { "M" } else { "L" });
+    }
+    d
 }
 
 fn y_label_width_numeric(a: &CaseAxis, g: &Geometry) -> f64 {
@@ -1261,11 +1474,27 @@ fn svg(
         r - l,
         b - t
     );
+    let found = grid.map(|g| contours(lay, g)).unwrap_or_default();
     if let Some(grid) = grid {
         background(out, lay, grid);
     }
     axis_svg(out, lay, true, labels);
     axis_svg(out, lay, false, labels);
+    // The contours: a halo of the card's colour under each line.
+    if !found.is_empty() {
+        out.push_str("<g class=\"oo-contours\" aria-hidden=\"true\">");
+        for c in &found {
+            for line in &c.lines {
+                let d = path_d(line);
+                let _ = write!(
+                    out,
+                    "<path class=\"oo-cl-halo\" d=\"{d}\"/><path class=\"oo-cl {}\" d=\"{d}\"/>",
+                    contour_class(c.level)
+                );
+            }
+        }
+        out.push_str("</g>");
+    }
     // Leader lines from a moved mark to its value.
     for m in lay.marks.iter().filter(|m| m.moved()) {
         let _ = write!(
@@ -1332,6 +1561,17 @@ fn svg(
             tag.y,
             tag.anchor,
             escape(&tag.text)
+        );
+    }
+    for label in contour_labels(lay, &found) {
+        let _ = write!(
+            out,
+            "<text class=\"oo-cl-label {}\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" \
+             dominant-baseline=\"central\" aria-hidden=\"true\">{}%</text>",
+            contour_class(label.level),
+            label.x,
+            label.y,
+            short_number(label.level * 100.0)
         );
     }
     out.push_str("</svg>");
@@ -1651,13 +1891,22 @@ fn panel(
             out,
             "<span class=\"oo-chip oo-pred-legend\">{}<span class=\"oo-pred-scale\" aria-hidden=\"true\">\
              <i class=\"oo-pred-bar\"></i><span class=\"oo-pred-ticks\"><span>0% {}</span><span>50% {}</span>\
-             <span>100% {}</span></span></span></span><span class=\"oo-chip\"><i class=\"oo-pred-line\"></i>{}</span>",
+             <span>100% {}</span></span></span></span>",
             escape(&labels.predicted_scale),
             escape(&labels.predicted_low),
             escape(&labels.predicted_mid),
             escape(&labels.predicted_high),
-            escape(&labels.predicted_contours)
         );
+        for level in CONTOURS {
+            let value = format!("{}%", short_number(level * 100.0));
+            let _ = write!(
+                out,
+                "<span class=\"oo-chip\"><svg class=\"oo-key\" viewBox=\"0 0 22 12\" width=\"22\" height=\"12\" aria-hidden=\"true\">\
+                 <path class=\"oo-cl-halo\" d=\"M1 6H21\"/><path class=\"oo-cl {}\" d=\"M1 6H21\"/></svg>{}</span>",
+                contour_class(level),
+                escape(&labels.predicted_contours.replace("{p}", &value))
+            );
+        }
     }
     if wide.marks.iter().chain(&compact.marks).any(Mark::moved) {
         let _ = write!(
@@ -1912,6 +2161,36 @@ mod tests {
             }
         }
         assert_eq!(at[3], (200.0, 50.0));
+    }
+
+    #[test]
+    fn contours_interpolate_to_their_level() {
+        // A surface that rises along x and y: v = (x + 2y) / 30 on 0..10.
+        let xs: Vec<f64> = (0..=10).map(|i| i as f64).collect();
+        let ys = xs.clone();
+        let f = |x: f64, y: f64| (x + 2.0 * y) / 30.0;
+        let v = |r: usize, c: usize| Some(f(xs[c], ys[r]));
+        for t in [0.3, 0.7] {
+            let segs = march(&xs, &ys, &v, t);
+            assert!(!segs.is_empty());
+            for (p, q) in &segs {
+                // Linear in x and y: every end lies on the level exactly.
+                assert!((f(p.0, p.1) - t).abs() < 1e-9, "{p:?}");
+                assert!((f(q.0, q.1) - t).abs() < 1e-9, "{q:?}");
+            }
+            // One straight line: chained, a single polyline, not a staircase.
+            let lines = chain(segs);
+            assert_eq!(lines.len(), 1);
+            let line = &lines[0];
+            let (a, b) = (line[0], line[line.len() - 1]);
+            for p in line {
+                let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+                assert!(cross.abs() < 1e-6);
+            }
+        }
+        // A saddle is split, not crossed twice.
+        let saddle = |r: usize, c: usize| Some(if (r + c).is_multiple_of(2) { 1.0 } else { 0.0 });
+        assert_eq!(march(&[0.0, 1.0], &[0.0, 1.0], &saddle, 0.5).len(), 2);
     }
 
     #[test]

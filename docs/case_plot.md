@@ -82,9 +82,14 @@ Gaussian-process classifier with `FlakinessModel`'s defaults and seed
 - **The colour is `pass_probability`** on a continuous diverging scale: red
   (`--oo-fail`) at 0, yellow (`--oo-flaky`) at 0.5, green (`--oo-pass`) at 1,
   in 5% steps. Green means the model predicts a high pass rate, red a low
-  one, and yellow an outcome around 50%, i.e. unstable. Thin dashed lines mark
-  where it crosses 30% and 70%, so the regions can be read without judging
-  colour. The legend shows the scale with its 0 / 50 / 100% ends.
+  one, and yellow an outcome around 50%, i.e. unstable. Two lines mark where it
+  crosses 30% (in a dark shade of the fail colour) and 70% (of the pass
+  colour), each labelled with its value on the line, so the regions can be
+  read without judging colour. They are traced by marching squares with
+  linear interpolation over the grid's cell centres (padded to the frame), so
+  they follow the predicted surface rather than the cells' edges; across
+  categorical bands they are straight segments between the bands' centres.
+  A halo of the card's colour keeps them readable over the gradient. The legend shows the scale with its 0 / 50 / 100% ends.
 - **Where runs are few** the model is unsure: the posterior is wide and the
   predicted pass probability is pulled towards 50%, so the colour stays near
   yellow there. Pale yellow means "unstable *or* not enough evidence".
@@ -185,7 +190,7 @@ Text with placeholders keeps them: `runs_of` (`{n} runs`), `of_cases`,
 `no_prediction` (`{reason}`). The background's legend is `predicted_scale`
 (*Predicted pass rate*), `predicted_low` / `predicted_mid` / `predicted_high`
 (*low* / *unstable* / *high*, after 0 / 50 / 100%) and `predicted_contours`
-(*30% and 70%*): in Japanese, for example, `{"predicted_scale": "予測成功率",
+(*{p} predicted pass*, once per line, `{p}` being 30% or 70%): in Japanese, for example, `{"predicted_scale": "予測成功率",
 "predicted_low": "低い", "predicted_mid": "不安定", "predicted_high": "高い"}`.
 
 ## In Rust
