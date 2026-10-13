@@ -16,6 +16,12 @@ A run that recorded the case it ran (:meth:`~.collector.CoverageCollector.record
 is kept as a :class:`CaseRun`. Its flakiness is refitted over all the runs of
 its scenario that were chosen in the same space and recorded an outcome
 (``assessed``), and the report lists them, flakiest first.
+
+A run that recorded its outcome also counts in the report's flakiness per ODD
+cell (:attr:`CoverageReport.cell_flakiness`, a :class:`CellFlakiness` per
+scenario, environment and attribute list): for every cell -- one bucket of
+each of the ODD's attributes -- the runs that drove through it, how many of
+them failed, and how many failed while in it.
 """
 
 from __future__ import annotations
@@ -32,10 +38,14 @@ from typing import Any, Optional
 from . import _core
 
 __all__ = [
+    "CELL_BAND",
+    "CELL_MIN_RUNS",
     "COVERAGE_FILE_GLOB",
     "COVERAGE_SCHEMA",
     "COVERAGE_SCHEMAS",
     "CaseRun",
+    "CellFlakiness",
+    "CellRow",
     "CoverageReport",
     "MergedEntry",
     "OddExposure",
@@ -44,6 +54,7 @@ __all__ = [
     "load_coverage_files",
     "main",
     "merge_coverage",
+    "wilson_interval",
 ]
 
 logger = logging.getLogger(__name__)
@@ -55,6 +66,30 @@ COVERAGE_SCHEMAS = (COVERAGE_SCHEMA, "autoware_carla_scenario.coverage/1")
 COVERAGE_FILE_GLOB = "*_coverage.json"
 
 MergedEntry = _core.MergedEntry
+
+#: The fewest runs that must have visited a cell for it to be called flaky
+#: (or always failing), unless asked otherwise.
+CELL_MIN_RUNS: int = _core.CELL_MIN_RUNS
+#: A cell is flaky when the 95% interval of its failure rate lies inside this
+#: band, unless asked otherwise: both outcomes then happen at least 5% of the
+#: time, at 95% confidence.
+CELL_BAND: tuple[float, float] = tuple(_core.CELL_BAND)  # type: ignore[assignment]
+
+
+def wilson_interval(failed: int, runs: int) -> tuple[float, float]:
+    """The 95% Wilson score interval of *failed* failures in *runs* runs
+    (``(0.0, 1.0)`` for no runs)."""
+    low, high = _core.wilson_interval(int(failed), int(runs))
+    return float(low), float(high)
+
+
+def _check_thresholds(min_runs: int, band: tuple[float, float]) -> tuple[float, float]:
+    low, high = (float(b) for b in band)
+    if min_runs < 1:
+        raise ValueError(f"min_runs must be at least 1, not {min_runs}")
+    if not 0.0 <= low < high <= 1.0:
+        raise ValueError(f"band must be (low, high) with 0 <= low < high <= 1, not {band}")
+    return low, high
 
 
 @dataclass
@@ -111,6 +146,127 @@ class CaseRun:
     assessed: Optional[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class CellRow:
+    """One ODD cell, over the runs of a :class:`CellFlakiness` group.
+
+    Attributes:
+        labels: One bucket label per attribute of the group.
+        runs_visited: Runs (with an outcome) that spent any step in it.
+        runs_failed: Of those, how many failed.
+        fail_rate: ``runs_failed / runs_visited``.
+        ci_low: The lower end of its 95% Wilson interval.
+        ci_high: The upper end.
+        fail_at_cell: Failed runs that were in this cell when they failed.
+        seconds: Seconds the runs spent in it.
+        meters: Metres they drove in it.
+    """
+
+    labels: tuple[str, ...]
+    runs_visited: int
+    runs_failed: int
+    fail_rate: float
+    ci_low: float
+    ci_high: float
+    fail_at_cell: int
+    seconds: float
+    meters: float
+
+    @classmethod
+    def from_row(cls, row: Sequence[Any]) -> "CellRow":
+        labels, visited, failed, rate, low, high, at, seconds, meters = row
+        return cls(tuple(labels), int(visited), int(failed), float(rate), float(low),
+                   float(high), int(at), float(seconds), float(meters))
+
+    def to_row(self) -> list[Any]:
+        """``[[labels...], runs_visited, runs_failed, fail_rate, ci_low, ci_high,
+        fail_at_cell, seconds, meters]``."""
+        return [list(self.labels), self.runs_visited, self.runs_failed, self.fail_rate,
+                self.ci_low, self.ci_high, self.fail_at_cell, self.seconds, self.meters]
+
+    def status(self, min_runs: int = CELL_MIN_RUNS,
+               band: tuple[float, float] = CELL_BAND) -> str:
+        """``"flaky"``: at least *min_runs* runs visited it, some failed and some
+        passed, and the 95% interval lies inside *band*; ``"failing"``: every one
+        of them failed (a bug, not flakiness); ``"mixed"``: both outcomes, but
+        the interval reaches outside *band*; ``"passing"``: none failed;
+        ``"too_few"``: fewer than *min_runs* runs."""
+        low, high = _check_thresholds(min_runs, band)
+        return str(_core.cell_status(self.runs_visited, self.runs_failed, int(min_runs), low, high))
+
+    def is_flaky(self, min_runs: int = CELL_MIN_RUNS,
+                 band: tuple[float, float] = CELL_BAND) -> bool:
+        return self.status(min_runs, band) == "flaky"
+
+
+@dataclass
+class CellFlakiness:
+    """The runs of one scenario and environment, per cell of one attribute list.
+
+    Attributes:
+        scenario: The runs' scenario.
+        environment: Their environment (``outcome.environment``); ``None``
+            for runs that recorded none, which are pooled only with each other.
+        attributes: The attributes a cell's labels are of, in order.
+        runs: Runs pooled: those with an outcome and the ODD's cells.
+        runs_failed: Of those, how many failed.
+        failures_located: Failed runs that recorded the cell they failed in.
+        documents: The coverage files pooled (their indices in the merge).
+        rows: The cells visited, flakiest first, then by labels.
+    """
+
+    scenario: str
+    environment: Optional[str]
+    attributes: list[str]
+    runs: int
+    runs_failed: int
+    failures_located: int
+    documents: list[int]
+    rows: list[CellRow]
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CellFlakiness":
+        return cls(
+            scenario=raw["scenario"],
+            environment=raw["environment"],
+            attributes=list(raw["attributes"]),
+            runs=int(raw["runs"]),
+            runs_failed=int(raw["runs_failed"]),
+            failures_located=int(raw["failures_located"]),
+            documents=list(raw["documents"]),
+            rows=[CellRow.from_row(r) for r in raw["rows"]],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """``{"scenario", "environment", "attributes": [...], "runs", "runs_failed",
+        "failures_located", "documents", "rows": [[[labels...], runs_visited,
+        runs_failed, fail_rate, ci_low, ci_high, fail_at_cell, seconds, meters], ...]}``."""
+        return {
+            "scenario": self.scenario,
+            "environment": self.environment,
+            "attributes": list(self.attributes),
+            "runs": self.runs,
+            "runs_failed": self.runs_failed,
+            "failures_located": self.failures_located,
+            "documents": list(self.documents),
+            "rows": [r.to_row() for r in self.rows],
+        }
+
+    def cell(self, labels: Sequence[str]) -> Optional[CellRow]:
+        """The cell with these labels, if any run visited it."""
+        key = tuple(labels)
+        return next((r for r in self.rows if r.labels == key), None)
+
+    def flaky_cells(self, min_runs: int = CELL_MIN_RUNS,
+                    band: tuple[float, float] = CELL_BAND) -> list[CellRow]:
+        """The cells that are flaky (:meth:`CellRow.status`), flakiest first."""
+        return [r for r in self.rows if r.is_flaky(min_runs, band)]
+
+    def failing_cells(self, min_runs: int = CELL_MIN_RUNS) -> list[CellRow]:
+        """The cells every one of at least *min_runs* runs failed in."""
+        return [r for r in self.rows if r.status(min_runs, (0.0, 1.0)) == "failing"]
+
+
 class CoverageReport:
     """Coverage merged over a number of runs."""
 
@@ -139,6 +295,18 @@ class CoverageReport:
         """The runs that recorded the case they ran, in the order merged."""
         return [CaseRun(**raw) for raw in json.loads(self._core.cases_json())]
 
+    @property
+    def cell_flakiness(self) -> list[CellFlakiness]:
+        """The runs' outcomes per ODD cell: one :class:`CellFlakiness` per
+        scenario, environment and attribute list, in the order merged. Empty
+        when no run recorded both an outcome and the ODD's cells."""
+        return [CellFlakiness.from_dict(raw) for raw in json.loads(self._core.cell_flakiness_json())]
+
+    def flaky_cells(self, min_runs: int = CELL_MIN_RUNS,
+                    band: tuple[float, float] = CELL_BAND) -> list[tuple[CellFlakiness, CellRow]]:
+        """Every flaky cell (:meth:`CellRow.status`), with its group."""
+        return [(g, r) for g in self.cell_flakiness for r in g.flaky_cells(min_runs, band)]
+
     def entry(self, name: str) -> Optional[MergedEntry]:
         return next((e for e in self.entries if e.name == name), None)
 
@@ -160,7 +328,23 @@ def merge_coverage(documents: Sequence[dict[str, Any]]) -> CoverageReport:
     report = CoverageReport(_core.merge_coverage(json.dumps(list(documents))))
     if report.runs == 0:
         logger.warning("coverage: nothing to merge")
+    _warn_mismatched_cells(report.cell_flakiness)
     return report
+
+
+def _warn_mismatched_cells(groups: Sequence[CellFlakiness]) -> None:
+    """Warn of runs of one scenario and environment with different ODD attributes."""
+    lists: dict[tuple[str, Optional[str]], list[CellFlakiness]] = {}
+    for g in groups:
+        lists.setdefault((g.scenario, g.environment), []).append(g)
+    for (scenario, environment), apart in lists.items():
+        if len(apart) > 1:
+            logger.warning(
+                "coverage: the runs of %s (environment %s) measured different ODD "
+                "attributes; their cells are reported apart: %s",
+                scenario, environment,
+                "; ".join(f"documents {g.documents}: {g.attributes}" for g in apart),
+            )
 
 
 def find_coverage_files(paths: Iterable[Path]) -> list[Path]:

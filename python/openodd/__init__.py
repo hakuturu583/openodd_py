@@ -47,14 +47,19 @@ from .loader import (
 from .cod import CodExport, export_cod, export_cods
 from .collector import CROSS_SEPARATOR, CoverageCollector
 from .report import (
+    CELL_BAND,
+    CELL_MIN_RUNS,
     COVERAGE_SCHEMA,
     CaseRun,
+    CellFlakiness,
+    CellRow,
     CoverageReport,
     MergedEntry,
     find_coverage_files,
     load_and_merge,
     load_coverage_files,
     merge_coverage,
+    wilson_interval,
 )
 from .sampler import OddDraws, OddKnob, OddSample, OddSampler, knobs_from_mapping
 from .flaky import FlakinessModel, FlakyMetrics, FlakySearch, ParameterSpace
@@ -90,8 +95,12 @@ __all__ = [
     "__version__",
     "export_cod",
     "export_cods",
+    "CELL_BAND",
+    "CELL_MIN_RUNS",
     "COVERAGE_SCHEMA",
     "CaseRun",
+    "CellFlakiness",
+    "CellRow",
     "CoverageReport",
     "MergedEntry",
     "OddDraws",
@@ -103,6 +112,7 @@ __all__ = [
     "load_and_merge",
     "load_coverage_files",
     "merge_coverage",
+    "wilson_interval",
     "ABOVE_RANGE",
     "BELOW_RANGE",
     "COVER_MEASURES",

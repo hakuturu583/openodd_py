@@ -39,6 +39,10 @@ space it was chosen in) and its outcome
 (:meth:`CoverageCollector.record_outcome`). The merged report then assesses
 the flakiness of every such run over all of them, and the next campaign's
 flaky search can start from them (:meth:`~.flaky.FlakySearch.observe_report`).
+An outcome can also say when the run failed and what it ran on (its
+environment): the report then counts, per ODD cell, the runs that drove
+through it, how many failed, and how many failed in it
+(:attr:`~.report.CoverageReport.cell_flakiness`).
 :func:`~.report.merge_coverage` merges any number of them into a report.
 """
 
@@ -204,12 +208,25 @@ class _OddMonitor:
         #: buckets (``odd.cells``).
         self.cells = OddCells(odd)
         self._cell_failed = False
+        #: Each tick's cell (an index into ``_cell_labels``; ``None`` when it
+        #: could not be counted), in the order of :attr:`rows`.
+        self._tick_cells: list[Optional[int]] = []
+        self._cell_index: dict[tuple[str, ...], int] = {}
+        self._cell_labels: list[list[str]] = []
 
     def count(self, values: dict[str, Any], seconds: float, meters: float) -> None:
         """Count one step in its cell (best effort, logged once)."""
         try:
-            self.cells.add([values.get(a.name) for a in self.odd.attributes], seconds, meters)
+            cell = self.cells.add(
+                [values.get(a.name) for a in self.odd.attributes], seconds, meters
+            )
+            key = tuple(cell)
+            if key not in self._cell_index:
+                self._cell_index[key] = len(self._cell_labels)
+                self._cell_labels.append(cell)
+            self._tick_cells.append(self._cell_index[key])
         except Exception:
+            self._tick_cells.append(None)
             if not self._cell_failed:
                 self._cell_failed = True
                 logger.warning(
@@ -257,6 +274,15 @@ class _OddMonitor:
         if not outside:
             self._recording = False
         return verdict
+
+    def cell_at(self, elapsed: float) -> Optional[list[str]]:
+        """The cell of the last tick at or before *elapsed* (the samples'
+        clock); ``None`` before the first tick, or if it was not counted."""
+        for i in range(min(len(self.rows), len(self._tick_cells)) - 1, -1, -1):
+            if self.rows[i][0] <= elapsed:
+                index = self._tick_cells[i]
+                return None if index is None else list(self._cell_labels[index])
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -491,6 +517,8 @@ class CoverageCollector:
         self._timed = tick in self._items_on or tick in self._crosses_on
         self._case: Optional[dict[str, Any]] = None
         self._passed: Optional[bool] = None
+        self._failed_at: Optional[float] = None
+        self._environment: Optional[str] = None
 
     def record_case(self, case: Any, space: Optional[Any] = None) -> None:
         """Record the case this run ran: an :class:`~.sampler.OddSample`.
@@ -512,9 +540,56 @@ class CoverageCollector:
             "space": None if space is None else space.to_list(),
         }
 
-    def record_outcome(self, passed: bool) -> None:
-        """Record whether the run passed."""
+    def record_outcome(
+        self,
+        passed: bool,
+        *,
+        failed_at: Optional[float] = None,
+        environment: Optional[str] = None,
+    ) -> None:
+        """Record whether the run passed.
+
+        Args:
+            passed: Whether it passed.
+            failed_at: When a failed run failed, in seconds on the clock the
+                collector is given (``elapsed`` of :meth:`start` and
+                :meth:`tick`, the samples' time column): seconds since
+                ``started_at`` when that clock starts at zero. With an ODD,
+                the cell of the last tick at or before it is written too
+                (``outcome.failed_cell``). Ignored, with a warning, for a run
+                that passed, or if not a finite number of seconds.
+            environment: What the run ran on, as an opaque ID (a digest of
+                the software and its dependencies' versions): the report
+                pools per-cell outcomes only over runs of the same one.
+        """
         self._passed = bool(passed)
+        self._failed_at = None
+        if failed_at is not None:
+            try:
+                at = float(failed_at)
+            except (TypeError, ValueError):
+                at = math.nan
+            if self._passed:
+                logger.warning("coverage: failed_at=%r of a run that passed is ignored", failed_at)
+            elif not math.isfinite(at):
+                logger.warning("coverage: failed_at=%r is not a time; ignored", failed_at)
+            else:
+                self._failed_at = round(at, 3)  # as the samples' times are kept
+        self._environment = None if environment is None else str(environment)
+
+    def _outcome(self) -> Optional[dict[str, Any]]:
+        """The coverage file's ``outcome``: only what was recorded."""
+        if self._passed is None:
+            return None
+        outcome: dict[str, Any] = {"passed": self._passed}
+        if self._failed_at is not None:
+            outcome["failed_at"] = self._failed_at
+            cell = self._odd.cell_at(self._failed_at) if self._odd is not None else None
+            if cell is not None:
+                outcome["failed_cell"] = cell
+        if self._environment is not None:
+            outcome["environment"] = self._environment
+        return outcome
 
     def start(self, context: Any, elapsed: float) -> None:
         """Sample the items on :attr:`SamplingEvent.START`."""
@@ -573,7 +648,7 @@ class CoverageCollector:
             "crosses": [c.to_dict() for c in self._crosses],
             "odd": self._odd.to_dict() if self._odd is not None else None,
             "case": self._case,
-            "outcome": None if self._passed is None else {"passed": self._passed},
+            "outcome": self._outcome(),
         }
 
     def write(self, path: Path, scenario: str) -> None:

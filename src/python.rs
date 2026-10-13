@@ -302,11 +302,16 @@ impl Cells {
         let values = values.iter().map(to_value).collect::<PyResult<Vec<_>>>()?;
         self.inner.cell_of(&values).map_err(err)
     }
-    /// Count one step that took `seconds` and covered `meters`.
+    /// Count one step that took `seconds` and covered `meters`; its cell.
     #[pyo3(signature = (values, seconds=0.0, meters=0.0))]
-    fn add(&mut self, values: Vec<Bound<'_, PyAny>>, seconds: f64, meters: f64) -> PyResult<()> {
+    fn add(
+        &mut self,
+        values: Vec<Bound<'_, PyAny>>,
+        seconds: f64,
+        meters: f64,
+    ) -> PyResult<Vec<String>> {
         let values = values.iter().map(to_value).collect::<PyResult<Vec<_>>>()?;
-        self.inner.add(&values, seconds, meters).map_err(err)
+        self.inner.count(&values, seconds, meters).map_err(err)
     }
     /// `{"attributes": [...], "rows": [[[label, ...], ticks, seconds, meters], ...]}`.
     fn to_json(&self) -> String {
@@ -1309,6 +1314,48 @@ impl CoverageReport {
     fn cases_json(&self) -> String {
         serde_json::Value::Array(self.inner.cases.iter().map(|c| c.to_json()).collect()).to_string()
     }
+    /// The runs' outcomes per ODD cell, per scenario, environment and
+    /// attribute list, as JSON.
+    fn cell_flakiness_json(&self) -> String {
+        serde_json::Value::Array(
+            self.inner
+                .cell_flakiness
+                .iter()
+                .map(|g| g.to_json())
+                .collect(),
+        )
+        .to_string()
+    }
+}
+
+/// The Wilson score interval of `failed` failures in `runs` runs.
+#[pyfunction]
+#[pyo3(signature = (failed, runs, z=crate::cell_flakiness::Z95))]
+fn wilson_interval(failed: u64, runs: u64, z: f64) -> PyResult<(f64, f64)> {
+    if failed > runs {
+        return Err(PyValueError::new_err(format!(
+            "{failed} failures in {runs} runs"
+        )));
+    }
+    Ok(crate::cell_flakiness::wilson(failed, runs, z))
+}
+
+/// What a cell visited by `runs` runs, `failed` of them failed, is:
+/// `flaky`, `failing`, `mixed`, `passing` or `too_few`.
+#[pyfunction]
+fn cell_status(
+    runs: u64,
+    failed: u64,
+    min_runs: u64,
+    low: f64,
+    high: f64,
+) -> PyResult<&'static str> {
+    if failed > runs {
+        return Err(PyValueError::new_err(format!(
+            "{failed} failures in {runs} runs"
+        )));
+    }
+    Ok(crate::cell_flakiness::status(runs, failed, min_runs, (low, high)).as_str())
 }
 
 /// A report from entries read elsewhere: `(name, buckets, target, cover_by,
@@ -1781,6 +1828,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Bucketing>()?;
     m.add_class::<Cells>()?;
     m.add("MISSING", crate::cells::MISSING)?;
+    m.add("CELL_MIN_RUNS", crate::cell_flakiness::MIN_RUNS)?;
+    m.add("CELL_BAND", crate::cell_flakiness::BAND)?;
+    m.add("MAX_CELL_ROWS", crate::cell_flakiness::MAX_CELL_ROWS)?;
     m.add_class::<Condition>()?;
     m.add_class::<Attribute>()?;
     m.add_class::<Module>()?;
@@ -1810,6 +1860,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(normalize_unit, m)?,
         wrap_pyfunction!(value_label, m)?,
         wrap_pyfunction!(merge_coverage, m)?,
+        wrap_pyfunction!(wilson_interval, m)?,
+        wrap_pyfunction!(cell_status, m)?,
         wrap_pyfunction!(coverage_from_entries, m)?,
         wrap_pyfunction!(fetch, m)?,
         wrap_pyfunction!(cache_dir, m)?,

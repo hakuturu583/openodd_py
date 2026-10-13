@@ -75,12 +75,17 @@ impl CellCounter {
 
     /// Count one step that took `seconds` and covered `meters`.
     pub fn add(&mut self, values: &[Value], seconds: f64, meters: f64) -> Result<()> {
+        self.count(values, seconds, meters).map(|_| ())
+    }
+
+    /// Count one step, as [`CellCounter::add`]; the cell it was counted in.
+    pub fn count(&mut self, values: &[Value], seconds: f64, meters: f64) -> Result<Vec<String>> {
         let cell = self.cell_of(values)?;
-        let entry = self.cells.entry(cell).or_insert((0, 0.0, 0.0));
+        let entry = self.cells.entry(cell.clone()).or_insert((0, 0.0, 0.0));
         entry.0 += 1;
         entry.1 += seconds.max(0.0);
         entry.2 += meters.max(0.0);
-        Ok(())
+        Ok(cell)
     }
 
     /// Steps counted so far.
