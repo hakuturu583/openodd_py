@@ -25,6 +25,11 @@
   ([docs/flaky.md](docs/flaky.md)). A run's coverage file can record its case, the
   predicted flakiness and its outcome; the merged report reassesses them, and the next
   campaign's search starts from them.
+- **See it**: `CoverageView` renders an ODD matrix -- any two attributes, coloured
+  flaky / fails / passes / outside the ODD / not sampled -- that drills into a cell
+  for the next two, as an HTML component other tools embed or a standalone page
+  (`openodd-coverage --html`); the `openodd-coverage-view` crate
+  ([docs/coverage_view.md](docs/coverage_view.md)).
 - **Find flaky regions of the ODD**: the merged report counts, per ODD cell, the runs
   that drove through it, how many failed (with a 95% Wilson interval) and how many
   failed *in* it, per scenario and environment (`CoverageReport.cell_flakiness`,
@@ -82,7 +87,7 @@ coverage files to say what wrote them.
 ```bash
 uv venv && uv pip install maturin pytest hypothesis pyyaml
 maturin develop
-cargo test && pytest
+cargo test --workspace && pytest
 ```
 
 ## Releasing

@@ -61,6 +61,8 @@ from .report import (
     merge_coverage,
     wilson_interval,
 )
+from . import view
+from .view import CoverageView
 from .sampler import OddDraws, OddKnob, OddSample, OddSampler, knobs_from_mapping
 from .flaky import FlakinessModel, FlakyMetrics, FlakySearch, ParameterSpace
 from .model import (
@@ -89,6 +91,7 @@ __all__ = [
     "ParameterSpace",
     "CROSS_SEPARATOR",
     "CodExport",
+    "CoverageView",
     "CoverageCollector",
     "MISSING",
     "OddCells",
@@ -154,4 +157,5 @@ __all__ = [
     "read_probe",
     "set_default_backend",
     "value_label",
+    "view",
 ]

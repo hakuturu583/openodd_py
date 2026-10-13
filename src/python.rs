@@ -1328,6 +1328,120 @@ impl CoverageReport {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The coverage view (crates/openodd-coverage-view)
+// ---------------------------------------------------------------------------
+
+/// Coverage documents, read once, for matrices and their HTML.
+#[pyclass(frozen, module = "openodd._core")]
+struct CoverageView {
+    inner: openodd_coverage_view::Dataset,
+}
+
+fn view_query(query_json: &str) -> PyResult<openodd_coverage_view::Query> {
+    let raw: serde_json::Value =
+        serde_json::from_str(query_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    openodd_coverage_view::Query::from_json(&raw).map_err(PyValueError::new_err)
+}
+
+fn view_options(
+    id: &str,
+    link: Option<String>,
+    labels: Option<indexmap::IndexMap<String, String>>,
+) -> PyResult<openodd_coverage_view::html::Options> {
+    let mut opts = openodd_coverage_view::html::Options {
+        id: id.to_string(),
+        link,
+        ..Default::default()
+    };
+    for (k, v) in labels.unwrap_or_default() {
+        if !opts.labels.set(&k, &v) {
+            return Err(PyValueError::new_err(format!("no such label: {k}")));
+        }
+    }
+    Ok(opts)
+}
+
+#[pymethods]
+impl CoverageView {
+    #[new]
+    fn new(documents_json: &str) -> PyResult<Self> {
+        let docs: Vec<serde_json::Value> = serde_json::from_str(documents_json)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(CoverageView {
+            inner: openodd_coverage_view::Dataset::from_documents(&docs),
+        })
+    }
+    #[getter]
+    fn attributes(&self) -> Vec<String> {
+        self.inner.attributes()
+    }
+    #[getter]
+    fn scenarios(&self) -> Vec<String> {
+        self.inner.scenarios()
+    }
+    #[getter]
+    fn environments(&self) -> Vec<Option<String>> {
+        self.inner.environments()
+    }
+    #[getter]
+    fn runs(&self) -> usize {
+        self.inner.runs.len()
+    }
+    fn matrix_json(&self, query_json: &str) -> PyResult<String> {
+        Ok(self
+            .inner
+            .matrix(&view_query(query_json)?)
+            .to_json()
+            .to_string())
+    }
+    #[pyo3(signature = (query_json, id="", link=None, labels=None))]
+    fn fragment(
+        &self,
+        query_json: &str,
+        id: &str,
+        link: Option<String>,
+        labels: Option<indexmap::IndexMap<String, String>>,
+    ) -> PyResult<String> {
+        let m = self.inner.matrix(&view_query(query_json)?);
+        Ok(openodd_coverage_view::html::fragment(
+            &self.inner,
+            &m,
+            &view_options(id, link, labels)?,
+        ))
+    }
+    #[pyo3(signature = (query_json, depth=2, id="", labels=None))]
+    fn explorer(
+        &self,
+        query_json: &str,
+        depth: usize,
+        id: &str,
+        labels: Option<indexmap::IndexMap<String, String>>,
+    ) -> PyResult<String> {
+        Ok(openodd_coverage_view::html::explorer(
+            &self.inner,
+            &view_query(query_json)?,
+            depth,
+            &view_options(id, None, labels)?,
+        ))
+    }
+}
+
+#[pyfunction]
+fn coverage_view_styles() -> &'static str {
+    openodd_coverage_view::html::styles()
+}
+
+#[pyfunction]
+fn coverage_view_script() -> &'static str {
+    openodd_coverage_view::html::script()
+}
+
+#[pyfunction]
+fn coverage_view_page(title: &str, body: &str) -> String {
+    openodd_coverage_view::html::page(title, body)
+}
+
 /// The Wilson score interval of `failed` failures in `runs` runs.
 #[pyfunction]
 #[pyo3(signature = (failed, runs, z=crate::cell_flakiness::Z95))]
@@ -1838,6 +1952,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Units>()?;
     m.add_class::<MergedEntry>()?;
     m.add_class::<CoverageReport>()?;
+    m.add_class::<CoverageView>()?;
     m.add_class::<Knob>()?;
     m.add_class::<Sample>()?;
     m.add_class::<Sampler>()?;
@@ -1862,6 +1977,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(merge_coverage, m)?,
         wrap_pyfunction!(wilson_interval, m)?,
         wrap_pyfunction!(cell_status, m)?,
+        wrap_pyfunction!(coverage_view_styles, m)?,
+        wrap_pyfunction!(coverage_view_script, m)?,
+        wrap_pyfunction!(coverage_view_page, m)?,
         wrap_pyfunction!(coverage_from_entries, m)?,
         wrap_pyfunction!(fetch, m)?,
         wrap_pyfunction!(cache_dir, m)?,

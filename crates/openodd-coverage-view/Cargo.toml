@@ -1,0 +1,16 @@
+[package]
+name = "openodd-coverage-view"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "An embeddable ODD coverage and flakiness matrix for openodd coverage files"
+license = "Apache-2.0"
+repository = "https://github.com/hakuturu583/openodd_py"
+readme = "README.md"
+
+[lib]
+name = "openodd_coverage_view"
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
