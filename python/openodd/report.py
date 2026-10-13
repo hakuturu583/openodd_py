@@ -406,6 +406,15 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
         help="also write each run's ODD samples as an ASAM OpenODD COD table, "
         "with its manifest and taxonomy, into DIR",
     )
+    parser.add_argument(
+        "--html",
+        type=Path,
+        metavar="FILE",
+        help="also write the ODD coverage matrix as a standalone HTML page here "
+        "(click a cell to see the matrix inside it)",
+    )
+    parser.add_argument("--html-depth", type=int, default=2, metavar="N",
+                        help="levels below the top matrix the HTML page holds (default: 2)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     documents = load_coverage_files(args.paths)
@@ -426,6 +435,12 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
         args.markdown.write_text(markdown, encoding="utf-8")
     else:
         sys.stdout.write(markdown)
+    if args.html is not None:
+        from .view import CoverageView  # noqa: PLC0415 - view imports nothing of the report
+
+        args.html.parent.mkdir(parents=True, exist_ok=True)
+        view = CoverageView([doc for _, doc in documents])
+        args.html.write_text(view.page(depth=max(0, args.html_depth)), encoding="utf-8")
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")

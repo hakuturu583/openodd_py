@@ -246,7 +246,7 @@ jobs:
           test "$TAG" = "$CRATE"
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
 
-      - run: cargo test --locked
+      - run: cargo test --locked --workspace
       - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q
@@ -265,7 +265,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: cargo test --locked
+      - run: cargo test --locked --workspace
       - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q

@@ -8,6 +8,9 @@ license = "Apache-2.0"
 repository = "https://github.com/hakuturu583/openodd_py"
 readme = "README.md"
 
+[workspace]
+members = [".", "crates/openodd-coverage-view"]
+
 [lib]
 name = "openodd"
 crate-type = ["cdylib", "rlib"]
@@ -17,6 +20,7 @@ default = []
 python = ["dep:pyo3"]
 
 [dependencies]
+openodd-coverage-view = { path = "crates/openodd-coverage-view" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
