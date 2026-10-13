@@ -731,8 +731,9 @@ fn panel(
     let _ = write!(
         out,
         "<div class=\"oo-scroll\"><table class=\"oo-grid{}\"{}><thead><tr>\
-         <th class=\"oo-corner\" rowspan=\"2\">{}</th>\
-         <th class=\"oo-xhead\" colspan=\"{}\" scope=\"colgroup\">{}</th></tr><tr>",
+         <th class=\"oo-corner\">{}</th>\
+         <th class=\"oo-xhead\" colspan=\"{}\" scope=\"colgroup\">{}</th></tr>\
+         <tr><th class=\"oo-corner-2\" aria-hidden=\"true\"></th>",
         if parts.attrs.is_empty() {
             ""
         } else {
