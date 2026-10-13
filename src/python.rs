@@ -1538,8 +1538,10 @@ impl CasePlot {
     ) -> PyResult<String> {
         let query = case_query(query_json)?;
         let plot = self.inner.plot(&query);
-        let predictor =
-            prediction.then(|| crate::case_prediction::CasePredictor::new(&self.inner, &query));
+        // The colour needs the pass probability only.
+        let predictor = prediction.then(|| {
+            crate::case_prediction::CasePredictor::new(&self.inner, &query).with_detail(false)
+        });
         Ok(openodd_coverage_view::case_plot::fragment_with(
             &self.inner,
             &plot,
@@ -1573,8 +1575,9 @@ impl CasePlot {
         labels: Option<indexmap::IndexMap<String, String>>,
     ) -> PyResult<String> {
         let query = case_query(query_json)?;
-        let predictor =
-            prediction.then(|| crate::case_prediction::CasePredictor::new(&self.inner, &query));
+        let predictor = prediction.then(|| {
+            crate::case_prediction::CasePredictor::new(&self.inner, &query).with_detail(false)
+        });
         Ok(openodd_coverage_view::case_plot::explorer_with(
             &self.inner,
             &query,

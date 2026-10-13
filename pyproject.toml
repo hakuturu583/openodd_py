@@ -29,6 +29,8 @@ dev = ["pytest>=8", "hypothesis>=6", "pyyaml>=6", "maturin>=1.7,<2"]
 python-source = "python"
 module-name = "openodd._core"
 features = ["python"]
+# The browser demo is not part of the Python package.
+exclude = [{ path = "examples/**", format = "sdist" }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

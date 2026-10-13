@@ -36,6 +36,10 @@
   over a faint background of the pass probability the flaky model fitted to the
   runs predicts there (red low, yellow ~50% / unstable, green high), with a table of the cases run more than once; embeddable like `CoverageView`, or a page (`openodd-coverage
   --cases-html`) ([docs/case_plot.md](docs/case_plot.md)).
+- **In the browser**: both views compile to WebAssembly (`crates/openodd-wasm`): a web
+  page computes the matrix and the case plot -- the flaky model's background included --
+  from coverage JSON on the client, with live axis pickers; no Python, no server
+  ([docs/wasm.md](docs/wasm.md), demo in [examples/wasm-viewer](examples/wasm-viewer)).
 - **Find flaky regions of the ODD**: the merged report counts, per ODD cell, the runs
   that drove through it, how many failed (with a 95% Wilson interval) and how many
   failed *in* it, per scenario and environment (`CoverageReport.cell_flakiness`,

@@ -97,6 +97,9 @@ pub struct CasePredictor {
     /// Why there is no model.
     unavailable: Option<String>,
     steps: usize,
+    /// Whether each cell of a grid gets the full metrics (flip probability,
+    /// instability confidence, state), or the pass probability only.
+    detail: bool,
 }
 
 impl CasePredictor {
@@ -113,6 +116,7 @@ impl CasePredictor {
             runs: 0,
             unavailable: None,
             steps: steps.max(2),
+            detail: true,
         };
         // The cases by (scenario, space); the group with the most runs.
         let cases = set.selected(query);
@@ -227,9 +231,24 @@ impl CasePredictor {
         out
     }
 
+    /// Grids with the pass probability only (`false`): what the plot's
+    /// colour needs, at a fraction of the cost -- one posterior mean and
+    /// variance per cell instead of 32 neighbours and 256 posterior draws.
+    /// The default (`true`) measures every cell fully.
+    pub fn with_detail(mut self, detail: bool) -> Self {
+        self.detail = detail;
+        self
+    }
+
     /// Why there is no prediction at all, if there is none.
     pub fn unavailable(&self) -> Option<&str> {
         self.unavailable.as_deref()
+    }
+
+    fn pass_only(&self, values: &IndexMap<String, Value>) -> Option<f64> {
+        let mut model = self.model.as_ref()?.borrow_mut();
+        let x = model.space().encode(values).ok()?;
+        model.classifier().ok().map(|c| c.pass_probability(&x))
     }
 
     fn measure(&self, values: &IndexMap<String, Value>) -> Option<Metrics> {
@@ -317,11 +336,19 @@ impl Predictor for CasePredictor {
                     .map(|xv| {
                         point.insert(x.name.clone(), xv.clone());
                         point.insert(y.name.clone(), yv.clone());
+                        if !self.detail {
+                            return self.pass_only(&point).map(|p| Predicted {
+                                pass_probability: p,
+                                flip_probability: None,
+                                instability_confidence: None,
+                                state: None,
+                            });
+                        }
                         self.measure(&point).map(|m| Predicted {
                             pass_probability: m.pass_probability,
-                            flip_probability: m.flip_probability,
-                            instability_confidence: m.instability_confidence,
-                            state: state(&m),
+                            flip_probability: Some(m.flip_probability),
+                            instability_confidence: Some(m.instability_confidence),
+                            state: Some(state(&m)),
                         })
                     })
                     .collect()
@@ -384,8 +411,16 @@ mod tests {
         assert_eq!(g.held, vec![("speed".to_string(), "10".to_string())]);
         assert_eq!((g.x.len(), g.y.len()), (10, 2));
         let row = &g.cells[0];
-        assert_eq!(row[0].unwrap().state, Verdict::Fail);
-        assert_eq!(row[9].unwrap().state, Verdict::Pass);
+        assert_eq!(row[0].unwrap().state, Some(Verdict::Fail));
+        assert_eq!(row[9].unwrap().state, Some(Verdict::Pass));
+        // The pass probability alone is the same number, without the rest.
+        let fast = CasePredictor::with_steps(&set, &CaseQuery::default(), 10).with_detail(false);
+        let f = fast.grid(&plot).unwrap();
+        for (a, b) in f.cells.iter().flatten().zip(g.cells.iter().flatten()) {
+            let (a, b) = (a.unwrap(), b.unwrap());
+            assert!((a.pass_probability - b.pass_probability).abs() < 1e-9);
+            assert!(a.state.is_none() && a.flip_probability.is_none());
+        }
         assert!(row[0].unwrap().pass_probability < 0.5);
         let c = &plot.cases[0];
         assert!(p.pass_probability(c).unwrap() < 0.5);

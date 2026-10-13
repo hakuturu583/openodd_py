@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>openodd viewer</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f2f4f7; --ink: #101828; --ink-2: #475467; --line: #cfd4dc; --card: #fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0e12; --ink: #eef1f5; --ink-2: #b4bdca; --line: #364151; --card: #12161c; } }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 4px 0 0; color: var(--ink-2); }
+  .load { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 14px 16px; border: 1.5px dashed var(--line);
+    border-radius: 14px; background: var(--card); }
+  .load.over { border-color: #2f6fed; }
+  .load button, .load label.file { font: inherit; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); cursor: pointer; }
+  .load input[type=file] { display: none; }
+  #status { color: var(--ink-2); font-size: 12.5px; }
+  .views { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>openodd viewer</h1>
+    <p>Coverage files in, the ODD coverage matrix and the drawn cases out -- computed in your browser with WebAssembly. Nothing is uploaded.</p>
+  </header>
+  <section class="load" id="drop">
+    <label class="file">Open coverage files<input type="file" id="files" multiple accept=".json,application/json"></label>
+    <button type="button" id="sample">Load the sample</button>
+    <span>or drop <code>*_coverage.json</code> files here</span>
+    <span id="status"></span>
+  </section>
+  <section class="views">
+    <div id="cases"></div>
+    <div id="coverage"></div>
+  </section>
+</main>
+<script type="module">
+  import init, { Viewer, styles, script } from "./pkg/openodd_wasm.js";
+  import { install, mount } from "./pkg/viewer.js";
+
+  const status = document.getElementById("status");
+  const t0 = performance.now();
+  await init();
+  install({ styles, script });
+  status.textContent = `WebAssembly ready in ${(performance.now() - t0).toFixed(0)} ms.`;
+
+  // The axes to start with: #x=...&y=... (case plot), #cx=...&cy=... (matrix).
+  const hash = new URLSearchParams(location.hash.slice(1));
+  let views = [];
+
+  function show(documents, source) {
+    views.forEach((v) => v.unmount());
+    const t = performance.now();
+    const viewer = new Viewer(JSON.stringify(documents));
+    const read = performance.now() - t;
+    const caseAttrs = JSON.parse(viewer.case_attributes());
+    const casesEl = document.getElementById("cases");
+    const coverageEl = document.getElementById("coverage");
+    const timing = {};
+    const report = (name) => (e) => {
+      timing[name] = e.detail.ms;
+      status.textContent = `${source}: ${viewer.documents} files, ${viewer.cases} cases; read ${read.toFixed(0)} ms` +
+        Object.entries(timing).map(([k, ms]) => `, ${k} ${ms.toFixed(0)} ms`).join("");
+    };
+    casesEl.addEventListener("openodd:rendered", report("case plot"));
+    coverageEl.addEventListener("openodd:rendered", report("matrix"));
+    const numeric = caseAttrs; // the plot picks numeric ones first when x/y are left out
+    const coverageAttrs = JSON.parse(viewer.attributes());
+    const wanted = [hash.get("x"), hash.get("y"), ...caseAttrs].filter(Boolean);
+    const shared = [...new Set(wanted)].filter((a) => coverageAttrs.includes(a));
+    views = [
+      mount(viewer, casesEl, {
+        view: "cases", id: "cases-plot",
+        x: hash.get("x") || undefined, y: hash.get("y") || undefined,
+      }),
+      mount(viewer, coverageEl, {
+        view: "coverage", id: "coverage-matrix",
+        // By default, the case plot's attributes the matrix has too.
+        x: hash.get("cx") || shared[0], y: hash.get("cy") ?? shared[1],
+      }),
+    ];
+    window.openoddDemo = { viewer, views, timing, attributes: numeric };
+    // #pick-x=...&pick-y=...: then choose those axes with the case plot's
+    // own pickers, as a reader would (a scripted check of live re-rendering).
+    for (const axis of ["x", "y"]) {
+      const want = hash.get("pick-" + axis);
+      const select = want && casesEl.querySelector(`select[data-oo-axis="${axis}"]`);
+      if (select) {
+        select.value = want;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
+  }
+
+  async function readFiles(files) {
+    const docs = [];
+    for (const f of files) {
+      try {
+        const doc = JSON.parse(await f.text());
+        (Array.isArray(doc) ? doc : [doc]).forEach((d) => docs.push(d));
+      } catch (e) {
+        console.warn(`${f.name}: not JSON`, e);
+      }
+    }
+    if (docs.length) show(docs, `${files.length} file(s)`);
+    else status.textContent = "No coverage JSON in what was given.";
+  }
+
+  document.getElementById("files").addEventListener("change", (e) => readFiles([...e.target.files]));
+  const drop = document.getElementById("drop");
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    readFiles([...e.dataTransfer.files]);
+  });
+  async function loadSample() {
+    const url = hash.get("data") || "./sample.json";
+    const docs = await (await fetch(url)).json();
+    show(docs, url === "./sample.json" ? "sample" : url);
+  }
+  document.getElementById("sample").addEventListener("click", loadSample);
+  await loadSample();
+</script>
+</body>
+</html>

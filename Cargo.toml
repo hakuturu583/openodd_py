@@ -9,15 +9,19 @@ repository = "https://github.com/hakuturu583/openodd_py"
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/openodd-coverage-view"]
+members = [".", "crates/openodd-coverage-view", "crates/openodd-wasm"]
 
 [lib]
 name = "openodd"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
-python = ["dep:pyo3"]
+# `native`: what needs an operating system -- git sources (a file lock, `git`,
+# tar), and ODD archives (tar.gz). Off, the crate builds for
+# wasm32-unknown-unknown (crates/openodd-wasm), and those return an error.
+default = ["native"]
+native = ["dep:fs2", "dep:tar", "dep:flate2"]
+python = ["dep:pyo3", "native"]
 
 [dependencies]
 openodd-coverage-view = { path = "crates/openodd-coverage-view" }
@@ -29,16 +33,25 @@ regex = "1"
 sha2 = "0.10"
 hex = "0.4"
 thiserror = "2"
-tar = "0.4"
-flate2 = "1"
+tar = { version = "0.4", optional = true }
+flate2 = { version = "1", optional = true }
 rand = "0.8"
 rand_chacha = "0.3"
-fs2 = "0.4"
+fs2 = { version = "0.4", optional = true }
 # Gaussian-process regression: the starting length scale of the flaky-case
 # classifier (src/flaky.rs). Pure Rust, on nalgebra.
 friedrich = { version = "0.6", default-features = false }
 nalgebra = "0.34"
 pyo3 = { version = "0.25", features = ["abi3-py310", "extension-module", "indexmap"], optional = true }
+
+# rand (0.8) and friedrich's rand 0.10 both depend on getrandom, which on
+# wasm32-unknown-unknown needs its browser backend chosen, or the core does not
+# build there on its own (`cargo build -p openodd --no-default-features --target
+# wasm32-unknown-unknown`). Every draw the model makes is seeded, so it is never
+# called for entropy.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 tempfile = "3"
