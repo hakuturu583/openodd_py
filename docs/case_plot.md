@@ -125,6 +125,14 @@ is plain data (`prediction::Grid`, `Grid::to_json`), so a host that draws its
 own plot can use the same grid: `plot.prediction(x=..., y=...)` in Python,
 or `plot.data(...)["prediction"]`.
 
+## Drawn or measured
+
+The cases can be placed by what each run measured at its start
+(`basis="measured"`, a **Drawn / Measured** toggle next to the pickers)
+instead of what the sampler drew; [drift.md](drift.md) explains the two,
+the measurement window, and the *scenario realisation* view that compares
+them.
+
 ## Embedding
 
 ```python

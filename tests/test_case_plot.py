@@ -242,3 +242,102 @@ def test_tips_and_pairs_cost_one_fit() -> None:
     plot.explorer_html(x="gap", y="speed")
     assert time.perf_counter() - t < 60.0
     assert "Pass probability (model, now)" in first
+
+
+#: The scenario stages the gap 2 m longer than it was drawn: a knob's offset
+#: is off by 2 m. The rain is staged as drawn.
+GAP_OFFSET = 2.0
+
+
+def _staged(case: Any, space: Any, passed: bool) -> dict[str, Any]:
+    """A run that ticks: what its probes measure is the drawn case, with the
+    gap shifted by GAP_OFFSET and closing at 1 m/s."""
+    from test_sampling import backend
+
+    collector = openodd.CoverageCollector([], odd=odd(), backend=backend())
+    gap, rain = case.values["gap"] + GAP_OFFSET, case.values["rain"]
+    collector.start({"gap_m": gap, "rain": rain}, 0.0)
+    t = 0.0
+    for _ in range(30):
+        t += 0.1
+        collector.tick({"gap_m": gap - t, "rain": rain}, t)
+    collector.end({}, t)
+    collector.record_case(case, space=space)
+    collector.record_outcome(passed)
+    return json.loads(json.dumps(collector.to_dict("cut_in")))
+
+
+def _staged_campaign() -> list[dict[str, Any]]:
+    s = search(explore_fraction=0.5)
+    docs = []
+    for _ in range(2):
+        for case in s.sample(10):
+            docs.append(_staged(case, s.space, passes(case)))
+            s.observe(case, passes(case))
+    return docs
+
+
+def test_the_drift_finds_the_knobs_offset() -> None:
+    plot = CasePlot(_staged_campaign())
+    drift = plot.drift()
+    by = {a["attribute"]: a for a in drift["attributes"]}
+    gap, rain = by["gap"], by["rain"]
+    # The measured gap is the first sample, at t = 0.1 s: drawn + 2 - 0.1.
+    assert gap["summary"]["runs"] == 20
+    assert gap["summary"]["bias"] == pytest.approx(GAP_OFFSET - 0.1, abs=1e-6)
+    assert gap["fit"]["a"] == pytest.approx(1.0, abs=1e-6)
+    assert gap["fit"]["b"] == pytest.approx(GAP_OFFSET - 0.1, abs=1e-6)
+    assert gap["calibration"]["status"] == "suggest"
+    assert gap["calibration"]["write_as"]["offset"] == pytest.approx(-(GAP_OFFSET - 0.1), abs=1e-6)
+    same = [r["drawn_bucket"] == r["measured_bucket"] for r in gap["runs"]]
+    assert gap["summary"]["bucket_hit_rate"] == pytest.approx(sum(same) / len(same))
+    assert all(r["measured_bucket"] == next(b["label"] for b in gap["buckets"]
+                                            if b["low"] <= r["measured"] < b["high"]
+                                            or (b is gap["buckets"][-1] and r["measured"] <= b["high"]))
+               for r in gap["runs"])
+    assert rain["summary"]["bucket_hit_rate"] == 1.0
+    assert drift["attributes"][0]["attribute"] == "gap"  # the worst first
+    # The window: nothing measured before the first sample.
+    assert plot.drift(measured_at=0.05)["attributes"] == []
+    knob = plot.drift(knobs={"gap": (1.0, 11.0)})["attributes"][0]["calibration"]["knob"]
+    assert knob["corrected"]["scale"] == pytest.approx(1.0)
+    assert knob["corrected"]["offset"] == pytest.approx(11.0 - (GAP_OFFSET - 0.1))
+    html = plot.drift_html(knobs={"gap": (1.0, 11.0)})
+    assert "Scenario realisation" in html and 'class="oo-fit"' in html
+    assert "Write the drawn value d as (d − 1.9 m) / 1.000" in html
+    assert "scale 1.000, offset 9.100" in html
+    with pytest.raises(ValueError, match="knob"):
+        plot._core.drift_html(plot._query(None, None, None, openodd.view.ANY), "", None,
+                              json.dumps({"knobs": {"gap": [1]}}))
+
+
+def test_the_measured_basis() -> None:
+    plot = CasePlot(_staged_campaign())
+    drawn = plot.data(x="gap", y="rain", prediction=False)
+    measured = plot.data(x="gap", y="rain", basis="measured", prediction=False)
+    assert measured["basis"] == "measured"
+    for d, m in zip(drawn["cases"], measured["cases"]):
+        assert m["values"]["gap"] == pytest.approx(d["values"]["gap"] + GAP_OFFSET - 0.1)
+        assert m["other_values"]["gap"] == d["values"]["gap"]
+    # The model is fitted on the measured coordinates.
+    assert plot.prediction(x="gap", y="rain", basis="measured")["runs"] == 20
+    html = plot.html(x="gap", y="rain", drift_leaders=True)
+    assert 'class="oo-basis"' in html and 'data-oo-basis-current="drawn"' in html
+    assert 'class="oo-drift-lead"' in html and "Line to the measured value" in html
+    assert "Placed by measured values" in plot.html(x="gap", y="rain", basis="measured")
+    explorer = plot.explorer_html(x="gap", y="rain", prediction=False)
+    assert "\\u001fmeasured" in explorer or "\u001fmeasured" in explorer
+    with pytest.raises(ValueError, match="basis"):
+        plot.html(basis="aimed")
+
+
+def test_the_cli_writes_the_drift_page(tmp_path: Path) -> None:
+    for i, doc in enumerate(_staged_campaign()):
+        (tmp_path / f"r{i}_coverage.json").write_text(json.dumps(doc), encoding="utf-8")
+    out = tmp_path / "drift.html"
+    cases = tmp_path / "cases.html"
+    assert main([str(tmp_path), "--drift-html", str(out), "--knob", "gap=1,11",
+                 "--cases-html", str(cases), "--cases-basis", "measured", "--measured-at", "0.5",
+                 "--markdown", str(tmp_path / "r.md")]) == 0
+    assert "offset 9.100" in out.read_text(encoding="utf-8")
+    assert "Placed by measured values" in cases.read_text(encoding="utf-8")

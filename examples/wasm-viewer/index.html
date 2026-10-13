@@ -26,7 +26,7 @@
 <main>
   <header>
     <h1>openodd viewer</h1>
-    <p>Coverage files in, the ODD coverage matrix and the drawn cases out -- computed in your browser with WebAssembly. Nothing is uploaded.</p>
+    <p>Coverage files in; the drawn cases, how well the scenario staged them, and the ODD coverage matrix out -- computed in your browser with WebAssembly. Nothing is uploaded.</p>
   </header>
   <section class="load" id="drop">
     <label class="file">Open coverage files<input type="file" id="files" multiple accept=".json,application/json"></label>
@@ -36,6 +36,7 @@
   </section>
   <section class="views">
     <div id="cases"></div>
+    <div id="drift"></div>
     <div id="coverage"></div>
   </section>
 </main>
@@ -77,7 +78,9 @@
       mount(viewer, casesEl, {
         view: "cases", id: "cases-plot",
         x: hash.get("x") || undefined, y: hash.get("y") || undefined,
+        basis: hash.get("basis") || undefined, drift_leaders: hash.has("leaders"),
       }),
+      mount(viewer, document.getElementById("drift"), { view: "drift", id: "drift-view" }),
       mount(viewer, coverageEl, {
         view: "coverage", id: "coverage-matrix",
         // By default, the case plot's attributes the matrix has too.
@@ -95,6 +98,10 @@
         select.dispatchEvent(new Event("change", { bubbles: true }));
       }
     }
+    // #pick-basis=measured: then press the plot's own Drawn / Measured toggle.
+    const basis = hash.get("pick-basis");
+    const button = basis && casesEl.querySelector(`.oo-basis button[data-oo-basis="${basis}"]`);
+    if (button) button.click();
   }
 
   async function readFiles(files) {

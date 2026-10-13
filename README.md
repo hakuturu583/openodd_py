@@ -36,6 +36,12 @@
   over a faint background of the pass probability the flaky model fitted to the
   runs predicts there (red low, yellow ~50% / unstable, green high), with a table of the cases run more than once; embeddable like `CoverageView`, or a page (`openodd-coverage
   --cases-html`) ([docs/case_plot.md](docs/case_plot.md)).
+- **Drawn vs measured**: the case plot can place cases by what the run *measured* at its
+  start instead of what the sampler *drew*, and the scenario-realisation view shows,
+  per attribute, how far the scenario staged each run from its draw -- bias, MAE,
+  bucket hit rate, and the knob correction a least-squares fit suggests
+  (`CasePlot.drift_html`, `openodd-coverage --drift-html`;
+  [docs/drift.md](docs/drift.md)).
 - **In the browser**: both views compile to WebAssembly (`crates/openodd-wasm`): a web
   page computes the matrix and the case plot -- the flaky model's background included --
   from coverage JSON on the client, with live axis pickers; no Python, no server

@@ -1446,7 +1446,7 @@ fn coverage_view_page(title: &str, body: &str) -> String {
 #[pyclass(frozen, module = "openodd._core")]
 struct CasePlot {
     inner: openodd_coverage_view::CaseSet,
-    /// The flaky models, by selection of runs (scenario, environment),
+    /// The flaky models, by selection of runs (scenario, environment, basis),
     /// fitted on first use: each keeps its grids (a pair and its transpose
     /// are one) and the cases' pass probabilities across calls.
     models:
@@ -1462,13 +1462,23 @@ impl CasePlot {
         query: &openodd_coverage_view::CaseQuery,
         f: impl FnOnce(&crate::case_prediction::CasePredictor) -> T,
     ) -> T {
-        let key = serde_json::json!([query.scenario, query.environment]).to_string();
         let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
-        let model = models.entry(key).or_insert_with(|| {
+        let model = models.entry(model_key(query)).or_insert_with(|| {
             crate::case_prediction::CasePredictor::new(&self.inner, query).with_detail(false)
         });
         f(model)
     }
+}
+
+/// A selection of runs and the basis it is placed on: one model each.
+fn model_key(query: &openodd_coverage_view::CaseQuery) -> String {
+    serde_json::json!([
+        query.scenario,
+        query.environment,
+        query.basis.as_str(),
+        query.window()
+    ])
+    .to_string()
 }
 
 fn case_query(query_json: &str) -> PyResult<openodd_coverage_view::CaseQuery> {
@@ -1484,11 +1494,42 @@ fn case_options(
     rings: bool,
     labels: Option<indexmap::IndexMap<String, String>>,
 ) -> PyResult<openodd_coverage_view::case_plot::Options> {
+    case_options_with(id, link, table, rings, labels, "{}")
+}
+
+/// [`case_options`], plus `{"drift_leaders": bool, "knobs": {attribute:
+/// [scale, offset]}}` from JSON.
+fn case_options_with(
+    id: &str,
+    link: Option<String>,
+    table: bool,
+    rings: bool,
+    labels: Option<indexmap::IndexMap<String, String>>,
+    extra_json: &str,
+) -> PyResult<openodd_coverage_view::case_plot::Options> {
+    let extra: serde_json::Value =
+        serde_json::from_str(extra_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let mut knobs = indexmap::IndexMap::new();
+    if let Some(map) = extra.get("knobs").and_then(serde_json::Value::as_object) {
+        for (k, v) in map {
+            let pair = v
+                .as_array()
+                .filter(|p| p.len() == 2)
+                .and_then(|p| Some((p[0].as_f64()?, p[1].as_f64()?)))
+                .ok_or_else(|| PyValueError::new_err(format!("knob {k}: (scale, offset)")))?;
+            knobs.insert(k.clone(), pair);
+        }
+    }
     let mut opts = openodd_coverage_view::case_plot::Options {
         id: id.to_string(),
         link,
         table,
         instability_rings: rings,
+        drift_leaders: extra
+            .get("drift_leaders")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        knobs,
         ..Default::default()
     };
     for (k, v) in labels.unwrap_or_default() {
@@ -1552,7 +1593,7 @@ impl CasePlot {
         }
         Ok(out.to_string())
     }
-    #[pyo3(signature = (query_json, id="", link=None, table=true, prediction=true, rings=false, labels=None))]
+    #[pyo3(signature = (query_json, id="", link=None, table=true, prediction=true, rings=false, labels=None, extra_json="{}"))]
     #[allow(clippy::too_many_arguments)]
     fn fragment(
         &self,
@@ -1563,10 +1604,11 @@ impl CasePlot {
         prediction: bool,
         rings: bool,
         labels: Option<indexmap::IndexMap<String, String>>,
+        extra_json: &str,
     ) -> PyResult<String> {
         let query = case_query(query_json)?;
         let plot = self.inner.plot(&query);
-        let opts = case_options(id, link, table, rings, labels)?;
+        let opts = case_options_with(id, link, table, rings, labels, extra_json)?;
         if !prediction {
             return Ok(openodd_coverage_view::case_plot::fragment(
                 &self.inner,
@@ -1591,7 +1633,8 @@ impl CasePlot {
             &case_options(id, None, true, false, labels)?,
         ))
     }
-    #[pyo3(signature = (query_json, id="", table=true, prediction=true, rings=false, labels=None))]
+    #[pyo3(signature = (query_json, id="", table=true, prediction=true, rings=false, labels=None, extra_json="{}"))]
+    #[allow(clippy::too_many_arguments)]
     fn explorer(
         &self,
         query_json: &str,
@@ -1600,9 +1643,12 @@ impl CasePlot {
         prediction: bool,
         rings: bool,
         labels: Option<indexmap::IndexMap<String, String>>,
+        extra_json: &str,
     ) -> PyResult<String> {
+        use openodd_coverage_view::cases::Basis;
+        use openodd_coverage_view::prediction::{ByBasis, Predictor};
         let query = case_query(query_json)?;
-        let opts = case_options(id, None, table, rings, labels)?;
+        let opts = case_options_with(id, None, table, rings, labels, extra_json)?;
         if !prediction {
             return Ok(openodd_coverage_view::case_plot::explorer(
                 &self.inner,
@@ -1610,9 +1656,53 @@ impl CasePlot {
                 &opts,
             ));
         }
-        Ok(self.with_model(&query, |p| {
-            openodd_coverage_view::case_plot::explorer_with(&self.inner, &query, &opts, Some(p))
-        }))
+        // A model per basis: the explorer renders both when it can.
+        let queries =
+            [Basis::Drawn, Basis::Measured].map(|basis| openodd_coverage_view::CaseQuery {
+                basis,
+                ..query.clone()
+            });
+        let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
+        for q in &queries {
+            models.entry(model_key(q)).or_insert_with(|| {
+                crate::case_prediction::CasePredictor::new(&self.inner, q).with_detail(false)
+            });
+        }
+        let [drawn, measured] = queries.map(|q| &models[&model_key(&q)] as &dyn Predictor);
+        let by = ByBasis {
+            drawn: Some(drawn),
+            measured: Some(measured),
+        };
+        Ok(openodd_coverage_view::case_plot::explorer_with(
+            &self.inner,
+            &query,
+            &opts,
+            Some(&by as &dyn Predictor),
+        ))
+    }
+    /// The drift of each attribute (drawn against measured) as JSON.
+    #[pyo3(signature = (query_json, extra_json="{}"))]
+    fn drift_json(&self, query_json: &str, extra_json: &str) -> PyResult<String> {
+        let opts = case_options_with("", None, true, false, None, extra_json)?;
+        Ok(self
+            .inner
+            .drift(&case_query(query_json)?)
+            .to_json_with(&opts.knobs)
+            .to_string())
+    }
+    #[pyo3(signature = (query_json, id="", labels=None, extra_json="{}"))]
+    fn drift_html(
+        &self,
+        query_json: &str,
+        id: &str,
+        labels: Option<indexmap::IndexMap<String, String>>,
+        extra_json: &str,
+    ) -> PyResult<String> {
+        Ok(openodd_coverage_view::case_plot::drift(
+            &self.inner,
+            &case_query(query_json)?,
+            &case_options_with(id, None, true, false, labels, extra_json)?,
+        ))
     }
 }
 

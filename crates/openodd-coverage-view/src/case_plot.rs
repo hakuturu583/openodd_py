@@ -25,6 +25,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use indexmap::IndexMap;
+
 use crate::cases::{AxisKind, Case, CaseAxis, CaseQuery, CaseSet, Plot, Verdict};
 use crate::html::{escape, MAX_AXIS_PAIRS};
 use crate::prediction::{Grid, GridAxis, Predictor};
@@ -75,6 +77,36 @@ pub struct Labels {
     pub robustness_radius: String,
     pub scenario: String,
     pub case: String,
+    pub basis: String,
+    pub drawn: String,
+    pub measured: String,
+    pub to_measured: String,
+    pub to_drawn: String,
+    pub measured_note: String,
+    pub drift_title: String,
+    pub drift_hint: String,
+    pub drift_runs: String,
+    pub bias: String,
+    pub mae: String,
+    pub max_error: String,
+    pub bucket_hit: String,
+    pub attribute: String,
+    pub other_bucket: String,
+    pub identity: String,
+    pub agreement: String,
+    pub no_measured: String,
+    pub drift_window: String,
+    pub error: String,
+    pub fit: String,
+    pub calibration: String,
+    pub fit_line: String,
+    pub suggest: String,
+    pub suggest_knob: String,
+    pub cal_ok: String,
+    pub cal_few: String,
+    pub cal_flat: String,
+    pub cal_noisy: String,
+    pub cal_structured: String,
     pub predicted_scale: String,
     pub predicted_low: String,
     pub predicted_mid: String,
@@ -133,6 +165,36 @@ impl Labels {
             "robustness_radius" => &mut self.robustness_radius,
             "scenario" => &mut self.scenario,
             "case" => &mut self.case,
+            "basis" => &mut self.basis,
+            "drawn" => &mut self.drawn,
+            "measured" => &mut self.measured,
+            "to_measured" => &mut self.to_measured,
+            "to_drawn" => &mut self.to_drawn,
+            "measured_note" => &mut self.measured_note,
+            "drift_title" => &mut self.drift_title,
+            "drift_hint" => &mut self.drift_hint,
+            "drift_runs" => &mut self.drift_runs,
+            "bias" => &mut self.bias,
+            "mae" => &mut self.mae,
+            "max_error" => &mut self.max_error,
+            "bucket_hit" => &mut self.bucket_hit,
+            "attribute" => &mut self.attribute,
+            "other_bucket" => &mut self.other_bucket,
+            "identity" => &mut self.identity,
+            "agreement" => &mut self.agreement,
+            "no_measured" => &mut self.no_measured,
+            "drift_window" => &mut self.drift_window,
+            "error" => &mut self.error,
+            "fit" => &mut self.fit,
+            "calibration" => &mut self.calibration,
+            "fit_line" => &mut self.fit_line,
+            "suggest" => &mut self.suggest,
+            "suggest_knob" => &mut self.suggest_knob,
+            "cal_ok" => &mut self.cal_ok,
+            "cal_few" => &mut self.cal_few,
+            "cal_flat" => &mut self.cal_flat,
+            "cal_noisy" => &mut self.cal_noisy,
+            "cal_structured" => &mut self.cal_structured,
             "predicted_scale" => &mut self.predicted_scale,
             "predicted_low" => &mut self.predicted_low,
             "predicted_mid" => &mut self.predicted_mid,
@@ -154,7 +216,7 @@ impl Default for Labels {
         let s = |x: &str| x.to_string();
         Labels {
             title: s("Drawn cases"),
-            hint: s("Each mark is a case at the values it was drawn with"),
+            hint: s("Each mark is a case, at the values it was drawn with or, on the measured basis, those its runs measured"),
             cases: s("Cases"),
             runs_of: s("{n} runs"),
             repeated: s("Repeated"),
@@ -198,6 +260,36 @@ impl Default for Labels {
             robustness_radius: s("Robustness radius"),
             scenario: s("Scenario"),
             case: s("Case {n}"),
+            basis: s("Basis"),
+            drawn: s("Drawn"),
+            measured: s("Measured"),
+            to_measured: s("Line to the measured value"),
+            to_drawn: s("Line to the drawn value"),
+            measured_note: s("Placed by measured values: each attribute's first sample within {s} s of the start of its run (the mean over a case's runs)."),
+            drift_title: s("Scenario realisation"),
+            drift_hint: s("How closely each run measured, at its start, what the sampler drew"),
+            drift_runs: s("Runs"),
+            bias: s("Bias"),
+            mae: s("MAE"),
+            max_error: s("Max |error|"),
+            bucket_hit: s("Bucket hit rate"),
+            attribute: s("Attribute"),
+            other_bucket: s("Landed in another bucket"),
+            identity: s("measured = drawn"),
+            agreement: s("drawn \u{2193} / measured \u{2192}"),
+            no_measured: s("No run recorded measured values (odd.samples) for the attributes its case was drawn with."),
+            drift_window: s("Measured: each attribute's first sample within {s} s of the start of the run; one point per run."),
+            error: s("Error"),
+            fit: s("Fit"),
+            calibration: s("Calibration"),
+            fit_line: s("measured \u{2248} {a} \u{d7} drawn {b}  (R\u{b2} {r2}, residual \u{3c3} {s})"),
+            suggest: s("Write the drawn value d as ({expr}) / {a} through the existing knob."),
+            suggest_knob: s("With its current scale {s} and offset {o}: scale {s2}, offset {o2}."),
+            cal_ok: s("Calibrated: within its residual of measured = drawn; no correction needed."),
+            cal_few: s("Too few runs to fit ({n}; at least {min})."),
+            cal_flat: s("The measured value does not follow the drawn one (a = {a}): a scale and an offset cannot fix it."),
+            cal_noisy: s("The residual (\u{3c3} {s}) is large against the bucket width ({w}): a constant offset and scale cannot fix it."),
+            cal_structured: s("The residual follows {attr} ({p} of its variance): a constant offset and scale cannot fix it."),
             predicted_scale: s("Predicted pass rate"),
             predicted_low: s("low"),
             predicted_mid: s("unstable"),
@@ -230,6 +322,12 @@ pub struct Options {
     /// Whether a case chosen for instability gets a dashed outline (off: its
     /// card and the table still say why it was chosen).
     pub instability_rings: bool,
+    /// Whether each mark gets a short line to its value on the other basis
+    /// (to the measured value when placed by the drawn one).
+    pub drift_leaders: bool,
+    /// The knobs' current `(scale, offset)` by attribute: the drift view
+    /// then also gives each suggested correction as the knob's new ones.
+    pub knobs: IndexMap<String, (f64, f64)>,
     pub labels: Labels,
 }
 
@@ -240,6 +338,8 @@ impl Default for Options {
             link: None,
             table: true,
             instability_rings: false,
+            drift_leaders: false,
+            knobs: IndexMap::new(),
             labels: Labels::default(),
         }
     }
@@ -864,6 +964,17 @@ fn case_tip(
         let mut text = value_of(case, axis(name), name, true);
         if let Some(b) = case.buckets.get(name).filter(|b| **b != text) {
             let _ = write!(text, "  {b}");
+        }
+        if let Some(o) = case.other.get(name) {
+            let mut other = case.clone();
+            other.values = case.other.clone();
+            let o_text = value_of(&other, axis(name), name, true);
+            let _ = o;
+            let word = match case.basis {
+                crate::cases::Basis::Drawn => &labels.measured,
+                crate::cases::Basis::Measured => &labels.drawn,
+            };
+            let _ = write!(text, " \u{b7} {} {o_text}", word.to_lowercase());
         }
         rows.push((name.clone(), text));
     }
@@ -1499,6 +1610,35 @@ fn svg(
         }
         out.push_str("</g>");
     }
+    // Lines to each case's value on the other basis.
+    if opts.drift_leaders {
+        for (i, c) in plot.cases.iter().enumerate() {
+            let mut other = c.clone();
+            other.values = c.other.clone();
+            let has = |a: Option<&CaseAxis>| match a {
+                None => true,
+                Some(a) => match a.kind {
+                    AxisKind::Numeric => other.number(&a.name).is_some(),
+                    AxisKind::Categorical => other.values.contains_key(&a.name),
+                },
+            };
+            if !has(lay.x.axis) || !has(lay.y.axis) {
+                continue;
+            }
+            let (ox, _) = lay.x.place(&other, 1, g.r);
+            let (oy, _) = lay.y.place(&other, 2, g.r);
+            let m = &lay.marks[i];
+            if (ox - m.at.0).hypot(oy - m.at.1) < 1.0 {
+                continue;
+            }
+            let _ = write!(
+                out,
+                "<line class=\"oo-drift-lead\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{ox:.1}\" y2=\"{oy:.1}\"/>\
+                 <circle class=\"oo-drift-dot\" cx=\"{ox:.1}\" cy=\"{oy:.1}\" r=\"2.4\"/>",
+                m.at.0, m.at.1
+            );
+        }
+    }
     // Leader lines from a moved mark to its value.
     for m in lay.marks.iter().filter(|m| m.moved()) {
         let _ = write!(
@@ -1604,7 +1744,14 @@ enum AxesUi<'a> {
     Explorer(&'a [(String, String)]),
 }
 
-fn pickers(out: &mut String, plot: &Plot, free: &[String], ui: &AxesUi, opts: &Options) {
+fn pickers(
+    out: &mut String,
+    plot: &Plot,
+    free: &[String],
+    ui: &AxesUi,
+    opts: &Options,
+    toggle: bool,
+) {
     let (Some(x), Some(y)) = (&plot.x, &plot.y) else {
         return;
     };
@@ -1613,6 +1760,10 @@ fn pickers(out: &mut String, plot: &Plot, free: &[String], ui: &AxesUi, opts: &O
     }
     let labels = &opts.labels;
     let mut attrs = String::from(" data-oo-conditions=\"[]\" data-oo-view=\"cases\"");
+    let basis = plot.query.basis;
+    if toggle {
+        let _ = write!(attrs, " data-oo-basis-current=\"{}\"", basis.as_str());
+    }
     match ui {
         AxesUi::Host => {
             if let Some(link) = &opts.link {
@@ -1654,6 +1805,26 @@ fn pickers(out: &mut String, plot: &Plot, free: &[String], ui: &AxesUi, opts: &O
             );
         }
         out.push_str("</select></label>");
+    }
+    if toggle {
+        let _ = write!(
+            out,
+            "<span class=\"oo-basis\" role=\"group\" aria-label=\"{}\">",
+            escape(&labels.basis)
+        );
+        for (b, word) in [
+            (crate::cases::Basis::Drawn, &labels.drawn),
+            (crate::cases::Basis::Measured, &labels.measured),
+        ] {
+            let _ = write!(
+                out,
+                "<button type=\"button\" data-oo-basis=\"{}\" aria-pressed=\"{}\">{}</button>",
+                b.as_str(),
+                b == basis,
+                escape(word)
+            );
+        }
+        out.push_str("</span>");
     }
     out.push_str("</div>");
 }
@@ -1912,6 +2083,18 @@ fn panel(
             );
         }
     }
+    if opts.drift_leaders && plot.cases.iter().any(|c| !c.other.is_empty()) {
+        let word = match plot.query.basis {
+            crate::cases::Basis::Drawn => &labels.to_measured,
+            crate::cases::Basis::Measured => &labels.to_drawn,
+        };
+        let _ = write!(
+            out,
+            "<span class=\"oo-chip\"><svg class=\"oo-key\" viewBox=\"0 0 18 18\" width=\"18\" height=\"18\" aria-hidden=\"true\">\
+             <line class=\"oo-drift-lead\" x1=\"3\" y1=\"9\" x2=\"14\" y2=\"9\"/><circle class=\"oo-drift-dot\" cx=\"14\" cy=\"9\" r=\"2.4\"/></svg>{}</span>",
+            escape(word)
+        );
+    }
     if wide.marks.iter().chain(&compact.marks).any(Mark::moved) {
         let _ = write!(
             out,
@@ -1921,7 +2104,8 @@ fn panel(
         );
     }
     out.push_str("</div>");
-    pickers(out, plot, free, ui, opts);
+    let toggle = plot.cases.iter().any(|c| !c.other.is_empty());
+    pickers(out, plot, free, ui, opts, toggle);
     out.push_str("<div class=\"oo-plot\">");
     svg(out, plot, &wide, "oo-plot-wide", tips, shown, opts);
     svg(out, plot, &compact, "oo-plot-compact", tips, shown, opts);
@@ -1955,6 +2139,17 @@ fn panel(
             );
         }
         _ => {}
+    }
+    if plot.query.basis == crate::cases::Basis::Measured {
+        let _ = write!(
+            out,
+            "<p class=\"oo-note\">{}</p>",
+            escape(
+                &labels
+                    .measured_note
+                    .replace("{s}", &short_number(plot.query.window()))
+            )
+        );
     }
     if opts.table {
         table_inner(out, plot, opts);
@@ -2089,18 +2284,38 @@ pub fn explorer_with(
             }
         }
     }
-    let map: Vec<(String, String)> = pairs
+    // With measured values, every pair on both bases: the toggle switches.
+    let bases: Vec<crate::cases::Basis> = if first.cases.iter().any(|c| !c.other.is_empty()) {
+        vec![query.basis, query.basis.other()]
+    } else {
+        vec![query.basis]
+    };
+    let both = bases.len() > 1;
+    let panels: Vec<(String, String, crate::cases::Basis)> = bases
+        .iter()
+        .flat_map(|b| pairs.iter().map(move |(x, y)| (x.clone(), y.clone(), *b)))
+        .take(MAX_AXIS_PAIRS * 2)
+        .collect();
+    let map: Vec<(String, String)> = panels
         .iter()
         .enumerate()
-        .map(|(i, (x, y))| (format!("{x}{PAIR_SEP}{y}"), format!("{root}-p{i}")))
+        .map(|(i, (x, y, b))| {
+            let key = if both {
+                format!("{x}{PAIR_SEP}{y}{PAIR_SEP}{}", b.as_str())
+            } else {
+                format!("{x}{PAIR_SEP}{y}")
+            };
+            (key, format!("{root}-p{i}"))
+        })
         .collect();
-    for (i, (x, y)) in pairs.iter().enumerate() {
+    for (i, (x, y, b)) in panels.iter().enumerate() {
         let plot = if i == 0 {
             first.clone()
         } else {
             set.plot(&CaseQuery {
                 x: Some(x.clone()),
                 y: Some(y.clone()),
+                basis: *b,
                 ..query.clone()
             })
         };
@@ -2117,6 +2332,493 @@ pub fn explorer_with(
         );
     }
     out.push_str(&tips.script());
+    out.push_str("</div>");
+    out
+}
+
+/// A number to a fixed three significant decimals for fit coefficients.
+fn fixed(v: f64) -> String {
+    if v.abs() >= 100.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.3}")
+    }
+}
+
+/// The fit and what it says about the knob, under a numeric attribute's
+/// scatter.
+fn calibration_html(out: &mut String, n: &crate::drift::NumericDrift, opts: &Options) {
+    use crate::drift::Calibration;
+    let labels = &opts.labels;
+    let Some(f) = n.fit() else {
+        return;
+    };
+    let unit = &n.unit;
+    let _ = write!(
+        out,
+        "<div class=\"oo-calib\"><p class=\"oo-calib-fit\"><b>{}</b> {}</p>",
+        escape(&labels.calibration),
+        escape(
+            &labels
+                .fit_line
+                .replace("{a}", &fixed(f.a))
+                .replace(
+                    "{b}",
+                    &signed(f.b, unit)
+                        .replace('+', "+ ")
+                        .replace('-', "\u{2212} ")
+                )
+                .replace("{r2}", &format!("{:.3}", f.r2))
+                .replace("{s}", &with_unit(f.residual_std, unit))
+        )
+    );
+    let (class, text) = match n.calibration() {
+        Calibration::Suggest { a, b } => {
+            let shift = if b >= 0.0 {
+                format!("d \u{2212} {}", with_unit(b, unit))
+            } else {
+                format!("d + {}", with_unit(-b, unit))
+            };
+            let mut t = labels
+                .suggest
+                .replace("{a}", &fixed(a))
+                .replace("{expr}", &shift);
+            if let Some((s0, o0)) = opts.knobs.get(&n.name) {
+                let (s2, o2) = crate::drift::corrected_knob(*s0, *o0, a, b);
+                let _ = write!(
+                    t,
+                    " {}",
+                    labels
+                        .suggest_knob
+                        .replace("{s2}", &fixed(s2))
+                        .replace("{o2}", &fixed(o2))
+                        .replace("{s}", &fixed(*s0))
+                        .replace("{o}", &fixed(*o0))
+                );
+            }
+            ("oo-calib-suggest", t)
+        }
+        Calibration::Calibrated => ("oo-calib-ok", labels.cal_ok.clone()),
+        Calibration::TooFew { runs } => (
+            "oo-calib-no",
+            labels
+                .cal_few
+                .replace("{n}", &runs.to_string())
+                .replace("{min}", &crate::drift::MIN_FIT_RUNS.to_string()),
+        ),
+        Calibration::Flat { a } => ("oo-calib-no", labels.cal_flat.replace("{a}", &fixed(a))),
+        Calibration::Noisy {
+            residual_std,
+            width,
+        } => (
+            "oo-calib-no",
+            labels
+                .cal_noisy
+                .replace("{s}", &with_unit(residual_std, unit))
+                .replace("{w}", &with_unit(width, unit)),
+        ),
+        Calibration::Structured { attribute, share } => (
+            "oo-calib-no",
+            labels
+                .cal_structured
+                .replace("{attr}", &attribute)
+                .replace("{p}", &format!("{:.0}%", share * 100.0)),
+        ),
+    };
+    let _ = write!(out, "<p class=\"{class}\">{}</p></div>", escape(&text));
+}
+
+/// A signed number with its unit: `+2.21 m`.
+fn signed(v: f64, unit: &str) -> String {
+    let n = short_number(v);
+    let n = if v > 0.0 && !n.starts_with('-') && n != "0" {
+        format!("+{n}")
+    } else {
+        n
+    };
+    if unit.is_empty() {
+        n
+    } else {
+        format!("{n} {unit}")
+    }
+}
+
+fn with_unit(v: f64, unit: &str) -> String {
+    if unit.is_empty() {
+        short_number(v)
+    } else {
+        format!("{} {unit}", short_number(v))
+    }
+}
+
+/// One numeric attribute: drawn (x) against measured (y), the identity
+/// line, the ODD bucket edges on both axes, a mark per run by outcome, and
+/// a ring around the runs measured in another bucket than drawn.
+fn drift_scatter(out: &mut String, a: &crate::drift::NumericDrift, labels: &Labels) {
+    let (w, h) = (360.0, 320.0);
+    let (l, t, r, b) = (52.0, 12.0, w - 12.0, h - 44.0);
+    let (mut lo, mut hi) = a
+        .points
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |acc, p| {
+            (
+                acc.0.min(p.drawn).min(p.measured),
+                acc.1.max(p.drawn).max(p.measured),
+            )
+        });
+    if hi.is_nan() || lo.is_nan() || hi <= lo {
+        lo -= 1.0;
+        hi += 1.0;
+    }
+    let pad = (hi - lo) * 0.06;
+    let (lo, hi) = (lo - pad, hi + pad);
+    let sx = |v: f64| l + (v - lo) / (hi - lo) * (r - l);
+    let sy = |v: f64| b - (v - lo) / (hi - lo) * (b - t);
+    let _ = write!(
+        out,
+        "<svg class=\"oo-svg oo-drift-svg\" viewBox=\"0 0 {w} {h}\" role=\"group\" aria-label=\"{}\">\
+         <rect class=\"oo-frame\" x=\"{l}\" y=\"{t}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"6\"/>",
+        escape(&format!("{}: {} / {}", a.name, labels.drawn, labels.measured)),
+        r - l,
+        b - t
+    );
+    // Bucket edges (or round numbers) on both axes.
+    let mut edges: Vec<f64> = a
+        .spans
+        .iter()
+        .flat_map(|s| [s.low, s.high])
+        .filter(|e| *e > lo && *e < hi)
+        .collect();
+    edges.sort_by(f64::total_cmp);
+    edges.dedup();
+    let ticks = if edges.len() >= 3 {
+        edges.clone()
+    } else {
+        nice_ticks(lo, hi, 4)
+    };
+    for e in &edges {
+        let (x, y) = (sx(*e), sy(*e));
+        let _ = write!(
+            out,
+            "<line class=\"oo-gl\" x1=\"{x:.1}\" y1=\"{t}\" x2=\"{x:.1}\" y2=\"{b}\"/>\
+             <line class=\"oo-gl\" x1=\"{l}\" y1=\"{y:.1}\" x2=\"{r}\" y2=\"{y:.1}\"/>"
+        );
+    }
+    for v in ticks.iter().filter(|v| **v >= lo && **v <= hi) {
+        let (x, y) = (sx(*v), sy(*v));
+        let text = escape(&short_number(*v));
+        let _ = write!(
+            out,
+            "<text class=\"oo-tl\" x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{text}</text>\
+             <text class=\"oo-tl\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\">{text}</text>",
+            b + 16.0,
+            l - 6.0,
+            y + 4.0
+        );
+    }
+    // The identity: where measured = drawn.
+    let _ = write!(
+        out,
+        "<line class=\"oo-identity\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"/>\
+         <text class=\"oo-identity-label\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\">{}</text>",
+        sx(lo),
+        sy(lo),
+        sx(hi),
+        sy(hi),
+        r - 6.0,
+        b - 8.0,
+        escape(&labels.identity)
+    );
+    let unit = &a.unit;
+    let titled = |word: &str| {
+        if unit.is_empty() {
+            word.to_string()
+        } else {
+            format!("{word} ({unit})")
+        }
+    };
+    let _ = write!(
+        out,
+        "<text class=\"oo-atitle\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{} \u{2192}</text>\
+         <text class=\"oo-atitle\" x=\"14\" y=\"{:.1}\" text-anchor=\"middle\" transform=\"rotate(-90 14 {:.1})\">{} \u{2192}</text>",
+        (l + r) / 2.0,
+        h - 8.0,
+        escape(&titled(&labels.drawn)),
+        (t + b) / 2.0,
+        (t + b) / 2.0,
+        escape(&titled(&labels.measured))
+    );
+    // The fit: measured = a x drawn + b, clipped to the frame.
+    if let Some(f) = a.fit() {
+        let ends: Vec<(f64, f64)> = [lo, hi]
+            .iter()
+            .map(|d| (*d, f.a * d + f.b))
+            .map(|(d, m)| {
+                // Pull an end that leaves the frame back along the line.
+                if m > hi && f.a != 0.0 {
+                    ((hi - f.b) / f.a, hi)
+                } else if m < lo && f.a != 0.0 {
+                    ((lo - f.b) / f.a, lo)
+                } else {
+                    (d, m)
+                }
+            })
+            .collect();
+        let _ = write!(
+            out,
+            "<line class=\"oo-fit\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"/>",
+            sx(ends[0].0),
+            sy(ends[0].1),
+            sx(ends[1].0),
+            sy(ends[1].1)
+        );
+    }
+    // Runs in another bucket first (their rings under every mark), then
+    // passes, then failures on top.
+    for p in a.points.iter().filter(|p| !p.same_bucket()) {
+        let _ = write!(
+            out,
+            "<circle class=\"oo-drift-miss\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"8.5\"/>",
+            sx(p.drawn),
+            sy(p.measured)
+        );
+    }
+    let mut marks: Vec<&crate::drift::DriftPoint> = a.points.iter().collect();
+    marks.sort_by_key(|p| !p.passed);
+    for p in marks {
+        let v = if p.passed {
+            Verdict::Pass
+        } else {
+            Verdict::Fail
+        };
+        let tip = serde_json::json!({
+            "place": format!("{} \u{b7} {}", labels.case.replace("{n}", &p.case_number.to_string()),
+                             labels.run.replace("{n}", &(p.document + 1).to_string())),
+            "state": if p.passed { &labels.passed } else { &labels.failed },
+            "kind": v.as_str(),
+            "rows": [
+                [&labels.drawn, format!("{}  {}", with_unit(p.drawn, unit), p.drawn_bucket)],
+                [&labels.measured, format!("{}  {}", with_unit(p.measured, unit), p.measured_bucket)],
+                [&labels.error, signed(p.error(), unit)],
+            ],
+            "tentative": if p.same_bucket() { None } else { Some(&labels.other_bucket) },
+            "wide": true,
+        });
+        let _ = write!(
+            out,
+            "<g class=\"oo-case oo-{}\" transform=\"translate({:.1} {:.1})\" tabindex=\"0\" role=\"img\" \
+             aria-label=\"{}\" data-oo-tip=\"{}\"><circle class=\"oo-hit\" r=\"8\"/>",
+            v.as_str(),
+            sx(p.drawn),
+            sy(p.measured),
+            escape(&format!(
+                "{} {}, {} {}",
+                labels.drawn,
+                with_unit(p.drawn, unit),
+                labels.measured,
+                with_unit(p.measured, unit)
+            )),
+            escape(&tip.to_string())
+        );
+        mark_shape(out, v, 4.2, false);
+        out.push_str("</g>");
+    }
+    out.push_str("</svg>");
+}
+
+/// A categorical attribute: how often each drawn label was measured as each.
+fn drift_agreement(out: &mut String, a: &crate::drift::CategoricalDrift, labels: &Labels) {
+    let count = |d: &str, m: &str| {
+        a.counts
+            .iter()
+            .find(|x| x.0 == d && x.1 == m)
+            .map(|x| x.2)
+            .unwrap_or(0)
+    };
+    let used: Vec<&String> = a
+        .labels
+        .iter()
+        .filter(|l| a.counts.iter().any(|x| &x.0 == *l || &x.1 == *l))
+        .collect();
+    let _ = write!(
+        out,
+        "<div class=\"oo-scroll oo-table-scroll\"><table class=\"oo-table oo-agree\"><thead><tr><th scope=\"col\">{}</th>",
+        escape(&labels.agreement)
+    );
+    for m in &used {
+        let _ = write!(out, "<th scope=\"col\">{}</th>", escape(m));
+    }
+    out.push_str("</tr></thead><tbody>");
+    for d in &used {
+        let _ = write!(out, "<tr><th scope=\"row\">{}</th>", escape(d));
+        for m in &used {
+            let n = count(d, m);
+            let class = if n == 0 {
+                ""
+            } else if d == m {
+                " class=\"oo-diag\""
+            } else {
+                " class=\"oo-off\""
+            };
+            let _ = write!(
+                out,
+                "<td{class}>{}</td>",
+                if n == 0 { String::new() } else { n.to_string() }
+            );
+        }
+        out.push_str("</tr>");
+    }
+    out.push_str("</tbody></table></div>");
+}
+
+/// The scenario's realisation: per attribute, what the sampler drew against
+/// what each run measured at its start ([`crate::drift`]), worst first,
+/// with a summary table across them.
+pub fn drift(set: &CaseSet, query: &CaseQuery, opts: &Options) -> String {
+    let labels = &opts.labels;
+    let d = set.drift(query);
+    let id = if opts.id.is_empty() {
+        "oo-drift"
+    } else {
+        opts.id.as_str()
+    };
+    let mut out = format!(
+        "<div class=\"oo-cov oo-cases oo-drift\" id=\"{}\" data-oo-mode=\"drift\"><div class=\"oo-head\"><h3>{}</h3><p class=\"oo-hint\">{}</p></div>",
+        escape(id),
+        escape(&labels.drift_title),
+        escape(&labels.drift_hint)
+    );
+    if d.attributes.is_empty() {
+        let _ = write!(
+            out,
+            "<p class=\"oo-note\">{}</p></div>",
+            escape(&labels.no_measured)
+        );
+        return out;
+    }
+    let pct = |x: f64| format!("{:.0}%", x * 100.0);
+    // The summary: worst first.
+    let _ = write!(
+        out,
+        "<div class=\"oo-scroll oo-table-scroll\"><table class=\"oo-table oo-drift-summary\"><thead><tr>\
+         <th scope=\"col\">{}</th><th scope=\"col\">{}</th><th scope=\"col\">{}</th><th scope=\"col\">{}</th>\
+         <th scope=\"col\">{}</th><th scope=\"col\">{}</th><th scope=\"col\">{}</th></tr></thead><tbody>",
+        escape(&labels.attribute),
+        escape(&labels.drift_runs),
+        escape(&labels.bias),
+        escape(&labels.mae),
+        escape(&labels.max_error),
+        escape(&labels.bucket_hit),
+        escape(&labels.fit)
+    );
+    for a in &d.attributes {
+        let s = a.summary();
+        let unit = match a {
+            crate::drift::AttributeDrift::Numeric(n) => n.unit.as_str(),
+            _ => "",
+        };
+        let dash = || "\u{2013}".to_string();
+        let hit = s.bucket_hit;
+        let _ = write!(
+            out,
+            "<tr><th scope=\"row\"><a href=\"#{}-{}\">{}</a></th><td class=\"oo-val\">{}</td><td class=\"oo-val\">{}</td>\
+             <td class=\"oo-val\">{}</td><td class=\"oo-val\">{}</td><td class=\"oo-val{}\">{}</td><td class=\"oo-val{}\">{}</td></tr>",
+            escape(id),
+            escape(&a.name().replace('.', "-")),
+            escape(a.name()),
+            s.runs,
+            s.bias.map(|v| signed(v, unit)).unwrap_or_else(dash),
+            s.mae.map(|v| with_unit(v, unit)).unwrap_or_else(dash),
+            s.max_error.map(|v| with_unit(v, unit)).unwrap_or_else(dash),
+            if hit.is_some_and(|h| h < 1.0) { " oo-bad" } else { "" },
+            hit.map(pct).unwrap_or_else(dash),
+            match a {
+                crate::drift::AttributeDrift::Numeric(n)
+                    if matches!(n.calibration(), crate::drift::Calibration::Suggest { .. }) =>
+                {
+                    " oo-bad"
+                }
+                _ => "",
+            },
+            match a {
+                crate::drift::AttributeDrift::Numeric(n) => n
+                    .fit()
+                    .map(|f| format!("a {} \u{b7} b {}", fixed(f.a), signed(f.b, unit)))
+                    .unwrap_or_else(dash),
+                _ => dash(),
+            }
+        );
+    }
+    out.push_str("</tbody></table></div>");
+    let _ = write!(
+        out,
+        "<p class=\"oo-note\">{}</p><div class=\"oo-drift-grid\">",
+        escape(&labels.drift_window.replace("{s}", &short_number(d.window)))
+    );
+    for a in &d.attributes {
+        let s = a.summary();
+        let _ = write!(
+            out,
+            "<section class=\"oo-drift-card\" id=\"{}-{}\"><h4>{}</h4>",
+            escape(id),
+            escape(&a.name().replace('.', "-")),
+            escape(a.name())
+        );
+        match a {
+            crate::drift::AttributeDrift::Numeric(n) => {
+                drift_scatter(&mut out, n, labels);
+                let other = n.points.iter().filter(|p| !p.same_bucket()).count();
+                let _ = write!(
+                    out,
+                    "<p class=\"oo-drift-stats\"><span>{} <b>{}</b></span><span>{} <b>{}</b></span>\
+                     <span>{} <b>{}</b></span><span>{} <b>{}</b></span><span>{} <b class=\"{}\">{}</b></span></p>",
+                    escape(&labels.drift_runs),
+                    s.runs,
+                    escape(&labels.bias),
+                    escape(&s.bias.map(|v| signed(v, &n.unit)).unwrap_or_default()),
+                    escape(&labels.mae),
+                    escape(&s.mae.map(|v| with_unit(v, &n.unit)).unwrap_or_default()),
+                    escape(&labels.max_error),
+                    escape(&s.max_error.map(|v| with_unit(v, &n.unit)).unwrap_or_default()),
+                    escape(&labels.bucket_hit),
+                    if other > 0 { "oo-bad" } else { "" },
+                    s.bucket_hit.map(pct).unwrap_or_else(|| "\u{2013}".into())
+                );
+                calibration_html(&mut out, n, opts);
+                if other > 0 {
+                    let _ = write!(
+                        out,
+                        "<p class=\"oo-drift-key\"><svg class=\"oo-key\" viewBox=\"-9 -9 18 18\" width=\"18\" height=\"18\" aria-hidden=\"true\">\
+                         <circle class=\"oo-drift-miss\" r=\"7\"/></svg>{}: <b>{other}</b></p>",
+                        escape(&labels.other_bucket)
+                    );
+                }
+            }
+            crate::drift::AttributeDrift::Categorical(c) => {
+                drift_agreement(&mut out, c, labels);
+                let _ = write!(
+                    out,
+                    "<p class=\"oo-drift-stats\"><span>{} <b>{}</b></span><span>{} <b class=\"{}\">{}</b></span></p>",
+                    escape(&labels.drift_runs),
+                    s.runs,
+                    escape(&labels.bucket_hit),
+                    if s.bucket_hit.is_some_and(|h| h < 1.0) { "oo-bad" } else { "" },
+                    s.bucket_hit.map(pct).unwrap_or_else(|| "\u{2013}".into())
+                );
+            }
+        }
+        out.push_str("</section>");
+    }
+    out.push_str("</div>");
+    if d.without_samples > 0 {
+        let _ = write!(
+            out,
+            "<p class=\"oo-note\">{} / {} {}</p>",
+            d.without_samples,
+            d.runs,
+            escape(&labels.no_measured)
+        );
+    }
     out.push_str("</div>");
     out
 }

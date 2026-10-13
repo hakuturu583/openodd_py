@@ -270,11 +270,69 @@ class CasePlot:
         return int(a), int(b)
 
     @staticmethod
-    def _query(x: Optional[str], y: Optional[str], scenario: Optional[str], environment: Any) -> str:
-        q: dict[str, Any] = {"x": x, "y": y, "scenario": scenario}
+    def _query(x: Optional[str], y: Optional[str], scenario: Optional[str], environment: Any,
+               basis: str = "drawn", measured_at: Optional[float] = None) -> str:
+        if basis not in ("drawn", "measured"):
+            raise ValueError(f"basis is 'drawn' or 'measured', not {basis!r}")
+        q: dict[str, Any] = {"x": x, "y": y, "scenario": scenario, "basis": basis}
+        if measured_at is not None:
+            q["measured_at"] = float(measured_at)
         if environment is not ANY:
             q["environment"] = environment
         return json.dumps(q)
+
+    @staticmethod
+    def _extra(drift_leaders: bool = False,
+               knobs: Optional[Mapping[str, tuple[float, float]]] = None) -> str:
+        return json.dumps({"drift_leaders": bool(drift_leaders),
+                           "knobs": {str(k): [float(v[0]), float(v[1])] for k, v in (knobs or {}).items()}})
+
+    def drift(
+        self,
+        *,
+        scenario: Optional[str] = None,
+        environment: Any = ANY,
+        measured_at: Optional[float] = None,
+        knobs: Optional[Mapping[str, tuple[float, float]]] = None,
+    ) -> dict[str, Any]:
+        """How well the scenario staged what the sampler drew, as data: per
+        attribute (worst first), each run's drawn and measured value, the
+        bias (mean of measured - drawn), MAE, max |error|, bucket hit rate
+        and -- for a numeric one -- the fit ``measured = a * drawn + b`` with
+        its ``calibration`` (``status``: ``suggest`` with ``write_as`` =
+        ``{scale: 1/a, offset: -b/a}``, ``calibrated``, ``too_few``,
+        ``flat``, ``noisy`` or ``structured``).
+
+        *measured_at*: the measurement window in seconds from t = 0 (default
+        1): an attribute's measured value is its first sample within it.
+        *knobs*: ``{attribute: (scale, offset)}``, the knob that writes it
+        now; a suggested calibration then adds ``knob`` with these and the
+        ``corrected`` scale and offset (``scale / a``, ``offset - scale * b /
+        a``).
+        """
+        q = self._query(None, None, scenario, environment, "drawn", measured_at)
+        out: dict[str, Any] = json.loads(self._core.drift_json(q, self._extra(False, knobs)))
+        return out
+
+    def drift_html(
+        self,
+        *,
+        scenario: Optional[str] = None,
+        environment: Any = ANY,
+        measured_at: Optional[float] = None,
+        knobs: Optional[Mapping[str, tuple[float, float]]] = None,
+        id: str = "",
+        labels: Optional[Mapping[str, str]] = None,
+    ) -> str:
+        """The scenario's realisation as an HTML component: a summary table
+        (worst first), and per attribute drawn against measured -- a scatter
+        with the identity and the fitted line for a numeric one, an
+        agreement table for a categorical one -- with the calibration the fit
+        suggests. *knobs* (``{attribute: (scale, offset)}``, the knob that
+        writes it) adds the corrected knob's scale and offset."""
+        q = self._query(None, None, scenario, environment, "drawn", measured_at)
+        return str(self._core.drift_html(q, id, dict(labels) if labels else None,
+                                         self._extra(False, knobs)))
 
     def data(
         self,
@@ -284,6 +342,8 @@ class CasePlot:
         scenario: Optional[str] = None,
         environment: Any = ANY,
         prediction: bool = True,
+        basis: str = "drawn",
+        measured_at: Optional[float] = None,
     ) -> dict[str, Any]:
         """The plot as a dict, for a host that draws it its own way: both
         axes (``kind``, ``domain``, ``labels``, the ODD ``buckets``) and every
@@ -303,7 +363,7 @@ class CasePlot:
                 recorded none); every environment when left out (:data:`ANY`).
             prediction: Whether to fit the flaky model and add its grid.
         """
-        q = self._query(x, y, scenario, environment)
+        q = self._query(x, y, scenario, environment, basis, measured_at)
         out: dict[str, Any] = json.loads(self._core.data_json(q, bool(prediction)))
         return out
 
@@ -314,6 +374,8 @@ class CasePlot:
         y: Optional[str] = None,
         scenario: Optional[str] = None,
         environment: Any = ANY,
+        basis: str = "drawn",
+        measured_at: Optional[float] = None,
     ) -> dict[str, Any]:
         """What the flaky model fitted to the plot's runs predicts over *x*
         and *y*: the background's grid, as data.
@@ -334,7 +396,8 @@ class CasePlot:
         ``flaky`` where ``instability_confidence`` is above 0.5, else
         ``pass`` / ``fail`` by ``pass_probability`` -- and is data only.
         """
-        out: dict[str, Any] = self.data(x=x, y=y, scenario=scenario, environment=environment)["prediction"]
+        out: dict[str, Any] = self.data(x=x, y=y, scenario=scenario, environment=environment,
+                                        basis=basis, measured_at=measured_at)["prediction"]
         return out
 
     def html(
@@ -349,6 +412,9 @@ class CasePlot:
         table: bool = True,
         prediction: bool = True,
         instability_rings: bool = False,
+        basis: str = "drawn",
+        measured_at: Optional[float] = None,
+        drift_leaders: bool = False,
         labels: Optional[Mapping[str, str]] = None,
     ) -> str:
         """One plot as an HTML fragment, host-driven: the axis pickers
@@ -362,10 +428,19 @@ class CasePlot:
         model predicts (:meth:`prediction`), red low to yellow ~50% to green
         high, when the runs allow it -- runs of both outcomes,
         at least three -- and otherwise says why there is no background.
-        *instability_rings* outlines the cases chosen for instability."""
-        q = self._query(x, y, scenario, environment)
+        *instability_rings* outlines the cases chosen for instability.
+
+        *basis* places the cases by their ``"drawn"`` values (what the
+        sampler aimed at) or the ``"measured"`` ones (each attribute's first
+        sample within *measured_at* seconds of the start, default 1; the
+        model behind the background is then fitted on those). The toggle
+        next to the pickers dispatches ``openodd:axes`` with
+        ``detail.basis``. *drift_leaders* draws a line from each mark to its
+        value on the other basis."""
+        q = self._query(x, y, scenario, environment, basis, measured_at)
         return str(self._core.fragment(q, id, link, bool(table), bool(prediction),
-                                       bool(instability_rings), dict(labels) if labels else None))
+                                       bool(instability_rings), dict(labels) if labels else None,
+                                       self._extra(drift_leaders)))
 
     def table_html(
         self,
@@ -376,10 +451,12 @@ class CasePlot:
         environment: Any = ANY,
         id: str = "",
         labels: Optional[Mapping[str, str]] = None,
+        basis: str = "drawn",
+        measured_at: Optional[float] = None,
     ) -> str:
         """The cases run more than once, on their own: their values (*x* and
         *y* first), their outcomes in order and their verdict."""
-        q = self._query(x, y, scenario, environment)
+        q = self._query(x, y, scenario, environment, basis, measured_at)
         return str(self._core.table(q, id, dict(labels) if labels else None))
 
     def explorer_html(
@@ -393,15 +470,18 @@ class CasePlot:
         table: bool = True,
         prediction: bool = True,
         instability_rings: bool = False,
+        basis: str = "drawn",
+        measured_at: Optional[float] = None,
+        drift_leaders: bool = False,
         labels: Optional[Mapping[str, str]] = None,
     ) -> str:
         """The plot of *x* and *y* and, as hidden panels the axis pickers
         show, every other pair of attributes (at most 100): self-contained,
         for a static report (needs :func:`script` on the page). The model
         behind *prediction* is fitted once for every pair."""
-        q = self._query(x, y, scenario, environment)
+        q = self._query(x, y, scenario, environment, basis, measured_at)
         return str(self._core.explorer(q, id, bool(table), bool(prediction), bool(instability_rings),
-                                       dict(labels) if labels else None))
+                                       dict(labels) if labels else None, self._extra(drift_leaders)))
 
     def page(self, title: str = "Drawn cases", **query: Any) -> str:
         """A standalone page with the explorer (:meth:`explorer_html`)."""
