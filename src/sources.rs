@@ -20,6 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(feature = "native")]
 use fs2::FileExt;
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -166,11 +167,16 @@ fn extract(repo: &Path, commit: &str, dest: &Path) -> Result<()> {
             )));
         }
         if out.stdout.iter().any(|b| *b != 0) {
-            let mut archive = tar::Archive::new(out.stdout.as_slice());
-            for entry in archive.entries()? {
-                // unpack_in refuses paths that would leave `tmp`
-                entry?.unpack_in(&tmp)?;
+            #[cfg(feature = "native")]
+            {
+                let mut archive = tar::Archive::new(out.stdout.as_slice());
+                for entry in archive.entries()? {
+                    // unpack_in refuses paths that would leave `tmp`
+                    entry?.unpack_in(&tmp)?;
+                }
             }
+            #[cfg(not(feature = "native"))]
+            return Err(Error::GitSource(NOT_NATIVE.into()));
         }
         if let Err(e) = std::fs::rename(&tmp, dest) {
             if !dest.exists() {
@@ -196,7 +202,13 @@ fn tempdir_in(parent: &Path, prefix: &str) -> Result<PathBuf> {
     )))
 }
 
-/// The files of `url` at `rev`, fetched into the cache if need be.
+/// What a git source says in a build without the `native` feature.
+#[cfg(not(feature = "native"))]
+const NOT_NATIVE: &str = "git source: this build of openodd has no `native` feature (no tar)";
+
+/// The files of `url` at `rev`, fetched into the cache if need be. Without
+/// the `native` feature, the cache is not locked and nothing can be
+/// extracted: an error.
 pub fn fetch(url: &str, rev: &str) -> Result<Checkout> {
     GitSource::new(url, rev, ".")?;
     let key = &hex::encode(Sha256::digest(url.as_bytes()))[..16];
@@ -213,6 +225,7 @@ pub fn fetch(url: &str, rev: &str) -> Result<Checkout> {
     let repos = root.join("repos");
     std::fs::create_dir_all(&repos)?;
     let lock = std::fs::File::create(repos.join(format!("{key}.lock")))?;
+    #[cfg(feature = "native")]
     lock.lock_exclusive()?; // runs in parallel share the cache
     let repo = repos.join(format!("{key}.git"));
     let result = (|| -> Result<Checkout> {
@@ -227,7 +240,10 @@ pub fn fetch(url: &str, rev: &str) -> Result<Checkout> {
             commit,
         })
     })();
+    #[cfg(feature = "native")]
     let _ = FileExt::unlock(&lock);
+    #[cfg(not(feature = "native"))]
+    let _ = lock;
     result
 }
 
