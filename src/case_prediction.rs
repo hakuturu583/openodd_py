@@ -28,7 +28,7 @@
 //! * **No grid** with fewer than [`MIN_RUNS`] runs, or runs of one outcome
 //!   only: there is nothing to tell apart.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
@@ -100,6 +100,30 @@ pub struct CasePredictor {
     /// Whether each cell of a grid gets the full metrics (flip probability,
     /// instability confidence, state), or the pass probability only.
     detail: bool,
+    /// The grids given, by detail and axes: a pair and its transpose are
+    /// one grid.
+    grids: RefCell<HashMap<GridKey, Grid>>,
+    /// The cases' pass probabilities, by key.
+    passes: RefCell<HashMap<String, Option<f64>>>,
+    /// Points measured in full (Monte Carlo metrics): what costs.
+    measured: Cell<usize>,
+}
+
+/// A grid's detail and its two axes (as JSON: an axis' edges are floats).
+type GridKey = (bool, String, String);
+
+/// `g` with its axes swapped.
+fn transposed(g: &Grid) -> Grid {
+    let rows = g.x.len();
+    let cells = (0..rows)
+        .map(|i| g.cells.iter().map(|row| row[i]).collect())
+        .collect();
+    Grid {
+        x: g.y.clone(),
+        y: g.x.clone(),
+        cells,
+        ..g.clone()
+    }
 }
 
 impl CasePredictor {
@@ -117,6 +141,9 @@ impl CasePredictor {
             unavailable: None,
             steps: steps.max(2),
             detail: true,
+            grids: RefCell::new(HashMap::new()),
+            passes: RefCell::new(HashMap::new()),
+            measured: Cell::new(0),
         };
         // The cases by (scenario, space); the group with the most runs.
         let cases = set.selected(query);
@@ -240,18 +267,47 @@ impl CasePredictor {
         self
     }
 
+    /// Points measured in full so far (the Monte Carlo metrics of a
+    /// detailed grid's cells): the cases' pass probabilities and a plain
+    /// grid need none.
+    pub fn measured(&self) -> usize {
+        self.measured.get()
+    }
+
     /// Why there is no prediction at all, if there is none.
     pub fn unavailable(&self) -> Option<&str> {
         self.unavailable.as_deref()
     }
 
-    fn pass_only(&self, values: &IndexMap<String, Value>) -> Option<f64> {
-        let mut model = self.model.as_ref()?.borrow_mut();
-        let x = model.space().encode(values).ok()?;
-        model.classifier().ok().map(|c| c.pass_probability(&x))
+    /// The pass probability at each point (`None` where a point is outside
+    /// the model's space), in one solve: the posterior mean and variance
+    /// only, not the Monte Carlo metrics.
+    fn pass_only<'a>(
+        &self,
+        points: impl IntoIterator<Item = &'a IndexMap<String, Value>>,
+    ) -> Vec<Option<f64>> {
+        let points: Vec<_> = points.into_iter().collect();
+        let Some(model) = self.model.as_ref() else {
+            return vec![None; points.len()];
+        };
+        let mut model = model.borrow_mut();
+        let coded: Vec<Option<Vec<f64>>> = points
+            .iter()
+            .map(|v| model.space().encode(v).ok())
+            .collect();
+        let Ok(classifier) = model.classifier() else {
+            return vec![None; points.len()];
+        };
+        let known: Vec<Vec<f64>> = coded.iter().flatten().cloned().collect();
+        let mut p = classifier.pass_probabilities(&known).into_iter();
+        coded
+            .iter()
+            .map(|x| x.as_ref().and_then(|_| p.next()))
+            .collect()
     }
 
     fn measure(&self, values: &IndexMap<String, Value>) -> Option<Metrics> {
+        self.measured.set(self.measured.get() + 1);
         let mut model = self.model.as_ref()?.borrow_mut();
         let x = model.space().encode(values).ok()?;
         model.map_metrics_at(&x).ok()
@@ -297,8 +353,12 @@ impl CasePredictor {
     }
 }
 
-impl Predictor for CasePredictor {
-    fn grid(&self, plot: &Plot) -> Result<Grid, String> {
+impl CasePredictor {
+    /// [`Predictor::grid`], with the full metrics in each cell (`detail`)
+    /// or the pass probability only, whatever [`Self::with_detail`] says.
+    /// Grids are kept: asking again, or for the transposed pair, costs
+    /// nothing.
+    pub fn grid_with(&self, plot: &Plot, detail: bool) -> Result<Grid, String> {
         if let Some(why) = &self.unavailable {
             return Err(why.clone());
         }
@@ -315,6 +375,16 @@ impl Predictor for CasePredictor {
         }
         let (gx, vx) = self.axis(x);
         let (gy, vy) = self.axis(y);
+        let (jx, jy) = (gx.to_json().to_string(), gy.to_json().to_string());
+        {
+            let grids = self.grids.borrow();
+            if let Some(g) = grids.get(&(detail, jx.clone(), jy.clone())) {
+                return Ok(g.clone());
+            }
+            if let Some(g) = grids.get(&(detail, jy.clone(), jx.clone())) {
+                return Ok(transposed(g));
+            }
+        }
         let plotted: HashSet<&str> = [x.name.as_str(), y.name.as_str()].into();
         let held: Vec<(String, String)> = self
             .typical
@@ -332,18 +402,33 @@ impl Predictor for CasePredictor {
         let cells = vy
             .iter()
             .map(|yv| {
-                vx.iter()
-                    .map(|xv| {
-                        point.insert(x.name.clone(), xv.clone());
-                        point.insert(y.name.clone(), yv.clone());
-                        if !self.detail {
-                            return self.pass_only(&point).map(|p| Predicted {
+                point.insert(y.name.clone(), yv.clone());
+                if !detail {
+                    // A row in one solve.
+                    let row: Vec<_> = vx
+                        .iter()
+                        .map(|xv| {
+                            let mut p = point.clone();
+                            p.insert(x.name.clone(), xv.clone());
+                            p
+                        })
+                        .collect();
+                    return self
+                        .pass_only(&row)
+                        .into_iter()
+                        .map(|p| {
+                            p.map(|p| Predicted {
                                 pass_probability: p,
                                 flip_probability: None,
                                 instability_confidence: None,
                                 state: None,
-                            });
-                        }
+                            })
+                        })
+                        .collect();
+                }
+                vx.iter()
+                    .map(|xv| {
+                        point.insert(x.name.clone(), xv.clone());
                         self.measure(&point).map(|m| Predicted {
                             pass_probability: m.pass_probability,
                             flip_probability: Some(m.flip_probability),
@@ -354,7 +439,7 @@ impl Predictor for CasePredictor {
                     .collect()
             })
             .collect();
-        Ok(Grid {
+        let grid = Grid {
             x: gx,
             y: gy,
             cells,
@@ -362,12 +447,50 @@ impl Predictor for CasePredictor {
             runs: self.runs,
             flip_threshold: Config::default().threshold,
             flaky_confidence: FLAKY_CONFIDENCE,
-        })
+        };
+        self.grids
+            .borrow_mut()
+            .insert((detail, jx, jy), grid.clone());
+        Ok(grid)
+    }
+}
+
+impl Predictor for CasePredictor {
+    fn grid(&self, plot: &Plot) -> Result<Grid, String> {
+        self.grid_with(plot, self.detail)
     }
 
+    /// The posterior pass probability at the case's values -- what the
+    /// Monte Carlo metrics' `pass_probability` is, without their cost.
     fn pass_probability(&self, case: &Case) -> Option<f64> {
-        self.measure(self.cases.get(&case.key)?)
-            .map(|m| m.pass_probability)
+        self.pass_probabilities(&[case])[0]
+    }
+
+    fn pass_probabilities(&self, cases: &[&Case]) -> Vec<Option<f64>> {
+        let missing: Vec<&Case> = {
+            let known = self.passes.borrow();
+            let mut seen = HashSet::new();
+            cases
+                .iter()
+                .filter(|c| !known.contains_key(&c.key) && seen.insert(&c.key))
+                .copied()
+                .collect()
+        };
+        if !missing.is_empty() {
+            let (asked, unknown): (Vec<&Case>, Vec<&Case>) = missing
+                .into_iter()
+                .partition(|c| self.cases.contains_key(&c.key));
+            let p = self.pass_only(asked.iter().map(|c| &self.cases[&c.key]));
+            let mut known = self.passes.borrow_mut();
+            for (c, p) in asked.iter().zip(p) {
+                known.insert(c.key.clone(), p);
+            }
+            for c in unknown {
+                known.insert(c.key.clone(), None);
+            }
+        }
+        let known = self.passes.borrow();
+        cases.iter().map(|c| known[&c.key]).collect()
     }
 }
 
@@ -426,6 +549,66 @@ mod tests {
         assert!(p.pass_probability(c).unwrap() < 0.5);
         let j = p.grid_json(&plot);
         assert_eq!(j["cells"][0][9]["state"], "pass");
+    }
+
+    #[test]
+    fn grids_are_kept_and_cases_need_no_monte_carlo() {
+        let docs: Vec<Json> = (0..24)
+            .map(|i| {
+                let gap = 1.0 + i as f64 * 1.6;
+                doc(gap, if i % 3 == 0 { "heavy" } else { "none" }, gap > 18.0)
+            })
+            .collect();
+        let set = CaseSet::from_documents(&docs);
+        let query = |x: &str, y: &str| CaseQuery {
+            x: Some(x.into()),
+            y: Some(y.into()),
+            ..Default::default()
+        };
+        let p = CasePredictor::with_steps(&set, &CaseQuery::default(), 6).with_detail(false);
+        // The tips and every pair of the explorer: no point measured in full.
+        let opts = openodd_coverage_view::case_plot::Options::default();
+        let html = openodd_coverage_view::case_plot::explorer_with(
+            &set,
+            &query("gap", "speed"),
+            &opts,
+            Some(&p),
+        );
+        assert!(html.contains("Pass probability (model, now)"));
+        assert_eq!(p.measured(), 0);
+        // A case's pass probability is the full metrics' one.
+        let full = CasePredictor::with_steps(&set, &CaseQuery::default(), 6);
+        for c in &set.cases {
+            let m = full.measure(&full.cases[&c.key]).unwrap();
+            assert!((p.pass_probability(c).unwrap() - m.pass_probability).abs() < 1e-9);
+        }
+        // A pair and its transpose are one grid, cell for cell.
+        let (a, b) = (
+            set.plot(&query("gap", "rain")),
+            set.plot(&query("rain", "gap")),
+        );
+        let ga = full.grid(&a).unwrap();
+        let measured = full.measured();
+        let gb = full.grid(&b).unwrap();
+        assert_eq!(
+            full.measured(),
+            measured,
+            "the transpose is not measured again"
+        );
+        let fresh = CasePredictor::with_steps(&set, &CaseQuery::default(), 6)
+            .grid(&b)
+            .unwrap();
+        assert_eq!(gb, fresh);
+        assert_eq!((gb.x.name(), gb.y.name()), ("rain", "gap"));
+        assert_eq!(gb.cells[3][0], ga.cells[0][3]);
+        // A plain grid row in one solve: the same numbers as one by one.
+        let plain = p.grid(&a).unwrap();
+        for (r, row) in plain.cells.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                let d = ga.cells[r][c].unwrap().pass_probability;
+                assert!((cell.unwrap().pass_probability - d).abs() < 1e-9);
+            }
+        }
     }
 
     #[test]

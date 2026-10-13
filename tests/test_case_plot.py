@@ -173,3 +173,72 @@ def test_one_outcome_has_no_background() -> None:
     assert '<g class="oo-pred"' not in html and "No predicted background: every run passed" in html
     few = CasePlot(docs[:2])
     assert "too few runs" in few.prediction()["unavailable"]
+
+
+def _synthetic(n: int, *, name: str = "rain", value: str = "heavy") -> list[dict[str, Any]]:
+    """*n* runs over four attributes, passing where the gap beats the speed."""
+    import random
+
+    rng = random.Random(7)
+    labels = ["none", "light", value]
+    space = [{"name": "gap", "range": [0.0, 40.0]}, {"name": "speed", "range": [0.0, 20.0]},
+             {"name": "decel", "range": [1.0, 8.0]}, {"name": name, "labels": labels}]
+    docs = []
+    for _ in range(n):
+        v = {"gap": rng.uniform(0, 40), "speed": rng.uniform(0, 20), "decel": rng.uniform(1, 8),
+             name: rng.choice(labels)}
+        docs.append({"scenario": "s", "outcome": {"passed": v["gap"] > v["speed"] + rng.gauss(0, 3)},
+                     "case": {"values": v, "overrides": [f"{k}={x}" for k, x in v.items()],
+                              "chosen_for": "coverage", "space": space}})
+    return docs
+
+
+def _scripts(page: str) -> int:
+    """The <script> elements an HTML5 parser finds in *page*."""
+    try:
+        import html5lib
+    except ImportError:  # the tokenizer's count, without the script states
+        from html.parser import HTMLParser
+
+        class Count(HTMLParser):
+            n = 0
+
+            def handle_starttag(self, tag: str, attrs: Any) -> None:
+                self.n += tag == "script"
+
+        c = Count()
+        c.feed(page)
+        return c.n
+    doc = html5lib.parse(page, namespaceHTMLElements=False)
+    return len(doc.findall(".//script"))
+
+
+def test_script_markup_in_the_data_cannot_end_the_tips_block() -> None:
+    # `<!--<script>` would put the parser in the double-escaped state, where
+    # the block's own `</script>` does not close it.
+    plot = CasePlot(_synthetic(12, name="<!--<script>", value="</script><!--<script>"))
+    for body in (plot.html(x="<!--<script>", y="gap"), plot.explorer_html(x="gap", y="speed")):
+        blocks = re.findall(r'<script type="application/json" class="oo-tips">(.*?)</script>',
+                            body, re.S)
+        assert len(blocks) == 1 and not re.search("[<>&]", blocks[0])
+        assert any("</script><!--<script>" in json.dumps(c) for c in json.loads(blocks[0]))
+        page = openodd.view.page("Cases", body)
+        # The tips' JSON and the components' script, both closed.
+        assert _scripts(page) == 2
+        assert page.rstrip().endswith("</script></body></html>")
+
+
+def test_tips_and_pairs_cost_one_fit() -> None:
+    # The tips take the posterior pass probability (no Monte Carlo per case),
+    # and the model and its grids are kept across calls and transposed
+    # pairs: 120 runs over four attributes render well within the bound,
+    # even unoptimized.
+    import time
+
+    plot = CasePlot(_synthetic(120))
+    t = time.perf_counter()
+    first = plot.html(x="gap", y="speed")
+    plot.html(x="speed", y="gap")
+    plot.explorer_html(x="gap", y="speed")
+    assert time.perf_counter() - t < 60.0
+    assert "Pass probability (model, now)" in first

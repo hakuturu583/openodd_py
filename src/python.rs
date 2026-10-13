@@ -1446,6 +1446,29 @@ fn coverage_view_page(title: &str, body: &str) -> String {
 #[pyclass(frozen, module = "openodd._core")]
 struct CasePlot {
     inner: openodd_coverage_view::CaseSet,
+    /// The flaky models, by selection of runs (scenario, environment),
+    /// fitted on first use: each keeps its grids (a pair and its transpose
+    /// are one) and the cases' pass probabilities across calls.
+    models:
+        std::sync::Mutex<std::collections::HashMap<String, crate::case_prediction::CasePredictor>>,
+}
+
+impl CasePlot {
+    /// The model of `query`'s selection. As a predictor its grids carry the
+    /// pass probability only (what the colour needs);
+    /// `CasePredictor::grid_with` gives the full metrics.
+    fn with_model<T>(
+        &self,
+        query: &openodd_coverage_view::CaseQuery,
+        f: impl FnOnce(&crate::case_prediction::CasePredictor) -> T,
+    ) -> T {
+        let key = serde_json::json!([query.scenario, query.environment]).to_string();
+        let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
+        let model = models.entry(key).or_insert_with(|| {
+            crate::case_prediction::CasePredictor::new(&self.inner, query).with_detail(false)
+        });
+        f(model)
+    }
 }
 
 fn case_query(query_json: &str) -> PyResult<openodd_coverage_view::CaseQuery> {
@@ -1484,6 +1507,7 @@ impl CasePlot {
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(CasePlot {
             inner: openodd_coverage_view::CaseSet::from_documents(&docs),
+            models: Default::default(),
         })
     }
     #[getter]
@@ -1513,14 +1537,18 @@ impl CasePlot {
         let plot = self.inner.plot(&query);
         let mut out = plot.to_json();
         if prediction {
-            let predictor = crate::case_prediction::CasePredictor::new(&self.inner, &query);
-            out["prediction"] = predictor.grid_json(&plot);
-            if let Some(cases) = out["cases"].as_array_mut() {
-                for (json, case) in cases.iter_mut().zip(&plot.cases) {
-                    json["predicted_pass_probability"] =
-                        serde_json::json!(predictor.pass_probability(case));
+            self.with_model(&query, |predictor| {
+                out["prediction"] = match predictor.grid_with(&plot, true) {
+                    Ok(g) => g.to_json(),
+                    Err(why) => serde_json::json!({"unavailable": why}),
+                };
+                let refs: Vec<_> = plot.cases.iter().collect();
+                if let Some(cases) = out["cases"].as_array_mut() {
+                    for (json, p) in cases.iter_mut().zip(predictor.pass_probabilities(&refs)) {
+                        json["predicted_pass_probability"] = serde_json::json!(p);
+                    }
                 }
-            }
+            });
         }
         Ok(out.to_string())
     }
@@ -1538,18 +1566,17 @@ impl CasePlot {
     ) -> PyResult<String> {
         let query = case_query(query_json)?;
         let plot = self.inner.plot(&query);
-        // The colour needs the pass probability only.
-        let predictor = prediction.then(|| {
-            crate::case_prediction::CasePredictor::new(&self.inner, &query).with_detail(false)
-        });
-        Ok(openodd_coverage_view::case_plot::fragment_with(
-            &self.inner,
-            &plot,
-            &case_options(id, link, table, rings, labels)?,
-            predictor
-                .as_ref()
-                .map(|p| p as &dyn openodd_coverage_view::prediction::Predictor),
-        ))
+        let opts = case_options(id, link, table, rings, labels)?;
+        if !prediction {
+            return Ok(openodd_coverage_view::case_plot::fragment(
+                &self.inner,
+                &plot,
+                &opts,
+            ));
+        }
+        Ok(self.with_model(&query, |p| {
+            openodd_coverage_view::case_plot::fragment_with(&self.inner, &plot, &opts, Some(p))
+        }))
     }
     #[pyo3(signature = (query_json, id="", labels=None))]
     fn table(
@@ -1575,17 +1602,17 @@ impl CasePlot {
         labels: Option<indexmap::IndexMap<String, String>>,
     ) -> PyResult<String> {
         let query = case_query(query_json)?;
-        let predictor = prediction.then(|| {
-            crate::case_prediction::CasePredictor::new(&self.inner, &query).with_detail(false)
-        });
-        Ok(openodd_coverage_view::case_plot::explorer_with(
-            &self.inner,
-            &query,
-            &case_options(id, None, table, rings, labels)?,
-            predictor
-                .as_ref()
-                .map(|p| p as &dyn openodd_coverage_view::prediction::Predictor),
-        ))
+        let opts = case_options(id, None, table, rings, labels)?;
+        if !prediction {
+            return Ok(openodd_coverage_view::case_plot::explorer(
+                &self.inner,
+                &query,
+                &opts,
+            ));
+        }
+        Ok(self.with_model(&query, |p| {
+            openodd_coverage_view::case_plot::explorer_with(&self.inner, &query, &opts, Some(p))
+        }))
     }
 }
 

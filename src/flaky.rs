@@ -601,6 +601,33 @@ impl Classifier {
         let (mean, cov) = self.latent(&[point.to_vec()]);
         norm_cdf(mean[0] / (1.0 + cov[(0, 0)].max(0.0)).sqrt())
     }
+
+    /// [`Self::pass_probability`] at each of *points*, in one solve: only
+    /// the variance of each point is formed, not their covariance.
+    pub fn pass_probabilities(&self, points: &[Vec<f64>]) -> Vec<f64> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let ks = self.cross(points);
+        let mean = ks.transpose() * &self.grad;
+        let mut v = ks;
+        for (i, mut row) in v.row_iter_mut().enumerate() {
+            row *= self.sqrt_w[i];
+        }
+        let v = self
+            .l
+            .solve_lower_triangular(&v)
+            .expect("the Cholesky factor has a positive diagonal");
+        points
+            .iter()
+            .enumerate()
+            .map(|(j, p)| {
+                let prior = kernel(p, p, &self.coordinate_scales, self.amplitude);
+                let var = prior - v.column(j).norm_squared();
+                norm_cdf(mean[j] / (1.0 + var.max(0.0)).sqrt())
+            })
+            .collect()
+    }
 }
 
 /// The length scale of a GP regression on the ±1 outcomes, fitted by

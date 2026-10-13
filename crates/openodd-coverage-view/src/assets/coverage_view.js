@@ -72,7 +72,7 @@
     if (link) {
       var q = [bar.getAttribute("data-oo-at"), "x=" + encodeURIComponent(x), "y=" + encodeURIComponent(y)];
       q = q.filter(Boolean).join("&");
-      window.location.href = link.replace("{conditions}", q).replace("{axes}", q);
+      window.location.href = link.split("{conditions}").join(q).split("{axes}").join(q);
     }
   }
   document.addEventListener("change", function (event) {

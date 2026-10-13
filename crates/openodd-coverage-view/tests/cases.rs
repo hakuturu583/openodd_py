@@ -219,6 +219,60 @@ fn text_is_escaped() {
     assert_eq!(html.matches("</script>").count(), 1);
 }
 
+/// Every JSON block inside a `<script>` element of `html`.
+fn script_json_blocks(html: &str) -> Vec<&str> {
+    html.split("<script type=\"application/json\"")
+        .skip(1)
+        .map(|rest| {
+            let body = &rest[rest.find('>').unwrap() + 1..];
+            &body[..body.find("</script>").unwrap()]
+        })
+        .collect()
+}
+
+#[test]
+fn script_markup_in_names_and_values_stays_inside_the_json() {
+    // An attribute named `<!--<script>` (which would put the HTML parser in
+    // the script's double-escaped state) and a value that closes the block.
+    let name = "<!--<script>";
+    let value = "</script><!--<script>&";
+    let d: Vec<Json> = docs()
+        .into_iter()
+        .map(|mut doc| {
+            let text = doc
+                .to_string()
+                .replace("\"rain\"", &json!(name).to_string());
+            doc = serde_json::from_str(&text).unwrap();
+            if doc["case"].is_object() {
+                doc["case"]["values"][name] = json!(value);
+                doc["case"]["space"][0]["labels"] = json!([value, "none", "heavy"]);
+            }
+            doc
+        })
+        .collect();
+    let set = CaseSet::from_documents(&d);
+    assert!(set.attributes().iter().any(|a| a == name));
+    let query = CaseQuery {
+        x: Some(name.into()),
+        y: Some("gap".into()),
+        ..Default::default()
+    };
+    let plot = set.plot(&query);
+    for html in [
+        case_plot::fragment(&set, &plot, &Options::default()),
+        case_plot::explorer(&set, &query, &Options::default()),
+    ] {
+        let blocks = script_json_blocks(&html);
+        assert_eq!(blocks.len(), 1);
+        for b in &blocks {
+            assert!(!b.contains(['<', '>', '&']), "raw markup in {b}");
+            let cards: Json = serde_json::from_str(b).unwrap();
+            assert!(cards.to_string().contains(value));
+        }
+        assert_eq!(html.matches("</script>").count(), 1);
+    }
+}
+
 #[test]
 fn the_explorer_renders_every_pair() {
     let set = CaseSet::from_documents(&docs());

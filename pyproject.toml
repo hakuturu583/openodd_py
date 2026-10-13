@@ -23,7 +23,7 @@ openodd-coverage = "openodd.report:main"
 Repository = "https://github.com/hakuturu583/openodd_py"
 
 [dependency-groups]
-dev = ["pytest>=8", "hypothesis>=6", "pyyaml>=6", "maturin>=1.7,<2"]
+dev = ["pytest>=8", "hypothesis>=6", "pyyaml>=6", "maturin>=1.7,<2", "html5lib>=1"]
 
 [tool.maturin]
 python-source = "python"

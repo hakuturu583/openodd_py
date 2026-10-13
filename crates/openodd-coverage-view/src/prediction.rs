@@ -116,6 +116,11 @@ pub trait Predictor {
     fn grid(&self, plot: &Plot) -> Result<Grid, String>;
     /// The pass probability predicted at a case's own values, if any.
     fn pass_probability(&self, case: &Case) -> Option<f64>;
+    /// [`Self::pass_probability`] of each case: a predictor that can do
+    /// them at once (one solve) does.
+    fn pass_probabilities(&self, cases: &[&Case]) -> Vec<Option<f64>> {
+        cases.iter().map(|c| self.pass_probability(c)).collect()
+    }
 }
 
 /// Grids computed ahead of time, by their axes, and the cases' pass
@@ -130,11 +135,23 @@ pub struct Precomputed {
 
 impl Predictor for Precomputed {
     fn grid(&self, plot: &Plot) -> Result<Grid, String> {
-        let name = |a: &Option<crate::cases::CaseAxis>| a.as_ref().map(|a| a.name.clone());
-        let (x, y) = (name(&plot.x), name(&plot.y));
+        // The same attribute, cut the same way (numeric or categorical).
+        let fits = |g: &GridAxis, a: &Option<crate::cases::CaseAxis>| {
+            a.as_ref().is_some_and(|a| {
+                g.name() == a.name
+                    && matches!(
+                        (g, a.kind),
+                        (GridAxis::Numeric { .. }, crate::cases::AxisKind::Numeric)
+                            | (
+                                GridAxis::Categorical { .. },
+                                crate::cases::AxisKind::Categorical
+                            )
+                    )
+            })
+        };
         self.grids
             .iter()
-            .find(|g| Some(g.x.name().to_string()) == x && Some(g.y.name().to_string()) == y)
+            .find(|g| fits(&g.x, &plot.x) && fits(&g.y, &plot.y))
             .cloned()
             .ok_or_else(|| self.unavailable.clone().unwrap_or_default())
     }

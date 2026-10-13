@@ -808,13 +808,19 @@ impl Tips {
         let cases = set.selected(query);
         let scenarios = cases.iter().any(|c| c.scenario != cases[0].scenario);
         let mut index = HashMap::new();
+        let refs: Vec<&Case> = cases.iter().collect();
+        let predicted = match predictor {
+            Some(p) => p.pass_probabilities(&refs),
+            None => vec![None; cases.len()],
+        };
         let cards = cases
             .iter()
+            .zip(predicted)
             .enumerate()
-            .map(|(i, c)| {
+            .map(|(i, (c, p))| {
                 index.insert(c.key.clone(), i);
                 let mut card = case_tip(set, c, i + 1, scenarios, labels);
-                if let Some(p) = predictor.and_then(|p| p.pass_probability(c)) {
+                if let Some(p) = p {
                     if let Some(rows) = card["rows"].as_array_mut() {
                         rows.push(serde_json::json!([labels.model_pass, pct(p)]));
                     }
@@ -827,9 +833,7 @@ impl Tips {
 
     /// The cards as a JSON script element, safe inside HTML.
     fn script(&self) -> String {
-        let json = serde_json::Value::Array(self.cards.clone())
-            .to_string()
-            .replace("</", "<\\/");
+        let json = crate::html::script_json(&serde_json::Value::Array(self.cards.clone()));
         format!("<script type=\"application/json\" class=\"oo-tips\">{json}</script>")
     }
 }

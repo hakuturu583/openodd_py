@@ -20,8 +20,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use openodd::case_prediction::CasePredictor;
-use openodd_coverage_view::cases::{Case, CaseQuery, CaseSet, Plot};
-use openodd_coverage_view::prediction::{Grid, Predictor};
+use openodd_coverage_view::cases::{Case, CaseQuery, CaseSet};
+use openodd_coverage_view::prediction::Predictor;
 use openodd_coverage_view::{case_plot, html, Dataset, Query};
 use serde_json::{json, Value as Json};
 use wasm_bindgen::prelude::*;
@@ -87,36 +87,19 @@ pub fn case_options(raw: &str) -> Result<case_plot::Options, String> {
     Ok(out)
 }
 
-/// A model and the grids it gave, by pair of axes: what a selection of runs
-/// costs once.
-struct Model {
-    predictor: CasePredictor,
-    grids: RefCell<HashMap<(String, String), Result<Grid, String>>>,
-    cases: RefCell<HashMap<String, Option<f64>>>,
+/// A panic's message on the browser console (`console.error`), instead of
+/// a bare `unreachable` trap: set once, when the module starts.
+#[wasm_bindgen(start)]
+pub fn start() {
+    std::panic::set_hook(Box::new(|info| {
+        console_error(&format!("openodd-wasm: {info}"))
+    }));
 }
 
-impl Predictor for Model {
-    fn grid(&self, plot: &Plot) -> Result<Grid, String> {
-        let name = |a: &Option<openodd_coverage_view::cases::CaseAxis>| {
-            a.as_ref().map(|a| a.name.clone()).unwrap_or_default()
-        };
-        let key = (name(&plot.x), name(&plot.y));
-        if let Some(g) = self.grids.borrow().get(&key) {
-            return g.clone();
-        }
-        let g = self.predictor.grid(plot);
-        self.grids.borrow_mut().insert(key, g.clone());
-        g
-    }
-
-    fn pass_probability(&self, case: &Case) -> Option<f64> {
-        if let Some(p) = self.cases.borrow().get(&case.key) {
-            return *p;
-        }
-        let p = self.predictor.pass_probability(case);
-        self.cases.borrow_mut().insert(case.key.clone(), p);
-        p
-    }
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(message: &str);
 }
 
 /// Coverage documents, read once, and the views of them.
@@ -125,8 +108,10 @@ pub struct Viewer {
     coverage: Dataset,
     cases: CaseSet,
     documents: Vec<Json>,
-    /// The flaky models, by the selection of runs (scenario, environment).
-    models: RefCell<HashMap<String, Model>>,
+    /// The flaky models, by the selection of runs (scenario, environment):
+    /// each keeps its grids (by pair, either way round, and detail) and the
+    /// cases' pass probabilities.
+    models: RefCell<HashMap<String, CasePredictor>>,
 }
 
 impl Viewer {
@@ -146,17 +131,16 @@ impl Viewer {
         })
     }
 
-    /// The model of a selection, fitted on first use.
-    /// `detail`: each grid cell's full metrics (for JSON), or its pass
-    /// probability only (what the colour needs: far cheaper).
-    fn with_model<T>(&self, query: &CaseQuery, detail: bool, f: impl FnOnce(&Model) -> T) -> T {
-        let key = json!([query.scenario, query.environment, detail]).to_string();
+    /// The model of a selection, fitted on first use and shared by
+    /// `cases_html` and `cases_json`. As a [`Predictor`] its grids carry the
+    /// pass probability only (what the colour needs: far cheaper);
+    /// [`CasePredictor::grid_with`] gives the full metrics.
+    fn with_model<T>(&self, query: &CaseQuery, f: impl FnOnce(&CasePredictor) -> T) -> T {
+        let key = json!([query.scenario, query.environment]).to_string();
         let mut models = self.models.borrow_mut();
-        let model = models.entry(key).or_insert_with(|| Model {
-            predictor: CasePredictor::new(&self.cases, query).with_detail(detail),
-            grids: RefCell::new(HashMap::new()),
-            cases: RefCell::new(HashMap::new()),
-        });
+        let model = models
+            .entry(key)
+            .or_insert_with(|| CasePredictor::new(&self.cases, query).with_detail(false));
         f(model)
     }
 
@@ -183,7 +167,7 @@ impl Viewer {
         if !flag(&raw, "prediction", true) {
             return Ok(case_plot::fragment(&self.cases, &plot, &opts));
         }
-        Ok(self.with_model(&q, false, |m| {
+        Ok(self.with_model(&q, |m| {
             case_plot::fragment_with(&self.cases, &plot, &opts, Some(m as &dyn Predictor))
         }))
     }
@@ -193,14 +177,15 @@ impl Viewer {
         let plot = self.cases.plot(&q);
         let mut out = plot.to_json();
         if prediction {
-            self.with_model(&q, true, |m| {
-                out["prediction"] = match m.grid(&plot) {
+            self.with_model(&q, |m| {
+                out["prediction"] = match m.grid_with(&plot, true) {
                     Ok(g) => g.to_json(),
                     Err(why) => json!({"unavailable": why}),
                 };
+                let refs: Vec<&Case> = plot.cases.iter().collect();
                 if let Some(cases) = out["cases"].as_array_mut() {
-                    for (j, c) in cases.iter_mut().zip(&plot.cases) {
-                        j["predicted_pass_probability"] = json!(m.pass_probability(c));
+                    for (j, p) in cases.iter_mut().zip(m.pass_probabilities(&refs)) {
+                        j["predicted_pass_probability"] = json!(p);
                     }
                 }
             });
