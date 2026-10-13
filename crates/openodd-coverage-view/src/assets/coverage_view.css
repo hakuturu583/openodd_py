@@ -265,7 +265,14 @@
 /* The repeated cases' table: it scrolls in its own box rather than squash. */
 .oo-cov .oo-case-table { margin-top: 18px; }
 .oo-cov .oo-case-table h4 { margin: 0; font-size: 13.5px; font-weight: 650; }
-.oo-cov .oo-table-scroll { margin-top: 8px; border: 1px solid var(--oo-border); border-radius: 10px; }
+/* The card never grows past its container: in a host's grid or flex column
+   (min-width: auto), the table's unwrapped width would otherwise become the
+   card's minimum, and the tiles, legend and plot would overflow with it.
+   Size containment keeps the table's width out of the card's minimum; the
+   table scrolls in its own box instead. */
+.oo-cov.oo-cases { min-width: 0; max-width: 100%; }
+.oo-cov .oo-table-scroll { margin-top: 8px; border: 1px solid var(--oo-border); border-radius: 10px;
+  container-type: inline-size; }
 .oo-cov table.oo-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 .oo-cov .oo-table th, .oo-cov .oo-table td { padding: 7px 12px; text-align: left; white-space: nowrap;
   border-bottom: 1px solid var(--oo-border); vertical-align: middle; }

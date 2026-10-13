@@ -360,3 +360,22 @@ fn the_background_is_what_the_predictor_gives() {
     let html = case_plot::fragment(&set, &plot, &Options::default());
     assert!(!html.contains("oo-pred"));
 }
+
+#[test]
+fn the_card_shrinks_with_its_container() {
+    // No fixed width anywhere on the root, the panels or the plots: the
+    // SVGs scale by their viewBox, and the table's unwrapped width is kept
+    // out of the card's minimum (it scrolls in its own box), so a host's
+    // grid or flex column does not grow to fit it.
+    let set = CaseSet::from_documents(&docs());
+    let html = case_plot::explorer(&set, &CaseQuery::default(), &Options::default());
+    assert!(!html.contains("style=\"width") && !html.contains("min-width"));
+    for svg in html.split("<svg class=\"oo-svg ").skip(1) {
+        let tag = &svg[..svg.find('>').unwrap()];
+        assert!(tag.contains("viewBox") && !tag.contains("width="), "{tag}");
+    }
+    let css = openodd_coverage_view::html::styles();
+    assert!(css.contains(".oo-cov.oo-cases { min-width: 0; max-width: 100%; }"));
+    let scroll = &css[css.find(".oo-cov .oo-table-scroll {").unwrap()..];
+    assert!(scroll[..scroll.find('}').unwrap()].contains("container-type: inline-size"));
+}
