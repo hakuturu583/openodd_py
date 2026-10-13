@@ -30,6 +30,12 @@
   for the next two, as an HTML component other tools embed or a standalone page
   (`openodd-coverage --html`); the `openodd-coverage-view` crate
   ([docs/coverage_view.md](docs/coverage_view.md)).
+- **See the drawn cases**: `CasePlot` places every case of a sampled sweep at the
+  values it was drawn with -- any two attributes of its space, ODD bucket edges as
+  grid lines -- as a pass dot, a fail cross or a flaky ring with `passes/runs`,
+  outlining the cases chosen for instability, with a table of the cases run more
+  than once; embeddable like `CoverageView`, or a page (`openodd-coverage
+  --cases-html`) ([docs/case_plot.md](docs/case_plot.md)).
 - **Find flaky regions of the ODD**: the merged report counts, per ODD cell, the runs
   that drove through it, how many failed (with a 95% Wilson interval) and how many
   failed *in* it, per scenario and environment (`CoverageReport.cell_flakiness`,

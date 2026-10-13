@@ -164,6 +164,9 @@ The component's words are English. `labels={"title": "ODD カバレッジ",
 "state_flaky": "...", ...}` replaces them by name; the names are the fields
 of `html::Labels` in the crate.
 
+The drawn cases of a sweep -- each run at the values it was drawn with --
+are the [case plot](case_plot.md), on the same styles and script.
+
 ## In Rust
 
 ```rust
