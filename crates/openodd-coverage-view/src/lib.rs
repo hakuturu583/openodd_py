@@ -12,7 +12,8 @@
 //! * [`cases`] reads the drawn cases of a sweep (each run's `case`) and
 //!   groups the runs of each; [`case_plot`] renders them as a scatter over
 //!   any two attributes, with a table of the cases run more than once, on
-//!   the same styles and script.
+//!   the same styles and script; [`prediction`] is the data of its
+//!   background, what a model of the runs (openodd's) predicts.
 //!
 //! The crate has no I/O and no framework: the host gives it parsed JSON and
 //! gets strings back (or [`matrix::Matrix::to_json`] to draw it its own way).
@@ -31,6 +32,7 @@ pub mod cases;
 pub mod data;
 pub mod html;
 pub mod matrix;
+pub mod prediction;
 pub mod stats;
 
 pub use cases::{CaseQuery, CaseSet, Plot, Verdict};

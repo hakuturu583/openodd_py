@@ -3,6 +3,7 @@
 use openodd_coverage_view::case_plot::{self, Options};
 use openodd_coverage_view::cases::{AxisKind, CaseQuery, CaseSet, Verdict};
 use openodd_coverage_view::html::MAX_AXIS_PAIRS;
+use openodd_coverage_view::prediction::{Grid, GridAxis, Precomputed, Predicted};
 use serde_json::{json, Value as Json};
 
 fn items() -> Json {
@@ -165,6 +166,7 @@ fn the_fragment_draws_each_case_once_apart() {
     let opts = Options {
         id: "cp".into(),
         link: Some("/cases?{axes}".into()),
+        instability_rings: true,
         ..Default::default()
     };
     let html = case_plot::fragment(&set, &plot, &opts);
@@ -183,6 +185,11 @@ fn the_fragment_draws_each_case_once_apart() {
     assert!(html.contains("oo-case oo-flaky"));
     assert!(html.contains("oo-case oo-pass oo-instab"));
     assert!(html.contains("oo-case oo-fail oo-instab"));
+    // Without the option, no outline: the card and the table still say why.
+    let plain = case_plot::fragment(&set, &plot, &Options::default());
+    assert!(!plain.contains("oo-instab") && !plain.contains("class=\"oo-inst\""));
+    assert!(plain.contains("[\"Chosen for\",\"instability\"]"));
+    assert!(plain.contains("<th scope=\"col\">Chosen for</th>"));
     assert!(html.contains(">1/2</text>") && html.contains(">0/2</text>"));
     assert!(html.contains("class=\"oo-lead\""));
     // The pickers and the cards.
@@ -274,4 +281,82 @@ fn labels_translate() {
     let html = case_plot::fragment(&set, &plot, &opts);
     assert!(html.contains("抽選ケース") && html.contains("不安定"));
     assert!(!html.contains("Repeated cases"));
+}
+
+fn cell(p: f64, state: Verdict) -> Option<Predicted> {
+    Some(Predicted {
+        pass_probability: p,
+        flip_probability: 0.1,
+        instability_confidence: 0.2,
+        state,
+    })
+}
+
+/// A grid over speed (2 cells) x gap (2 cells): fails slow and near, passes
+/// fast and far, flaky between.
+fn grid() -> Grid {
+    Grid {
+        x: GridAxis::Numeric {
+            name: "speed".into(),
+            edges: vec![-15.0, -5.0, 5.0],
+        },
+        y: GridAxis::Numeric {
+            name: "gap".into(),
+            edges: vec![6.0, 18.0, 30.0],
+        },
+        cells: vec![
+            vec![cell(0.1, Verdict::Fail), cell(0.5, Verdict::Flaky)],
+            vec![cell(0.2, Verdict::Fail), cell(0.9, Verdict::Pass)],
+        ],
+        held: vec![("rain".into(), "none".into())],
+        runs: 8,
+        flip_threshold: 0.1,
+        flaky_confidence: 0.5,
+    }
+}
+
+#[test]
+fn the_background_is_what_the_predictor_gives() {
+    let set = CaseSet::from_documents(&docs());
+    let plot = set.plot(&CaseQuery {
+        x: Some("speed".into()),
+        y: Some("gap".into()),
+        ..Default::default()
+    });
+    let mut cases = std::collections::HashMap::new();
+    cases.insert(plot.cases[0].key.clone(), 0.875);
+    let predictor = Precomputed {
+        grids: vec![grid()],
+        cases,
+        unavailable: None,
+    };
+    let html = case_plot::fragment_with(&set, &plot, &Options::default(), Some(&predictor));
+    // Drawn in both sizes, behind the marks, a row's run of one state as
+    // one rectangle: 4 cells, 4 rectangles (no two alike side by side).
+    assert_eq!(html.matches("<g class=\"oo-pred\"").count(), 2);
+    assert_eq!(html.matches("<rect class=\"oo-pred-").count(), 8);
+    assert!(html.find("<rect class=\"oo-pred-fail").unwrap() < html.find("role=\"img\"").unwrap());
+    for key in ["Predicted: passes", "Predicted: fails", "Predicted: flaky"] {
+        assert!(html.contains(key), "{key}");
+    }
+    assert!(html.contains("fitted to these 8 runs"));
+    assert!(html.contains("held at the cases&#39; typical values: rain = none"));
+    assert!(html.contains("[\"Pass probability (model, now)\",\"88%\"]"));
+    assert_eq!(grid().to_json()["cells"][1][1]["state"], "pass");
+    // Another pair: no grid for it, and the reason.
+    let other = set.plot(&CaseQuery {
+        x: Some("gap".into()),
+        y: Some("rain".into()),
+        ..Default::default()
+    });
+    let none = Precomputed {
+        unavailable: Some("every run passed, so there is nothing to tell apart".into()),
+        ..Default::default()
+    };
+    let html = case_plot::fragment_with(&set, &other, &Options::default(), Some(&none));
+    assert!(!html.contains("<g class=\"oo-pred\""));
+    assert!(html.contains("No predicted background: every run passed"));
+    // No predictor, no background and no note.
+    let html = case_plot::fragment(&set, &plot, &Options::default());
+    assert!(!html.contains("oo-pred"));
 }

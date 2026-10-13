@@ -238,6 +238,29 @@
 .oo-cov .oo-nm-fail { fill: var(--oo-fail); }
 .oo-cov .oo-key { flex: none; overflow: visible; }
 .oo-cov .oo-nm-key { font: 650 11px var(--oo-font); font-style: normal; color: var(--oo-ink-2); }
+/* The predicted background: the state colours, faint, behind the marks. */
+/* Opaque tints (not transparency), so cells that touch never darken where
+   they overlap. */
+.oo-cov { --oo-pred-pass: color-mix(in oklab, var(--oo-pass) 12%, var(--oo-surface-2));
+  --oo-pred-fail: color-mix(in oklab, var(--oo-fail) 12%, var(--oo-surface-2));
+  --oo-pred-flaky: color-mix(in oklab, var(--oo-flaky) 20%, var(--oo-surface-2)); }
+@media (prefers-color-scheme: dark) {
+  .oo-cov:not([data-oo-theme="light"]) { --oo-pred-pass: color-mix(in oklab, var(--oo-pass) 16%, var(--oo-surface-2));
+    --oo-pred-fail: color-mix(in oklab, var(--oo-fail) 16%, var(--oo-surface-2));
+    --oo-pred-flaky: color-mix(in oklab, var(--oo-flaky) 16%, var(--oo-surface-2)); }
+}
+.oo-cov[data-oo-theme="dark"] { --oo-pred-pass: color-mix(in oklab, var(--oo-pass) 16%, var(--oo-surface-2));
+  --oo-pred-fail: color-mix(in oklab, var(--oo-fail) 16%, var(--oo-surface-2));
+  --oo-pred-flaky: color-mix(in oklab, var(--oo-flaky) 16%, var(--oo-surface-2)); }
+.oo-cov .oo-pred rect { stroke: none; shape-rendering: crispEdges; }
+.oo-cov rect.oo-pred-pass { fill: var(--oo-pred-pass); }
+.oo-cov rect.oo-pred-fail { fill: var(--oo-pred-fail); }
+.oo-cov rect.oo-pred-flaky { fill: var(--oo-pred-flaky); }
+.oo-cov .oo-pred-key { display: inline-block; width: 16px; height: 12px; border-radius: 3px; border: 1px solid var(--oo-border); }
+.oo-cov .oo-pred-key.oo-pred-pass { background: var(--oo-pred-pass); }
+.oo-cov .oo-pred-key.oo-pred-fail { background: var(--oo-pred-fail); }
+.oo-cov .oo-pred-key.oo-pred-flaky { background: var(--oo-pred-flaky); }
+.oo-cov .oo-pred-note { margin-top: 8px; font-size: 11.5px; }
 
 /* The repeated cases' table: it scrolls in its own box rather than squash. */
 .oo-cov .oo-case-table { margin-top: 18px; }

@@ -76,6 +76,9 @@ pub struct Case {
     /// Attribute -> the ODD bucket of that value.
     pub buckets: IndexMap<String, String>,
     pub overrides: Vec<String>,
+    /// The space it was drawn in (`case.space`), as recorded: what a model
+    /// of its outcomes codes it in.
+    pub space: Option<Json>,
     /// In the order of the documents.
     pub runs: Vec<CaseRun>,
 }
@@ -414,6 +417,7 @@ impl CaseSet {
                         values,
                         buckets,
                         overrides,
+                        space: case.get("space").filter(|s| s.is_array()).cloned(),
                         runs: vec![run],
                     });
                 }

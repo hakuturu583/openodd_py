@@ -27,6 +27,7 @@ use std::fmt::Write as _;
 
 use crate::cases::{AxisKind, Case, CaseAxis, CaseQuery, CaseSet, Plot, Verdict};
 use crate::html::{escape, MAX_AXIS_PAIRS};
+use crate::prediction::{Grid, GridAxis, Predictor};
 
 /// The words the component shows, for a host to translate.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +75,13 @@ pub struct Labels {
     pub robustness_radius: String,
     pub scenario: String,
     pub case: String,
+    pub predicted_pass: String,
+    pub predicted_fail: String,
+    pub predicted_flaky: String,
+    pub predicted_caption: String,
+    pub held: String,
+    pub no_prediction: String,
+    pub model_pass: String,
 }
 
 impl Labels {
@@ -123,6 +131,13 @@ impl Labels {
             "robustness_radius" => &mut self.robustness_radius,
             "scenario" => &mut self.scenario,
             "case" => &mut self.case,
+            "predicted_pass" => &mut self.predicted_pass,
+            "predicted_fail" => &mut self.predicted_fail,
+            "predicted_flaky" => &mut self.predicted_flaky,
+            "predicted_caption" => &mut self.predicted_caption,
+            "held" => &mut self.held,
+            "no_prediction" => &mut self.no_prediction,
+            "model_pass" => &mut self.model_pass,
             _ => return false,
         };
         *slot = value.to_string();
@@ -179,6 +194,18 @@ impl Default for Labels {
             robustness_radius: s("Robustness radius"),
             scenario: s("Scenario"),
             case: s("Case {n}"),
+            predicted_pass: s("Predicted: passes"),
+            predicted_fail: s("Predicted: fails"),
+            predicted_flaky: s("Predicted: flaky"),
+            predicted_caption: s(
+                "Background: what the flaky model fitted to these {runs} runs predicts. Flaky where it is \
+                 over {confidence} sure a small change flips the outcome more than {threshold} of the time; \
+                 else passes where P(pass) is at least 50%, fails where below. Where runs are few the \
+                 model is unsure, and unsure reads as flaky.",
+            ),
+            held: s("Attributes not plotted are held at the cases' typical values: {held}."),
+            no_prediction: s("No predicted background: {reason}."),
+            model_pass: s("Pass probability (model, now)"),
         }
     }
 }
@@ -194,6 +221,9 @@ pub struct Options {
     pub link: Option<String>,
     /// Whether a plot is followed by the table of repeated cases.
     pub table: bool,
+    /// Whether a case chosen for instability gets a dashed outline (off: its
+    /// card and the table still say why it was chosen).
+    pub instability_rings: bool,
     pub labels: Labels,
 }
 
@@ -203,6 +233,7 @@ impl Default for Options {
             id: String::new(),
             link: None,
             table: true,
+            instability_rings: false,
             labels: Labels::default(),
         }
     }
@@ -562,7 +593,7 @@ fn y_ticks(a: &CaseAxis, lo: f64, hi: f64) -> Vec<f64> {
     }
 }
 
-fn layout<'a>(plot: &'a Plot, g: Geometry) -> Layout<'a> {
+fn layout<'a>(plot: &'a Plot, g: Geometry, rings: bool) -> Layout<'a> {
     let numeric_y = plot.y.as_ref().is_some_and(|a| a.kind == AxisKind::Numeric);
     // Left: the y labels, and (numeric) a column for its bucket names.
     let left = 10.0 + y_label_width(plot, &g) + if numeric_y { g.small + 10.0 } else { 0.0 };
@@ -591,7 +622,7 @@ fn layout<'a>(plot: &'a Plot, g: Geometry) -> Layout<'a> {
     }
     let mut at = anchors.clone();
     // Apart by a mark and a bit, or by its dashed outline when there is one.
-    let ring = if plot.cases.iter().any(Case::for_instability) {
+    let ring = if rings && plot.cases.iter().any(Case::for_instability) {
         3.5
     } else {
         0.0
@@ -714,6 +745,14 @@ fn axis_title(a: &CaseAxis) -> String {
     }
 }
 
+fn chosen_label(c: &str, labels: &Labels) -> String {
+    match c {
+        "coverage" => labels.chosen_coverage.clone(),
+        "instability" => labels.chosen_instability.clone(),
+        other => other.to_string(),
+    }
+}
+
 fn verdict_label(v: Verdict, labels: &Labels) -> &str {
     match v {
         Verdict::Pass => &labels.state_pass,
@@ -754,7 +793,12 @@ struct Tips {
 }
 
 impl Tips {
-    fn new(set: &CaseSet, query: &CaseQuery, labels: &Labels) -> Self {
+    fn new(
+        set: &CaseSet,
+        query: &CaseQuery,
+        labels: &Labels,
+        predictor: Option<&dyn Predictor>,
+    ) -> Self {
         let cases = set.selected(query);
         let scenarios = cases.iter().any(|c| c.scenario != cases[0].scenario);
         let mut index = HashMap::new();
@@ -763,7 +807,13 @@ impl Tips {
             .enumerate()
             .map(|(i, c)| {
                 index.insert(c.key.clone(), i);
-                case_tip(set, c, i + 1, scenarios, labels)
+                let mut card = case_tip(set, c, i + 1, scenarios, labels);
+                if let Some(p) = predictor.and_then(|p| p.pass_probability(c)) {
+                    if let Some(rows) = card["rows"].as_array_mut() {
+                        rows.push(serde_json::json!([labels.model_pass, pct(p)]));
+                    }
+                }
+                card
             })
             .collect();
         Tips { cards, index }
@@ -840,11 +890,7 @@ fn case_tip(
         .chosen_for()
         .iter()
         .filter(|c| !c.is_empty())
-        .map(|c| match c.as_str() {
-            "coverage" => labels.chosen_coverage.clone(),
-            "instability" => labels.chosen_instability.clone(),
-            other => other.to_string(),
-        })
+        .map(|c| chosen_label(c, labels))
         .collect();
     if !chosen.is_empty() {
         rows.push((labels.chosen_for.clone(), chosen.join(", ")));
@@ -1036,6 +1082,89 @@ fn axis_svg(out: &mut String, lay: &Layout, horizontal: bool, labels: &Labels) {
     }
 }
 
+/// The positions a grid axis' cells span on `scale`, by the grid's cell
+/// order; `None` for a cell the plot has no band for.
+fn grid_spans(scale: &Scale, axis: &GridAxis, frame: (f64, f64)) -> Vec<Option<(f64, f64)>> {
+    match axis {
+        GridAxis::Numeric { edges, .. } => {
+            let n = edges.len().saturating_sub(1);
+            (0..n)
+                .map(|i| {
+                    // The outer cells reach the frame.
+                    let a = if i == 0 {
+                        frame.0
+                    } else {
+                        scale.value(edges[i])
+                    };
+                    let b = if i + 1 == n {
+                        frame.1
+                    } else {
+                        scale.value(edges[i + 1])
+                    };
+                    Some((a.min(b), a.max(b)))
+                })
+                .collect()
+        }
+        GridAxis::Categorical { labels, .. } => labels
+            .iter()
+            .map(|l| {
+                let i = match scale.axis {
+                    Some(a) if a.kind == AxisKind::Categorical => {
+                        a.labels.iter().position(|x| x == l)?
+                    }
+                    None => 0,
+                    _ => return None,
+                };
+                let (a, b) = scale.band(i);
+                Some((a.min(b), a.max(b)))
+            })
+            .collect(),
+    }
+}
+
+/// The predicted states, as faint rectangles behind everything else: each
+/// row's runs of one state as one rectangle.
+fn background(out: &mut String, lay: &Layout, grid: &Grid) {
+    let (l, t, r, b) = lay.area;
+    if lay.x.axis.map(|a| a.name.as_str()) != Some(grid.x.name())
+        || lay.y.axis.map(|a| a.name.as_str()) != Some(grid.y.name())
+    {
+        return;
+    }
+    let xs = grid_spans(&lay.x, &grid.x, (l, r));
+    let ys = grid_spans(&lay.y, &grid.y, (b, t));
+    out.push_str("<g class=\"oo-pred\" aria-hidden=\"true\">");
+    for (row, cells) in grid.cells.iter().enumerate() {
+        let Some(Some((y0, y1))) = ys.get(row) else {
+            continue;
+        };
+        let mut c = 0;
+        while c < cells.len() {
+            let (Some(cell), Some(Some((x0, _)))) = (cells[c], xs.get(c)) else {
+                c += 1;
+                continue;
+            };
+            let mut end = c;
+            while end + 1 < cells.len()
+                && cells[end + 1].is_some_and(|n| n.state == cell.state)
+                && xs.get(end + 1).is_some_and(|s| s.is_some())
+            {
+                end += 1;
+            }
+            let x1 = xs[end].map(|s| s.1).unwrap_or(*x0);
+            let _ = write!(
+                out,
+                "<rect class=\"oo-pred-{}\" x=\"{x0:.1}\" y=\"{y0:.1}\" width=\"{:.1}\" height=\"{:.1}\"/>",
+                cell.state.as_str(),
+                (x1 - x0).max(0.0) + 0.4,
+                (y1 - y0).max(0.0) + 0.4
+            );
+            c = end + 1;
+        }
+    }
+    out.push_str("</g>");
+}
+
 fn y_label_width_numeric(a: &CaseAxis, g: &Geometry) -> f64 {
     let (lo, hi) = a.domain();
     y_ticks(a, lo, hi)
@@ -1044,7 +1173,16 @@ fn y_label_width_numeric(a: &CaseAxis, g: &Geometry) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn svg(out: &mut String, plot: &Plot, lay: &Layout, class: &str, tips: &Tips, opts: &Options) {
+#[allow(clippy::too_many_arguments)]
+fn svg(
+    out: &mut String,
+    plot: &Plot,
+    lay: &Layout,
+    class: &str,
+    tips: &Tips,
+    grid: Option<&Grid>,
+    opts: &Options,
+) {
     let g = &lay.g;
     let labels = &opts.labels;
     let (l, t, r, b) = lay.area;
@@ -1066,6 +1204,9 @@ fn svg(out: &mut String, plot: &Plot, lay: &Layout, class: &str, tips: &Tips, op
         r - l,
         b - t
     );
+    if let Some(grid) = grid {
+        background(out, lay, grid);
+    }
     axis_svg(out, lay, true, labels);
     axis_svg(out, lay, false, labels);
     // Leader lines from a moved mark to its value.
@@ -1108,19 +1249,20 @@ fn svg(out: &mut String, plot: &Plot, lay: &Layout, class: &str, tips: &Tips, op
         if c.for_instability() {
             let _ = write!(text, " ({})", labels.instability);
         }
+        let rings = opts.instability_rings && c.for_instability();
         let tip = tips.index.get(&c.key).copied().unwrap_or(0);
         let _ = write!(
             out,
             "<g class=\"oo-case oo-{}{}\" transform=\"translate({:.1} {:.1})\" tabindex=\"0\" role=\"img\" \
              aria-label=\"{}\" data-oo-tip-i=\"{tip}\"><circle class=\"oo-hit\" r=\"{:.1}\"/>",
             v.as_str(),
-            if c.for_instability() { " oo-instab" } else { "" },
+            if rings { " oo-instab" } else { "" },
             m.at.0,
             m.at.1,
             escape(&text),
             g.r + 5.0
         );
-        mark_shape(out, v, g.r, c.for_instability());
+        mark_shape(out, v, g.r, rings);
         out.push_str("</g>");
     }
     for tag in &lay.tags {
@@ -1272,9 +1414,10 @@ fn table_inner(out: &mut String, plot: &Plot, opts: &Options) {
     }
     let _ = write!(
         out,
-        "<th scope=\"col\">{}</th><th scope=\"col\">{}</th></tr></thead><tbody>",
+        "<th scope=\"col\">{}</th><th scope=\"col\">{}</th><th scope=\"col\">{}</th></tr></thead><tbody>",
         escape(&labels.runs),
-        escape(&labels.outcomes)
+        escape(&labels.outcomes),
+        escape(&labels.chosen_for)
     );
     for c in repeated {
         let v = c.verdict();
@@ -1317,7 +1460,17 @@ fn table_inner(out: &mut String, plot: &Plot, opts: &Options) {
                 escape(letter)
             );
         }
-        out.push_str("</span></td></tr>");
+        let chosen: Vec<String> = c
+            .chosen_for()
+            .iter()
+            .filter(|c| !c.is_empty())
+            .map(|c| chosen_label(c, labels))
+            .collect();
+        let _ = write!(
+            out,
+            "</span></td><td>{}</td></tr>",
+            escape(&chosen.join(", "))
+        );
     }
     out.push_str("</tbody></table></div></div>");
 }
@@ -1329,6 +1482,7 @@ fn panel(
     free: &[String],
     ui: &AxesUi,
     tips: &Tips,
+    predictor: Option<&dyn Predictor>,
     opts: &Options,
     panel_id: &str,
     hidden: bool,
@@ -1400,8 +1554,14 @@ fn panel(
         out.push_str("</section>");
         return;
     };
-    let wide = layout(plot, WIDE);
-    let compact = layout(plot, COMPACT);
+    let rings = opts.instability_rings;
+    let wide = layout(plot, WIDE, rings);
+    let compact = layout(plot, COMPACT, rings);
+    let grid = predictor.map(|p| p.grid(plot));
+    let shown = match &grid {
+        Some(Ok(g)) => Some(g),
+        _ => None,
+    };
     // The legend: each mark, with its count.
     out.push_str("<div class=\"oo-legend oo-case-legend\">");
     for v in [Verdict::Pass, Verdict::Fail, Verdict::Flaky] {
@@ -1414,7 +1574,7 @@ fn panel(
         );
     }
     let instab = plot.cases.iter().filter(|c| c.for_instability()).count();
-    if instab > 0 {
+    if rings && instab > 0 {
         let _ = write!(
             out,
             "<span class=\"oo-chip\">{}{}<b>{instab}</b></span>",
@@ -1429,6 +1589,22 @@ fn panel(
             escape(&labels.ratio)
         );
     }
+    if let Some(g) = shown {
+        for (state, text) in [
+            (Verdict::Pass, &labels.predicted_pass),
+            (Verdict::Fail, &labels.predicted_fail),
+            (Verdict::Flaky, &labels.predicted_flaky),
+        ] {
+            if g.cells.iter().flatten().flatten().any(|c| c.state == state) {
+                let _ = write!(
+                    out,
+                    "<span class=\"oo-chip\"><i class=\"oo-pred-key oo-pred-{}\"></i>{}</span>",
+                    state.as_str(),
+                    escape(text)
+                );
+            }
+        }
+    }
     if wide.marks.iter().chain(&compact.marks).any(Mark::moved) {
         let _ = write!(
             out,
@@ -1440,9 +1616,42 @@ fn panel(
     out.push_str("</div>");
     pickers(out, plot, free, ui, opts);
     out.push_str("<div class=\"oo-plot\">");
-    svg(out, plot, &wide, "oo-plot-wide", tips, opts);
-    svg(out, plot, &compact, "oo-plot-compact", tips, opts);
+    svg(out, plot, &wide, "oo-plot-wide", tips, shown, opts);
+    svg(out, plot, &compact, "oo-plot-compact", tips, shown, opts);
     out.push_str("</div>");
+    match &grid {
+        Some(Ok(g)) => {
+            let pct0 = |x: f64| format!("{}%", short_number(x * 100.0));
+            let _ = write!(
+                out,
+                "<p class=\"oo-note oo-pred-note\">{}",
+                escape(
+                    &labels
+                        .predicted_caption
+                        .replace("{runs}", &g.runs.to_string())
+                        .replace("{confidence}", &pct0(g.flaky_confidence))
+                        .replace("{threshold}", &pct0(g.flip_threshold))
+                )
+            );
+            if !g.held.is_empty() {
+                let held: Vec<String> = g.held.iter().map(|(a, v)| format!("{a} = {v}")).collect();
+                let _ = write!(
+                    out,
+                    " {}",
+                    escape(&labels.held.replace("{held}", &held.join(", ")))
+                );
+            }
+            out.push_str("</p>");
+        }
+        Some(Err(reason)) if !reason.is_empty() => {
+            let _ = write!(
+                out,
+                "<p class=\"oo-note oo-pred-note\">{}</p>",
+                escape(&labels.no_prediction.replace("{reason}", reason))
+            );
+        }
+        _ => {}
+    }
     if opts.table {
         table_inner(out, plot, opts);
     }
@@ -1483,9 +1692,20 @@ fn open_root(out: &mut String, opts: &Options, mode: &str) {
 /// follow [`Options::link`] if given); the host renders the plot asked for.
 /// Followed by the table of repeated cases unless [`Options::table`] is off.
 pub fn fragment(set: &CaseSet, plot: &Plot, opts: &Options) -> String {
+    fragment_with(set, plot, opts, None)
+}
+
+/// [`fragment`], with the background `predictor` gives (see
+/// [`crate::prediction`]), and its pass probability in each case's card.
+pub fn fragment_with(
+    set: &CaseSet,
+    plot: &Plot,
+    opts: &Options,
+    predictor: Option<&dyn Predictor>,
+) -> String {
     let mut out = String::new();
     open_root(&mut out, opts, "host");
-    let tips = Tips::new(set, &plot.query, &opts.labels);
+    let tips = Tips::new(set, &plot.query, &opts.labels, predictor);
     let id = format!("{}-p0", opts.root_id());
     panel(
         &mut out,
@@ -1493,6 +1713,7 @@ pub fn fragment(set: &CaseSet, plot: &Plot, opts: &Options) -> String {
         &plot.attributes,
         &AxesUi::Host,
         &tips,
+        predictor,
         opts,
         &id,
         false,
@@ -1528,11 +1749,21 @@ const PAIR_SEP: char = '\u{1f}';
 /// every other pair of attributes (at most [`MAX_AXIS_PAIRS`]): nothing to
 /// serve.
 pub fn explorer(set: &CaseSet, query: &CaseQuery, opts: &Options) -> String {
+    explorer_with(set, query, opts, None)
+}
+
+/// [`explorer`], each pair with the background `predictor` gives.
+pub fn explorer_with(
+    set: &CaseSet,
+    query: &CaseQuery,
+    opts: &Options,
+    predictor: Option<&dyn Predictor>,
+) -> String {
     let mut out = String::new();
     open_root(&mut out, opts, "explorer");
     let root = opts.root_id().to_string();
     let first = set.plot(query);
-    let tips = Tips::new(set, query, &opts.labels);
+    let tips = Tips::new(set, query, &opts.labels, predictor);
     let mut free = first.attributes.clone();
     while free.len() > 2 && free.len() * (free.len() - 1) > MAX_AXIS_PAIRS {
         free.pop();
@@ -1575,6 +1806,7 @@ pub fn explorer(set: &CaseSet, query: &CaseQuery, opts: &Options) -> String {
             &free,
             &AxesUi::Explorer(&map),
             &tips,
+            predictor,
             opts,
             &map[i].1,
             i > 0,
