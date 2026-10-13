@@ -59,11 +59,15 @@ impl GridAxis {
 /// What is predicted in one cell.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Predicted {
+    /// What the background's colour shows.
     pub pass_probability: f64,
-    pub flip_probability: f64,
-    pub instability_confidence: f64,
-    /// Flaky, passes or fails, by the predictor's rule.
-    pub state: Verdict,
+    /// The flip probability, instability confidence and the state they
+    /// make (flaky, passes or fails, by the predictor's rule): `None` from a
+    /// predictor asked for the pass probability only, which is much cheaper
+    /// (a grid is thousands of points).
+    pub flip_probability: Option<f64>,
+    pub instability_confidence: Option<f64>,
+    pub state: Option<Verdict>,
 }
 
 /// The prediction over a plot's two axes.
@@ -95,7 +99,7 @@ impl Grid {
                 "pass_probability": c.pass_probability,
                 "flip_probability": c.flip_probability,
                 "instability_confidence": c.instability_confidence,
-                "state": c.state.as_str(),
+                "state": c.state.map(|s| s.as_str()),
             }))).collect::<Vec<_>>()).collect::<Vec<_>>(),
             "held": self.held.iter().map(|(a, v)| json!({"attribute": a, "value": v})).collect::<Vec<_>>(),
             "runs": self.runs,

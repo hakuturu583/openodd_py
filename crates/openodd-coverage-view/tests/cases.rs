@@ -286,9 +286,9 @@ fn labels_translate() {
 fn cell(p: f64, state: Verdict) -> Option<Predicted> {
     Some(Predicted {
         pass_probability: p,
-        flip_probability: 0.1,
-        instability_confidence: 0.2,
-        state,
+        flip_probability: Some(0.1),
+        instability_confidence: Some(0.2),
+        state: Some(state),
     })
 }
 

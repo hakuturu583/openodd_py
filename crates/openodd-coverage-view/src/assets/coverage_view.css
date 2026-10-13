@@ -117,7 +117,12 @@
 .oo-cov .oo-grid th.oo-row.oo-hl { background: color-mix(in oklab, var(--oo-accent) 10%, var(--oo-surface)); }
 
 /* The grid */
-.oo-cov .oo-scroll { overflow: auto; margin-top: 18px; max-width: 100%; }
+/* The grid scrolls in its own box; inline-size containment keeps its width
+   out of the card's minimum, so a host's grid or flex column does not grow
+   to fit it (the case plot's table does the same). */
+.oo-cov { min-width: 0; max-width: 100%; }
+.oo-cov .oo-scroll { overflow-x: auto; overflow-y: hidden; margin-top: 18px; max-width: 100%; container-type: inline-size;
+  padding: 4px 0; }
 .oo-cov table.oo-grid { border-collapse: separate; border-spacing: 4px; margin: -4px; }
 .oo-cov .oo-grid th { font-weight: 500; white-space: nowrap; color: var(--oo-ink-2); }
 .oo-cov .oo-col { padding: 0 2px 4px; text-align: center; font: 500 11.5px var(--oo-mono); min-width: 84px; vertical-align: bottom; }
