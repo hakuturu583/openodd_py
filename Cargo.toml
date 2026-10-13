@@ -44,5 +44,14 @@ friedrich = { version = "0.6", default-features = false }
 nalgebra = "0.34"
 pyo3 = { version = "0.25", features = ["abi3-py310", "extension-module", "indexmap"], optional = true }
 
+# rand (0.8) and friedrich's rand 0.10 both depend on getrandom, which on
+# wasm32-unknown-unknown needs its browser backend chosen, or the core does not
+# build there on its own (`cargo build -p openodd --no-default-features --target
+# wasm32-unknown-unknown`). Every draw the model makes is seeded, so it is never
+# called for entropy.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
 [dev-dependencies]
 tempfile = "3"
