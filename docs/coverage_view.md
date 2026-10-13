@@ -46,6 +46,11 @@ A host-driven fragment only knows its conditions, not the levels they came in,
 so there each condition is a crumb of its own (*Whole ODD › rain = heavy ›
 speed = [30, 60)*); the row's condition comes before the column's.
 
+**Choosing the axes.** Above the grid, *Rows* and *Columns* pick the two
+attributes (Rows can be *None* for a single row), and ⇅ swaps them. They
+offer the attributes not already clicked into. When left alone, a level lays
+out the first two of those in the ODD's order.
+
 The header's run count is every run inside the conditions, whichever axes are
 laid out. With `min_seconds`, a run counts there when its stay in the whole
 region reaches it, so a run that stayed briefly in several cells can count in
@@ -95,6 +100,21 @@ document.addEventListener("openodd:drill", (event) => {
 });
 ```
 
+The axis pickers work the same way. A change dispatches a cancelable
+`openodd:axes` event with `detail.conditions`, `detail.x` and `detail.y`
+(`y` is `""` for a single row). Unless it is cancelled, the page goes to the
+link with `x=...&y=...` added to the level's conditions. The host passes them
+back as `view.html(x=..., y=...)`; an empty `y` means one row, and a missing
+one means the default. Without a link and without a handler, the pickers do
+nothing.
+
+```js
+document.addEventListener("openodd:axes", (event) => {
+  event.preventDefault();
+  load(event.detail.conditions, event.detail.x, event.detail.y);
+});
+```
+
 `view.matrix(...)` returns the same matrix as a dict, for a host that draws
 it itself. It holds the axes and their labels, each cell's `state`,
 `tentative`, `runs`, `failed`, `fail_at_cell`, `fail_rate`, `ci_low` and
@@ -107,7 +127,10 @@ open("coverage.html", "w").write(view.page("ODD coverage", depth=2))
 ```
 
 `explorer_html(depth=...)` renders the matrix and, `depth` levels down, the
-matrix inside every visited cell, as hidden panels that a click shows. It
+matrix inside every visited cell, as hidden panels that a click shows. Its first
+level is rendered for every pair of rows and columns the pickers offer (up to
+100 pairs, `html::MAX_AXIS_PAIRS`), so they switch without a server; the
+levels below lay out their default axes. It
 renders at most 400 panels (`html::MAX_PANELS`); past that, a cell has nothing
 to open, and its panel says so. With many attributes and buckets, ask for
 fewer levels, or start from a cell (`conditions`). Nothing

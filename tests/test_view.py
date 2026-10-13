@@ -131,3 +131,13 @@ def test_files_without_cells_or_outcomes_still_render() -> None:
 
 def test_it_is_exported() -> None:
     assert openodd.CoverageView is CoverageView and openodd.view.styles()
+
+
+def test_the_axis_pickers() -> None:
+    view = CoverageView(_campaign())
+    html = view.html(link="/c?{conditions}", x="light", y="")
+    assert 'data-oo-axis="x" data-oo-current="light"' in html
+    assert 'data-oo-axis="y" data-oo-current=""' in html
+    assert view.matrix(x="light", y="")["y"] is None
+    page = view.explorer_html(depth=0)
+    assert page.count("data-oo-map=") == 9  # 3 columns x (none + 2 rows)

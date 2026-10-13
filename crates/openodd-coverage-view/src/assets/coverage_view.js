@@ -35,6 +35,64 @@
     if (!el.dispatchEvent(drill)) event.preventDefault();
   });
 
+  // Axis pickers.
+  var SEP = "\u001f";
+  function picks(bar) {
+    return {
+      x: bar.querySelector('select[data-oo-axis="x"]'),
+      y: bar.querySelector('select[data-oo-axis="y"]'),
+    };
+  }
+  function reset(bar) {
+    var s = picks(bar);
+    s.x.value = s.x.getAttribute("data-oo-current");
+    s.y.value = s.y.getAttribute("data-oo-current");
+  }
+  function apply(bar) {
+    var root = bar.closest(".oo-cov");
+    var s = picks(bar), x = s.x.value, y = s.y.value;
+    var map = bar.getAttribute("data-oo-map");
+    if (map) {
+      var id = JSON.parse(map)[x + SEP + y];
+      reset(bar); // this panel keeps showing its own pair
+      if (id) show(root, id);
+      return;
+    }
+    var conditions = JSON.parse(bar.getAttribute("data-oo-conditions"));
+    var axes = new CustomEvent("openodd:axes", {
+      bubbles: true, cancelable: true,
+      detail: { conditions: conditions, x: x, y: y, root: root.id },
+    });
+    if (!bar.dispatchEvent(axes)) return;
+    var link = bar.getAttribute("data-oo-link");
+    if (link) {
+      var q = [bar.getAttribute("data-oo-at"), "x=" + encodeURIComponent(x), "y=" + encodeURIComponent(y)];
+      window.location.href = link.replace("{conditions}", q.filter(Boolean).join("&"));
+    }
+  }
+  document.addEventListener("change", function (event) {
+    var sel = event.target;
+    if (!sel.matches || !sel.matches(".oo-axes select")) return;
+    var bar = sel.closest(".oo-axes"), s = picks(bar);
+    var was = { x: s.x.getAttribute("data-oo-current"), y: s.y.getAttribute("data-oo-current") };
+    // Picking the other axis's attribute swaps them.
+    if (s.x.value === s.y.value) {
+      if (sel === s.x) s.y.value = was.x;
+      else s.x.value = was.y || was.x;
+    }
+    apply(bar);
+  });
+  document.addEventListener("click", function (event) {
+    var btn = event.target.closest && event.target.closest(".oo-axes [data-oo-swap]");
+    if (!btn) return;
+    var bar = btn.closest(".oo-axes"), s = picks(bar);
+    if (!s.y.value) return;
+    var x = s.x.value;
+    s.x.value = s.y.value;
+    s.y.value = x;
+    apply(bar);
+  });
+
   // Tooltip cards, from each cell's data-oo-tip.
   var tip = null, current = null;
   function el(tag, cls, text) {

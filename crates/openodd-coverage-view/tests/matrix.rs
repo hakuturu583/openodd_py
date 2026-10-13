@@ -249,21 +249,21 @@ fn the_fragment_is_host_driven() {
 fn the_explorer_renders_the_levels_below() {
     let data = Dataset::from_documents(&docs());
     let html = html::explorer(&data, &Query::default(), 2, &Options::default());
-    // The top panel and one per visited cell (3). Inside those only `light`
-    // is left, so there is no level below them.
-    let panels = html.matches("<section class=\"oo-panel\"").count();
-    assert_eq!(panels, 4);
-    assert_eq!(
-        html.matches("<section class=\"oo-panel\" id=\"oo-cov-p0\" tabindex=\"-1\">")
-            .count(),
-        1
-    );
+    // The first level for each axis pair the pickers offer: 3 columns x
+    // (no rows + 2 others) = 9; below the asked pair's 3 visited cells only
+    // `light` is left, so one level each.
+    let shown = html
+        .matches("<section class=\"oo-panel\" id=\"oo-cov-p0\" tabindex=\"-1\">")
+        .count();
+    assert_eq!(shown, 1);
+    assert_eq!(html.matches("data-oo-map=").count(), 9);
     assert!(html.contains("data-oo-open=\"oo-cov-p1\""));
     assert!(html.contains(" hidden>"));
     // A level below links back to the whole ODD.
     assert!(html.contains("class=\"oo-crumb\" data-oo-open=\"oo-cov-p0\""));
     let depth0 = html::explorer(&data, &Query::default(), 0, &Options::default());
-    assert_eq!(depth0.matches("<section class=\"oo-panel\"").count(), 1);
+    assert_eq!(depth0.matches("<section class=\"oo-panel\"").count(), 9);
+    assert_eq!(depth0.matches(" hidden>").count(), 8);
 }
 
 #[test]
@@ -443,4 +443,27 @@ fn the_explorer_says_when_it_stops_early() {
         html::MAX_PANELS
     );
     assert!(html.contains("were not rendered ahead of time"));
+}
+
+#[test]
+fn the_pickers_offer_the_free_attributes() {
+    let data = Dataset::from_documents(&docs());
+    let m = data.matrix(&Query::default());
+    let opts = Options {
+        link: Some("/c?{conditions}".into()),
+        ..Options::default()
+    };
+    let html = html::fragment(&data, &m, &opts);
+    assert!(html.contains("<select data-oo-axis=\"y\" data-oo-current=\"rain\">"));
+    assert!(html.contains("<select data-oo-axis=\"x\" data-oo-current=\"speed\">"));
+    assert!(html.contains("<option value=\"light\">light</option>"));
+    assert!(html.contains("data-oo-link=\"/c?{conditions}\""));
+    // Inside a cell, only the attributes left.
+    let inner = data.matrix(&Query {
+        conditions: vec![("speed".into(), "[30, 60]".into())],
+        ..Query::default()
+    });
+    let html = html::fragment(&data, &inner, &opts);
+    assert!(!html.contains("<option value=\"speed\""));
+    assert!(html.contains("data-oo-at=\"at=speed%3D%5B30%2C%2060%5D\""));
 }

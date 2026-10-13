@@ -64,6 +64,10 @@ pub struct Labels {
     pub of_cells: String,
     pub truncated: String,
     pub levels: String,
+    pub rows: String,
+    pub columns: String,
+    pub no_rows: String,
+    pub swap: String,
 }
 
 impl Labels {
@@ -104,6 +108,10 @@ impl Labels {
             "of_cells" => &mut self.of_cells,
             "truncated" => &mut self.truncated,
             "levels" => &mut self.levels,
+            "rows" => &mut self.rows,
+            "columns" => &mut self.columns,
+            "no_rows" => &mut self.no_rows,
+            "swap" => &mut self.swap,
             _ => return false,
         };
         *slot = value.to_string();
@@ -154,6 +162,10 @@ impl Default for Labels {
                  render fewer levels below, or start from a cell.",
             ),
             levels: s("Drill-down levels"),
+            rows: s("Rows"),
+            columns: s("Columns"),
+            no_rows: s("None (one row)"),
+            swap: s("Swap rows and columns"),
         }
     }
 }
@@ -401,6 +413,96 @@ fn cell_html(out: &mut String, c: &Cell, place: &str, target: Target, opts: &Opt
     let _ = write!(out, "</{tag}>");
 }
 
+/// How a panel's axis pickers act.
+enum AxesUi<'a> {
+    /// No pickers (the explorer's levels below the first).
+    None,
+    /// Host-driven: dispatch `openodd:axes` (and follow the link, if any).
+    Host,
+    /// Self-contained: show the panel of the pair picked, `x\u{1f}y` -> id.
+    Explorer(&'a [(String, String)]),
+}
+
+/// The separator of a pair in the explorer's map of axis pairs.
+const PAIR_SEP: char = '\u{1f}';
+
+/// The rows and columns pickers, and the swap button between them.
+fn axes_html(out: &mut String, m: &Matrix, free: &[String], ui: &AxesUi, opts: &Options) {
+    let Some(x) = &m.x else { return };
+    if matches!(ui, AxesUi::None) || free.is_empty() {
+        return;
+    }
+    let labels = &opts.labels;
+    let y = m.y.as_ref().map(|a| a.name.as_str()).unwrap_or("");
+    let _ = write!(
+        out,
+        "<div class=\"oo-axes\" data-oo-conditions=\"{}\"",
+        escape(&conditions_json(&m.query.conditions))
+    );
+    match ui {
+        AxesUi::Host => {
+            if let Some(link) = &opts.link {
+                let _ = write!(
+                    out,
+                    " data-oo-link=\"{}\" data-oo-at=\"{}\"",
+                    escape(link),
+                    escape(&conditions_query(&m.query.conditions))
+                );
+            }
+        }
+        AxesUi::Explorer(map) => {
+            let map: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::from(v.as_str())))
+                .collect();
+            let _ = write!(
+                out,
+                " data-oo-map=\"{}\"",
+                escape(&serde_json::Value::Object(map).to_string())
+            );
+        }
+        AxesUi::None => {}
+    }
+    out.push('>');
+    let select = |out: &mut String, axis: &str, title: &str, current: &str, none: Option<&str>| {
+        let _ = write!(
+            out,
+            "<label class=\"oo-pick\"><span>{}</span><select data-oo-axis=\"{axis}\" data-oo-current=\"{}\">",
+            escape(title),
+            escape(current)
+        );
+        if let Some(none) = none {
+            let _ = write!(
+                out,
+                "<option value=\"\"{}>{}</option>",
+                if current.is_empty() { " selected" } else { "" },
+                escape(none)
+            );
+        }
+        for a in free {
+            let _ = write!(
+                out,
+                "<option value=\"{}\"{}>{}</option>",
+                escape(a),
+                if a == current { " selected" } else { "" },
+                escape(a)
+            );
+        }
+        out.push_str("</select></label>");
+    };
+    select(out, "y", &labels.rows, y, Some(&labels.no_rows));
+    let _ = write!(
+        out,
+        "<button type=\"button\" class=\"oo-swap\" data-oo-swap title=\"{0}\" aria-label=\"{0}\"{1}>\
+         <svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" aria-hidden=\"true\"><path d=\"M5 2v10M5 12l-2.5-2.5M5 12l2.5-2.5M11 14V4M11 4L8.5 6.5M11 4l2.5 2.5\" \
+         fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg></button>",
+        escape(&labels.swap),
+        if y.is_empty() { " disabled" } else { "" }
+    );
+    select(out, "x", &labels.columns, &x.name, None);
+    out.push_str("</div>");
+}
+
 /// How each cell of `m` can be clicked into.
 type Targets<'a> = dyn Fn(usize, usize) -> Option<String> + 'a;
 /// Whether there is anything left to lay out inside these conditions.
@@ -412,6 +514,7 @@ type HasDepth<'a> = dyn Fn(&[(String, String)]) -> bool + 'a;
 /// conditions it was inside.
 #[allow(clippy::too_many_arguments)]
 fn panel(
+    axes: (&AxesUi, &[String]),
     truncated: bool,
     out: &mut String,
     m: &Matrix,
@@ -590,6 +693,7 @@ fn panel(
         escape(&labels.failed_here)
     );
 
+    axes_html(out, m, axes.1, axes.0, opts);
     let Some(x) = &m.x else {
         let _ = write!(
             out,
@@ -705,7 +809,19 @@ pub fn fragment(data: &Dataset, m: &Matrix, opts: &Options) -> String {
     open_root(&mut out, opts, "host");
     let has_depth = |conds: &[(String, String)]| !data.free_attributes(&m.query, conds).is_empty();
     let id = format!("{}-p0", opts.root_id());
-    panel(false, &mut out, m, opts, &id, false, None, None, &has_depth);
+    let free = data.free_attributes(&m.query, &m.query.conditions);
+    panel(
+        (&AxesUi::Host, &free),
+        false,
+        &mut out,
+        m,
+        opts,
+        &id,
+        false,
+        None,
+        None,
+        &has_depth,
+    );
     out.push_str("</div>");
     out
 }
@@ -714,22 +830,59 @@ pub fn fragment(data: &Dataset, m: &Matrix, opts: &Options) -> String {
 /// cell's level is not rendered, and its panel says so.
 pub const MAX_PANELS: usize = 400;
 
+/// The most axis pairs the explorer renders a first level for: past it,
+/// the pickers offer only the first attributes.
+pub const MAX_AXIS_PAIRS: usize = 100;
+
 /// The matrix `query` asks for and, `depth` levels down, the matrix inside
 /// each of its visited cells, as hidden panels a click shows. Nothing to
-/// serve: the whole thing is one string. The levels below lay out the first
-/// two attributes not yet clicked into; at most [`MAX_PANELS`] panels.
+/// serve: the whole thing is one string. The first level is rendered for
+/// every pair of rows and columns its pickers offer (at most
+/// [`MAX_AXIS_PAIRS`]); the levels below lay out the first two attributes
+/// not yet clicked into. At most [`MAX_PANELS`] panels in all.
 pub fn explorer(data: &Dataset, query: &Query, depth: usize, opts: &Options) -> String {
     let mut out = String::new();
     open_root(&mut out, opts, "explorer");
-    let mut count = 0usize;
     let root = opts.root_id().to_string();
     let has_depth = |conds: &[(String, String)]| !data.free_attributes(query, conds).is_empty();
+    let first = data.matrix(query);
+    // The first level's axis pairs: the one asked for, then every other.
+    let mut free = data.free_attributes(query, &first.query.conditions);
+    while free.len() > 1 && free.len() * free.len() > MAX_AXIS_PAIRS {
+        free.pop();
+    }
+    let name =
+        |a: &Option<crate::data::Axis>| a.as_ref().map(|a| a.name.clone()).unwrap_or_default();
+    let asked = (name(&first.x), name(&first.y));
+    let mut pairs: Vec<(String, String)> = vec![asked.clone()];
+    for x in &free {
+        for y in std::iter::once(&String::new()).chain(free.iter()) {
+            let pair = (x.clone(), y.clone());
+            if x != y && pair != asked {
+                pairs.push(pair);
+            }
+        }
+    }
+    let mut count = 0usize;
     // Breadth-first: (query, its panel id, the levels above, levels left).
     #[allow(clippy::type_complexity)]
     let mut queue: std::collections::VecDeque<(Query, String, Vec<(String, usize)>, usize)> =
         std::collections::VecDeque::new();
-    queue.push_back((query.clone(), format!("{root}-p0"), Vec::new(), depth));
-    count += 1;
+    let mut map: Vec<(String, String)> = Vec::new();
+    for (x, y) in &pairs {
+        if count >= MAX_PANELS {
+            break;
+        }
+        let id = format!("{root}-p{count}");
+        count += 1;
+        let mut q = query.clone();
+        q.conditions = first.query.conditions.clone();
+        q.x = (!x.is_empty()).then(|| x.clone());
+        q.y = Some(y.clone());
+        map.push((format!("{x}{PAIR_SEP}{y}"), id.clone()));
+        queue.push_back((q, id, Vec::new(), depth));
+    }
+    let top = format!("{root}-p0");
     while let Some((q, id, crumbs, left)) = queue.pop_front() {
         let m = data.matrix(&q);
         let mut children: Vec<((usize, usize), String)> = Vec::new();
@@ -764,13 +917,19 @@ pub fn explorer(data: &Dataset, query: &Query, depth: usize, opts: &Options) -> 
                 .find(|(rc, _)| *rc == (r, c))
                 .map(|(_, id)| id.clone())
         };
+        let ui = if crumbs.is_empty() {
+            AxesUi::Explorer(&map)
+        } else {
+            AxesUi::None
+        };
         panel(
+            (&ui, &free),
             truncated,
             &mut out,
             &m,
             opts,
             &id,
-            !crumbs.is_empty(),
+            id != top,
             Some(&open),
             Some(&crumbs),
             &has_depth,
