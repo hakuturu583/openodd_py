@@ -18,7 +18,9 @@
 //!   the median of a numeric one, the most common label of a categorical one
 //!   (the first in the space's order on a tie). The background is therefore
 //!   a slice through the space, not an average over it.
-//! * **The states:** flaky where the instability confidence (the posterior
+//! * **Each cell** carries the pass probability (what the plot's colour
+//!   shows: red at 0, yellow at 0.5, green at 1), the flip probability and
+//!   the instability confidence. Its **state** (data only) is flaky where the instability confidence (the posterior
 //!   probability that a small change flips the outcome more often than
 //!   [`Config::threshold`], 0.1) is above [`FLAKY_CONFIDENCE`] (0.5, the
 //!   report's rule for a flaky run); else passes where the pass probability

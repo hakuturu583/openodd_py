@@ -34,7 +34,7 @@ them.
 | filled circle, green | every run of the case passed |
 | cross, red | every run of the case failed |
 | ring, yellow, with `n/m` | the runs did both: `n` of `m` passed |
-| faint green / red / yellow background | what the flaky model predicts there: passes / fails / flaky ([below](#the-predicted-background)) |
+| faint red → yellow → green background | the pass probability the model predicts there: low / around 50% (unstable) / high ([below](#the-predicted-background)) |
 
 Why a case was drawn (`chosen_for`) is in its card and in the table. With
 `instability_rings=True` (`--cases-rings`), a case chosen for instability also
@@ -71,25 +71,29 @@ order (`P`/`F`) and its verdict: flaky first, then failing, then passing.
 
 ## The predicted background
 
-Behind the marks, the plot is shaded by what openodd's flaky model predicts
-over the two plotted attributes. It is the learner `FlakySearch` uses and the
+Behind the marks, the plot is shaded by the **pass probability** openodd's
+flaky model predicts over the two plotted attributes. It is the learner `FlakySearch` uses and the
 merged report assesses runs with ([flaky.md](flaky.md#the-model)): a
 Gaussian-process classifier with `FlakinessModel`'s defaults and seed
 `"report"`, fitted to every run the plot shows that recorded an outcome.
 
 - **The grid:** a numeric axis is cut into 48 cells over the plot's range, each
   predicted at its middle. A categorical axis has one cell per band.
-- **The colours:**
-  - **yellow (flaky)** where `instability_confidence` is above 0.5. That is,
-    the model is more than 50% sure that a small change flips the outcome more
-    often than `threshold` (0.1). These are the report's rule for a flaky run
-    (`FLAKY_CONFIDENCE`) and `FlakySearch`'s threshold.
-  - otherwise **green (passes)** where `pass_probability` is at least 0.5, and
-    **red (fails)** where it is below.
-
-  Where runs are few the model is unsure, and an unsure point is a coin toss,
-  so it reads as flaky. A wide yellow area says "not enough evidence here" as
-  much as "unstable".
+- **The colour is `pass_probability`** on a continuous diverging scale: red
+  (`--oo-fail`) at 0, yellow (`--oo-flaky`) at 0.5, green (`--oo-pass`) at 1,
+  in 5% steps. Green means the model predicts a high pass rate, red a low
+  one, and yellow an outcome around 50%, i.e. unstable. Thin dashed lines mark
+  where it crosses 30% and 70%, so the regions can be read without judging
+  colour. The legend shows the scale with its 0 / 50 / 100% ends.
+- **Where runs are few** the model is unsure: the posterior is wide and the
+  predicted pass probability is pulled towards 50%, so the colour stays near
+  yellow there. Pale yellow means "unstable *or* not enough evidence".
+- **Flip probability and instability confidence** stay in the data (each
+  cell's `flip_probability`, `instability_confidence` and `state`) and in the
+  cards, but they do not decide the colour. `state` follows the report's rule:
+  flaky where `instability_confidence` is above 0.5, else pass or fail by
+  `pass_probability`. With few runs, that confidence is above 0.5 almost
+  everywhere, which is why it does not drive the colour.
 - **Attributes not plotted are held at the runs' typical value:** the median
   of a numeric one, the most common label of a categorical one (the first in
   the space's order on a tie). The background is therefore a slice through
@@ -103,8 +107,9 @@ Gaussian-process classifier with `FlakinessModel`'s defaults and seed
   every run passed or every run failed, or when an axis is not a parameter of
   the space. A note under the plot says which.
 
-The colours are the state colours, tinted into the plot's surface (opaque, so
-touching cells never darken), in both light and dark themes. A mark's card
+The colours are the state colours mixed along the scale and tinted into the
+plot's surface (opaque, so touching cells never darken), in both light and
+dark themes; `--oo-pred-tint` sets how strong the tint is. A mark's card
 adds the model's pass probability at that case's own values ("Pass
 probability (model, now)"), next to the prediction recorded when the case was
 drawn.
@@ -176,8 +181,12 @@ autoware_carla_scenario) take the same flags.
 words by name. The names are the fields of `case_plot::Labels` in the crate.
 Text with placeholders keeps them: `runs_of` (`{n} runs`), `of_cases`,
 `passes_of` (`{p} of {n} passed`), `failed_at` (`{t}`), `run` and `case`
-(`{n}`), `more_runs`, `predicted_caption` (`{runs}`, `{confidence}`,
-`{threshold}`), `held` (`{held}`), `no_prediction` (`{reason}`).
+(`{n}`), `more_runs`, `predicted_caption` (`{runs}`), `held` (`{held}`),
+`no_prediction` (`{reason}`). The background's legend is `predicted_scale`
+(*Predicted pass rate*), `predicted_low` / `predicted_mid` / `predicted_high`
+(*low* / *unstable* / *high*, after 0 / 50 / 100%) and `predicted_contours`
+(*30% and 70%*): in Japanese, for example, `{"predicted_scale": "予測成功率",
+"predicted_low": "低い", "predicted_mid": "不安定", "predicted_high": "高い"}`.
 
 ## In Rust
 

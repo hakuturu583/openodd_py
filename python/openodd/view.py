@@ -329,9 +329,10 @@ class CasePlot:
         common label) and ``runs``; or ``{"unavailable": why}`` when there
         are too few runs, or runs of one outcome only.
 
-        A cell is ``flaky`` where ``instability_confidence`` is above 0.5
-        (the report's rule), else ``pass`` where ``pass_probability`` is at
-        least 0.5, else ``fail``.
+        The background's colour is each cell's ``pass_probability`` (red at
+        0, yellow at 0.5, green at 1). ``state`` follows the report's rule --
+        ``flaky`` where ``instability_confidence`` is above 0.5, else
+        ``pass`` / ``fail`` by ``pass_probability`` -- and is data only.
         """
         out: dict[str, Any] = self.data(x=x, y=y, scenario=scenario, environment=environment)["prediction"]
         return out
@@ -357,8 +358,9 @@ class CasePlot:
         below; *labels* overrides the component's words by name (``title``,
         ``state_flaky``, ...). The other arguments are :meth:`data`'s.
 
-        *prediction* shades the plot by what the flaky model predicts
-        (:meth:`prediction`) when the runs allow it -- runs of both outcomes,
+        *prediction* shades the plot by the pass probability the flaky
+        model predicts (:meth:`prediction`), red low to yellow ~50% to green
+        high, when the runs allow it -- runs of both outcomes,
         at least three -- and otherwise says why there is no background.
         *instability_rings* outlines the cases chosen for instability."""
         q = self._query(x, y, scenario, environment)

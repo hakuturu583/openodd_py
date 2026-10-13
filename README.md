@@ -33,8 +33,8 @@
 - **See the drawn cases**: `CasePlot` places every case of a sampled sweep at the
   values it was drawn with -- any two attributes of its space, ODD bucket edges as
   grid lines -- as a pass dot, a fail cross or a flaky ring with `passes/runs`,
-  over a faint background of what the flaky model fitted to the runs predicts
-  there (passes / fails / flaky), with a table of the cases run more than once; embeddable like `CoverageView`, or a page (`openodd-coverage
+  over a faint background of the pass probability the flaky model fitted to the
+  runs predicts there (red low, yellow ~50% / unstable, green high), with a table of the cases run more than once; embeddable like `CoverageView`, or a page (`openodd-coverage
   --cases-html`) ([docs/case_plot.md](docs/case_plot.md)).
 - **Find flaky regions of the ODD**: the merged report counts, per ODD cell, the runs
   that drove through it, how many failed (with a 95% Wilson interval) and how many

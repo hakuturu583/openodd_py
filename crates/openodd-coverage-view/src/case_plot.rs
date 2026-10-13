@@ -75,9 +75,11 @@ pub struct Labels {
     pub robustness_radius: String,
     pub scenario: String,
     pub case: String,
-    pub predicted_pass: String,
-    pub predicted_fail: String,
-    pub predicted_flaky: String,
+    pub predicted_scale: String,
+    pub predicted_low: String,
+    pub predicted_mid: String,
+    pub predicted_high: String,
+    pub predicted_contours: String,
     pub predicted_caption: String,
     pub held: String,
     pub no_prediction: String,
@@ -131,9 +133,11 @@ impl Labels {
             "robustness_radius" => &mut self.robustness_radius,
             "scenario" => &mut self.scenario,
             "case" => &mut self.case,
-            "predicted_pass" => &mut self.predicted_pass,
-            "predicted_fail" => &mut self.predicted_fail,
-            "predicted_flaky" => &mut self.predicted_flaky,
+            "predicted_scale" => &mut self.predicted_scale,
+            "predicted_low" => &mut self.predicted_low,
+            "predicted_mid" => &mut self.predicted_mid,
+            "predicted_high" => &mut self.predicted_high,
+            "predicted_contours" => &mut self.predicted_contours,
             "predicted_caption" => &mut self.predicted_caption,
             "held" => &mut self.held,
             "no_prediction" => &mut self.no_prediction,
@@ -194,14 +198,16 @@ impl Default for Labels {
             robustness_radius: s("Robustness radius"),
             scenario: s("Scenario"),
             case: s("Case {n}"),
-            predicted_pass: s("Predicted: passes"),
-            predicted_fail: s("Predicted: fails"),
-            predicted_flaky: s("Predicted: flaky"),
+            predicted_scale: s("Predicted pass rate"),
+            predicted_low: s("low"),
+            predicted_mid: s("unstable"),
+            predicted_high: s("high"),
+            predicted_contours: s("30% and 70%"),
             predicted_caption: s(
-                "Background: what the flaky model fitted to these {runs} runs predicts. Flaky where it is \
-                 over {confidence} sure a small change flips the outcome more than {threshold} of the time; \
-                 else passes where P(pass) is at least 50%, fails where below. Where runs are few the \
-                 model is unsure, and unsure reads as flaky.",
+                "Background: the pass probability that a Gaussian-process classifier fitted to these \
+                 {runs} runs predicts at each point: green where it predicts a high pass rate, red where \
+                 low, yellow around 50% (unstable); dashed lines at 30% and 70%. Where runs are few the \
+                 model is unsure, so the colour stays near yellow there.",
             ),
             held: s("Attributes not plotted are held at the cases' typical values: {held}."),
             no_prediction: s("No predicted background: {reason}."),
@@ -1122,8 +1128,20 @@ fn grid_spans(scale: &Scale, axis: &GridAxis, frame: (f64, f64)) -> Vec<Option<(
     }
 }
 
-/// The predicted states, as faint rectangles behind everything else: each
-/// row's runs of one state as one rectangle.
+/// Steps of the background's colour scale: a cell's pass probability to the
+/// nearest 5% (`oo-pp-0` .. `oo-pp-20` in the CSS).
+const LEVELS: f64 = 20.0;
+
+/// Where the dashed lines go: these pass probabilities.
+pub const CONTOURS: [f64; 2] = [0.3, 0.7];
+
+fn level(p: f64) -> usize {
+    (p.clamp(0.0, 1.0) * LEVELS).round() as usize
+}
+
+/// The predicted pass probability, as faint rectangles behind everything
+/// else (each row's runs of one colour step as one rectangle), and dashed
+/// lines where it crosses [`CONTOURS`].
 fn background(out: &mut String, lay: &Layout, grid: &Grid) {
     let (l, t, r, b) = lay.area;
     if lay.x.axis.map(|a| a.name.as_str()) != Some(grid.x.name())
@@ -1146,7 +1164,8 @@ fn background(out: &mut String, lay: &Layout, grid: &Grid) {
             };
             let mut end = c;
             while end + 1 < cells.len()
-                && cells[end + 1].is_some_and(|n| n.state == cell.state)
+                && cells[end + 1]
+                    .is_some_and(|n| level(n.pass_probability) == level(cell.pass_probability))
                 && xs.get(end + 1).is_some_and(|s| s.is_some())
             {
                 end += 1;
@@ -1154,12 +1173,50 @@ fn background(out: &mut String, lay: &Layout, grid: &Grid) {
             let x1 = xs[end].map(|s| s.1).unwrap_or(*x0);
             let _ = write!(
                 out,
-                "<rect class=\"oo-pred-{}\" x=\"{x0:.1}\" y=\"{y0:.1}\" width=\"{:.1}\" height=\"{:.1}\"/>",
-                cell.state.as_str(),
+                "<rect class=\"oo-pp-{}\" x=\"{x0:.1}\" y=\"{y0:.1}\" width=\"{:.1}\" height=\"{:.1}\"/>",
+                level(cell.pass_probability),
                 (x1 - x0).max(0.0) + 0.4,
                 (y1 - y0).max(0.0) + 0.4
             );
             c = end + 1;
+        }
+    }
+    // The contours: a segment on every cell edge the probability crosses.
+    let p = |r: usize, c: usize| -> Option<f64> {
+        grid.cells.get(r)?.get(c)?.map(|x| x.pass_probability)
+    };
+    let span = |v: &[Option<(f64, f64)>], i: usize| v.get(i).copied().flatten();
+    for t in CONTOURS {
+        let crosses = |a: f64, b: f64| (a < t) != (b < t);
+        let mut d = String::new();
+        for (r, row) in grid.cells.iter().enumerate() {
+            let Some((y0, y1)) = span(&ys, r) else {
+                continue;
+            };
+            for c in 0..row.len() {
+                let (Some(a), Some((x0, x1))) = (p(r, c), span(&xs, c)) else {
+                    continue;
+                };
+                if let (Some(b), Some(_)) = (p(r, c + 1), span(&xs, c + 1)) {
+                    if crosses(a, b) {
+                        let _ = write!(d, "M{x1:.1} {y0:.1}V{y1:.1}");
+                    }
+                }
+                if let (Some(b), Some((u0, u1))) = (p(r + 1, c), span(&ys, r + 1)) {
+                    if crosses(a, b) {
+                        // The edge shared with the next row.
+                        let y = if (u0 - y1).abs() < (u1 - y0).abs() {
+                            y1
+                        } else {
+                            y0
+                        };
+                        let _ = write!(d, "M{x0:.1} {y:.1}H{x1:.1}");
+                    }
+                }
+            }
+        }
+        if !d.is_empty() {
+            let _ = write!(out, "<path class=\"oo-pred-contour\" d=\"{d}\"/>");
         }
     }
     out.push_str("</g>");
@@ -1589,21 +1646,18 @@ fn panel(
             escape(&labels.ratio)
         );
     }
-    if let Some(g) = shown {
-        for (state, text) in [
-            (Verdict::Pass, &labels.predicted_pass),
-            (Verdict::Fail, &labels.predicted_fail),
-            (Verdict::Flaky, &labels.predicted_flaky),
-        ] {
-            if g.cells.iter().flatten().flatten().any(|c| c.state == state) {
-                let _ = write!(
-                    out,
-                    "<span class=\"oo-chip\"><i class=\"oo-pred-key oo-pred-{}\"></i>{}</span>",
-                    state.as_str(),
-                    escape(text)
-                );
-            }
-        }
+    if shown.is_some() {
+        let _ = write!(
+            out,
+            "<span class=\"oo-chip oo-pred-legend\">{}<span class=\"oo-pred-scale\" aria-hidden=\"true\">\
+             <i class=\"oo-pred-bar\"></i><span class=\"oo-pred-ticks\"><span>0% {}</span><span>50% {}</span>\
+             <span>100% {}</span></span></span></span><span class=\"oo-chip\"><i class=\"oo-pred-line\"></i>{}</span>",
+            escape(&labels.predicted_scale),
+            escape(&labels.predicted_low),
+            escape(&labels.predicted_mid),
+            escape(&labels.predicted_high),
+            escape(&labels.predicted_contours)
+        );
     }
     if wide.marks.iter().chain(&compact.marks).any(Mark::moved) {
         let _ = write!(
@@ -1621,7 +1675,6 @@ fn panel(
     out.push_str("</div>");
     match &grid {
         Some(Ok(g)) => {
-            let pct0 = |x: f64| format!("{}%", short_number(x * 100.0));
             let _ = write!(
                 out,
                 "<p class=\"oo-note oo-pred-note\">{}",
@@ -1629,8 +1682,6 @@ fn panel(
                     &labels
                         .predicted_caption
                         .replace("{runs}", &g.runs.to_string())
-                        .replace("{confidence}", &pct0(g.flaky_confidence))
-                        .replace("{threshold}", &pct0(g.flip_threshold))
                 )
             );
             if !g.held.is_empty() {

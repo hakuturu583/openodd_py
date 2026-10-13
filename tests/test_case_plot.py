@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -150,7 +151,15 @@ def test_the_predicted_background() -> None:
     assert all(0 <= c["predicted_pass_probability"] <= 1 for c in data["cases"])
     assert "prediction" not in plot.data(prediction=False)
     html = plot.html(x="gap", y="rain")
-    assert '<g class="oo-pred"' in html and "Predicted: passes" in html
+    assert '<g class="oo-pred"' in html and "Predicted pass rate" in html
+    # The colour is the pass probability, to the nearest 5%: the short gaps
+    # (low p) and the long ones (high p) get different steps.
+    steps = {int(k) for k in re.findall(r'<rect class="oo-pp-(\d+)"', html)}
+    assert min(steps) < 10 < max(steps)
+    ja = plot.html(x="gap", y="rain", labels={
+        "predicted_scale": "予測成功率", "predicted_low": "低い", "predicted_mid": "不安定",
+        "predicted_high": "高い"})
+    assert "予測成功率" in ja and "50% 不安定" in ja and "100% 高い" in ja
     assert "fitted to these 23 runs" in html and "Pass probability (model, now)" in html
     assert "oo-pred" not in plot.html(x="gap", y="rain", prediction=False)
 

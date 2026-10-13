@@ -331,14 +331,23 @@ fn the_background_is_what_the_predictor_gives() {
         unavailable: None,
     };
     let html = case_plot::fragment_with(&set, &plot, &Options::default(), Some(&predictor));
-    // Drawn in both sizes, behind the marks, a row's run of one state as
-    // one rectangle: 4 cells, 4 rectangles (no two alike side by side).
+    // Drawn in both sizes, behind the marks, coloured by the pass
+    // probability to the nearest 5%: 0.1 -> step 2, 0.5 -> 10, 0.2 -> 4,
+    // 0.9 -> 18.
     assert_eq!(html.matches("<g class=\"oo-pred\"").count(), 2);
-    assert_eq!(html.matches("<rect class=\"oo-pred-").count(), 8);
-    assert!(html.find("<rect class=\"oo-pred-fail").unwrap() < html.find("role=\"img\"").unwrap());
-    for key in ["Predicted: passes", "Predicted: fails", "Predicted: flaky"] {
-        assert!(html.contains(key), "{key}");
+    for k in [2, 10, 4, 18] {
+        assert_eq!(
+            html.matches(&format!("<rect class=\"oo-pp-{k}\"")).count(),
+            2,
+            "{k}"
+        );
     }
+    assert!(html.find("<rect class=\"oo-pp-").unwrap() < html.find("role=\"img\"").unwrap());
+    // Dashed lines where it crosses 30% (between 0.2 and 0.9, 0.1 and 0.5)
+    // and 70% (between 0.5 and 0.9, 0.2 and 0.9).
+    assert_eq!(html.matches("class=\"oo-pred-contour\"").count(), 4);
+    assert!(html.contains("Predicted pass rate") && html.contains("50% unstable"));
+    assert!(!html.contains("Predicted: flaky"));
     assert!(html.contains("fitted to these 8 runs"));
     assert!(html.contains("held at the cases&#39; typical values: rain = none"));
     assert!(html.contains("[\"Pass probability (model, now)\",\"88%\"]"));
