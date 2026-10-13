@@ -1,0 +1,32 @@
+[package]
+name = "openodd-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "openodd's coverage view and case plot in the browser, through WebAssembly"
+license = "Apache-2.0"
+repository = "https://github.com/hakuturu583/openodd_py"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The core without `native` (no file locks, no tar): what builds for
+# wasm32-unknown-unknown. The flaky model and the case predictor are in it.
+openodd = { path = "../..", default-features = false }
+openodd-coverage-view = { path = "../openodd-coverage-view" }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = "2"
+wasm-bindgen = "0.2"
+
+# rand (0.8, the core's) and rand 0.10 (friedrich's) both depend on getrandom;
+# on wasm32-unknown-unknown it needs a backend chosen. Every draw the model
+# makes is seeded, so it is never called for entropy; the browser's
+# crypto.getRandomValues would serve it if it were.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

@@ -9,7 +9,7 @@ repository = "https://github.com/hakuturu583/openodd_py"
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/openodd-coverage-view"]
+members = [".", "crates/openodd-coverage-view", "crates/openodd-wasm"]
 
 [lib]
 name = "openodd"
