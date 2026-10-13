@@ -22,10 +22,15 @@
 //! search predicted when it chose it) and its outcome is kept as a
 //! [`CaseRun`]; `crate::flaky::assess` refits the flakiness of every such
 //! run over all the runs of its scenario.
+//!
+//! A run that recorded its outcome and its ODD cells also counts in
+//! [`CoverageReport::cell_flakiness`]: per cell, how many of the runs that
+//! drove through it failed (`crate::cell_flakiness`).
 
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value as Json};
 
+use crate::cell_flakiness::CellFlakiness;
 use crate::error::{Error, Result};
 
 /// The schema of the coverage files this library writes and reads.
@@ -357,6 +362,9 @@ pub struct CoverageReport {
     pub odds: IndexMap<String, OddExposure>,
     /// The runs that recorded the case they ran, in the order merged.
     pub cases: Vec<CaseRun>,
+    /// Per scenario, environment and ODD attribute list: the runs' outcomes
+    /// per ODD cell. Empty when no run recorded both cells and an outcome.
+    pub cell_flakiness: Vec<CellFlakiness>,
 }
 
 /// How flaky a case is (see `crate::flaky::Metrics`).
@@ -505,7 +513,7 @@ impl CoverageReport {
     }
 
     pub fn to_json(&self) -> Json {
-        json!({
+        let mut out = json!({
             "runs": self.runs,
             "scenarios": self.scenarios,
             "odds": self.odds.iter().map(|(k, v)| (k.clone(), v.to_json())).collect::<Map<_, _>>(),
@@ -514,7 +522,17 @@ impl CoverageReport {
                 "grade": self.group_grade(g),
                 "entries": self.entries.iter().filter(|e| &e.group == g).map(MergedEntry::to_json).collect::<Vec<_>>(),
             }))).collect::<Map<_, _>>(),
-        })
+        });
+        // Only when there is any: a report without outcomes is unchanged.
+        if !self.cell_flakiness.is_empty() {
+            out["cell_flakiness"] = Json::Array(
+                self.cell_flakiness
+                    .iter()
+                    .map(CellFlakiness::to_json)
+                    .collect(),
+            );
+        }
+        out
     }
 
     pub fn to_markdown(&self, max_holes: usize) -> String {
@@ -667,6 +685,10 @@ impl CoverageReport {
             }
         }
         lines.extend(cases_markdown(&self.cases, MAX_CASE_ROWS));
+        lines.extend(crate::cell_flakiness::markdown(
+            &self.cell_flakiness,
+            crate::cell_flakiness::MAX_CELL_ROWS,
+        ));
         lines.join("\n") + "\n"
     }
 }
@@ -1078,6 +1100,7 @@ pub fn merge_coverage(documents: &[Json]) -> Result<CoverageReport> {
             entry.ignored += raw.get("ignored").and_then(Json::as_i64).unwrap_or(0);
         }
     }
+    report.cell_flakiness = crate::cell_flakiness::cell_flakiness(documents);
     Ok(report)
 }
 

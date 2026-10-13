@@ -65,9 +65,10 @@ class OddCells:
         return list(self._core.cell_of(self._values(values)))
 
     def add(self, values: Union[Sequence[Any], Mapping[str, Any]], seconds: float = 0.0,
-            meters: float = 0.0) -> None:
-        """Count one step that took *seconds* and covered *meters*."""
-        self._core.add(self._values(values), float(seconds), float(meters))
+            meters: float = 0.0) -> list[str]:
+        """Count one step that took *seconds* and covered *meters*; the cell it
+        was counted in."""
+        return list(self._core.add(self._values(values), float(seconds), float(meters)))
 
     def to_dict(self) -> dict[str, Any]:
         """``{"attributes": [...], "rows": [[[label, ...], ticks, seconds, meters], ...]}``,

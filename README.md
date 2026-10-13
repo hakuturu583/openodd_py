@@ -25,6 +25,10 @@
   ([docs/flaky.md](docs/flaky.md)). A run's coverage file can record its case, the
   predicted flakiness and its outcome; the merged report reassesses them, and the next
   campaign's search starts from them.
+- **Find flaky regions of the ODD**: the merged report counts, per ODD cell, the runs
+  that drove through it, how many failed (with a 95% Wilson interval) and how many
+  failed *in* it, per scenario and environment (`CoverageReport.cell_flakiness`,
+  [docs/flaky.md](docs/flaky.md#flakiness-per-odd-cell)).
 
 What measures the attributes -- a simulator, a recorded log -- is the application's
 *backend*: a subclass of `openodd.Backend` naming its probes, how a run sets an
