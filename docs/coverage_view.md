@@ -40,8 +40,16 @@ outside `band`. The thresholds are the ones openodd's per-cell report uses
 The colour still says what the runs did.
 
 **Clicking a cell** keeps only the time spent in that cell and lays out the
-next two attributes inside it. In the breadcrumb, *Whole ODD › rain = heavy,
-speed = [30, 60) › ...*, each level leads back up.
+next two attributes inside it. The breadcrumb leads back up. In the explorer
+each level is one crumb (*Whole ODD › rain = heavy, speed = [30, 60) › ...*).
+A host-driven fragment only knows its conditions, not the levels they came in,
+so there each condition is a crumb of its own (*Whole ODD › rain = heavy ›
+speed = [30, 60)*); the row's condition comes before the column's.
+
+The header's run count is every run inside the conditions, whichever axes are
+laid out. With `min_seconds`, a run counts there when its stay in the whole
+region reaches it, so a run that stayed briefly in several cells can count in
+the header and in no single cell.
 
 ## Embedding
 
@@ -99,12 +107,19 @@ open("coverage.html", "w").write(view.page("ODD coverage", depth=2))
 ```
 
 `explorer_html(depth=...)` renders the matrix and, `depth` levels down, the
-matrix inside every visited cell, as hidden panels that a click shows. Nothing
+matrix inside every visited cell, as hidden panels that a click shows. It
+renders at most 400 panels (`html::MAX_PANELS`); past that, a cell has nothing
+to open, and its panel says so. With many attributes and buckets, ask for
+fewer levels, or start from a cell (`conditions`). Nothing
 needs serving. The command line does the same:
 
 ```bash
 openodd-coverage results/ --html coverage.html --html-depth 2
 ```
+
+Give each component on a page its own `id`: its panels' ids derive from it.
+A condition's attribute name must not contain `=`, which separates it from
+the bucket in a link.
 
 ### Selecting runs and thresholds
 
@@ -115,7 +130,7 @@ Every call takes the same query:
 | `x`, `y` | The column and row attributes. When left out, the first free ones in the ODD's order; `y=""` gives a single row. |
 | `conditions` | The cells clicked into, outermost first: `[(attribute, bucket), ...]` or a mapping. |
 | `scenario` | Only this scenario's runs. |
-| `environment` | Only this environment's runs (`None` for those that recorded none). When left out, every environment, and the component warns if more than one is pooled. |
+| `environment` | Only this environment's runs (`None` for those that recorded none). When left out (`openodd.view.ANY`), every environment, and the component warns if more than one is pooled. |
 | `min_runs`, `band` | When a cell is judged rather than tentative. |
 | `min_seconds` | The least a run must stay in a cell to count as in it. |
 

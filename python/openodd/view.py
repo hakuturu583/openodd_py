@@ -38,7 +38,7 @@ from typing import Any, Optional, Union
 
 from . import _core
 
-__all__ = ["CoverageView", "page", "parse_conditions", "script", "styles"]
+__all__ = ["ANY", "CoverageView", "page", "parse_conditions", "script", "styles"]
 
 Conditions = Union[Mapping[str, str], Iterable[Sequence[str]]]
 
@@ -63,7 +63,8 @@ def page(title: str, body: str) -> str:
 
 def parse_conditions(values: Iterable[str]) -> list[tuple[str, str]]:
     """``attribute=bucket`` query values (the ``at`` of a cell's link), in
-    order; one per attribute."""
+    order; one per attribute. It splits at the first ``=``: an attribute
+    name with ``=`` in it does not round-trip (a bucket label may hold one)."""
     out: dict[str, str] = {}
     for value in values:
         name, sep, label = str(value).partition("=")
@@ -154,7 +155,7 @@ class CoverageView:
                 ``[(attribute, bucket), ...]`` or a mapping.
             scenario: Only this scenario's runs.
             environment: Only this environment's runs (``None``: those that
-                recorded none); every environment when left out.
+                recorded none); every environment when left out (:data:`ANY`).
             min_runs, band: When a cell is judged rather than tentative
                 (defaults: :data:`~.report.CELL_MIN_RUNS`,
                 :data:`~.report.CELL_BAND`).

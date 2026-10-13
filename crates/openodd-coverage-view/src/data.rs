@@ -25,8 +25,11 @@ pub struct Axis {
     pub name: String,
     pub unit: String,
     pub text: String,
-    /// Its buckets in order, then any other label a run's cells carry.
+    /// Its buckets in order, then any other label a run's cells carry
+    /// (sorted), then below range, above range and missing.
     pub labels: Vec<String>,
+    /// Its cover items' buckets, in order: their union over the documents.
+    pub buckets: Vec<String>,
     /// Buckets outside the ODD.
     pub outside: Vec<String>,
 }
@@ -94,7 +97,6 @@ impl Dataset {
     pub fn from_documents(documents: &[Json]) -> Self {
         let mut data = Dataset::default();
         for (index, doc) in documents.iter().enumerate() {
-            data.read_items(doc);
             let Some(table) = doc.pointer("/odd/cells").filter(|c| c.is_object()) else {
                 data.unsampled += 1;
                 continue;
@@ -103,6 +105,8 @@ impl Dataset {
                 data.unsampled += 1;
                 continue;
             };
+            // Only a document the matrix can place says what its axes are.
+            data.read_items(doc, &attributes);
             let mut cells: IndexMap<Vec<String>, (u64, f64, f64)> = IndexMap::new();
             for row in table
                 .get("rows")
@@ -113,7 +117,7 @@ impl Dataset {
                 let Some(labels) = strings(row.get(0)) else {
                     continue;
                 };
-                let ticks = row.get(1).and_then(Json::as_f64).unwrap_or(0.0);
+                let ticks = row.get(1).and_then(Json::as_f64).unwrap_or(0.0).ceil();
                 if labels.len() != attributes.len() || ticks <= 0.0 {
                     continue;
                 }
@@ -166,14 +170,18 @@ impl Dataset {
 
     /// The bucket order, unit and outside buckets of each ODD attribute's
     /// cover item.
-    fn read_items(&mut self, doc: &Json) {
+    fn read_items(&mut self, doc: &Json, attributes: &[String]) {
         for item in doc
             .get("items")
             .and_then(Json::as_array)
             .into_iter()
             .flatten()
         {
-            let Some(name) = item.get("attribute").and_then(Json::as_str) else {
+            let Some(name) = item
+                .get("attribute")
+                .and_then(Json::as_str)
+                .filter(|n| attributes.iter().any(|a| a == n))
+            else {
                 continue;
             };
             let axis = self.axes.entry(name.to_string()).or_insert_with(|| Axis {
@@ -187,11 +195,21 @@ impl Dataset {
             if axis.text.is_empty() {
                 axis.text = text("text");
             }
-            // Buckets go first, in the item's order; seen labels are placed
-            // after them by `order_labels`.
-            let mut buckets = strings(item.get("buckets")).unwrap_or_default();
-            buckets.retain(|b| !axis.labels.contains(b));
-            axis.labels.splice(0..0, buckets);
+            // An ordered union: a bucket a later document adds goes after
+            // the one it follows there (or last).
+            let buckets = strings(item.get("buckets")).unwrap_or_default();
+            for (i, b) in buckets.iter().enumerate() {
+                if axis.buckets.contains(b) {
+                    continue;
+                }
+                let at = buckets[..i]
+                    .iter()
+                    .rev()
+                    .find_map(|prev| axis.buckets.iter().position(|x| x == prev))
+                    .map(|p| p + 1)
+                    .unwrap_or(if i == 0 { 0 } else { axis.buckets.len() });
+                axis.buckets.insert(at, b.clone());
+            }
             for o in strings(item.get("outside_odd")).unwrap_or_default() {
                 if !axis.outside.contains(&o) {
                     axis.outside.push(o);
@@ -228,11 +246,19 @@ impl Dataset {
 /// Buckets first (in their order), then other labels sorted, then the extra
 /// labels (below, above, missing) in that order.
 fn order_labels(axis: &mut Axis) {
-    let extras: Vec<String> = EXTRA_LABELS
+    let mut others: Vec<String> = axis
+        .labels
+        .iter()
+        .filter(|l| !axis.buckets.contains(l) && !EXTRA_LABELS.contains(&l.as_str()))
+        .cloned()
+        .collect();
+    others.sort();
+    let extras = EXTRA_LABELS
         .iter()
         .filter(|e| axis.labels.iter().any(|l| l == *e))
-        .map(|e| e.to_string())
-        .collect();
-    axis.labels.retain(|l| !EXTRA_LABELS.contains(&l.as_str()));
-    axis.labels.extend(extras);
+        .map(|e| e.to_string());
+    let mut labels = axis.buckets.clone();
+    labels.extend(others);
+    labels.extend(extras);
+    axis.labels = labels;
 }

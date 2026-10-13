@@ -254,7 +254,7 @@ fn the_explorer_renders_the_levels_below() {
     let panels = html.matches("<section class=\"oo-panel\"").count();
     assert_eq!(panels, 4);
     assert_eq!(
-        html.matches("<section class=\"oo-panel\" id=\"oo-cov-p0\">")
+        html.matches("<section class=\"oo-panel\" id=\"oo-cov-p0\" tabindex=\"-1\">")
             .count(),
         1
     );
@@ -293,4 +293,154 @@ fn the_json_has_every_cell() {
     assert_eq!(j["cells"][1][1]["state"], "fail");
     assert_eq!(j["total"]["runs"], 7);
     assert_eq!(j["counts"]["unsampled"], 1);
+}
+
+#[test]
+fn a_document_without_cells_adds_no_axis() {
+    // An older file with ODD items but no cells, before current ones.
+    let old = json!({"schema": "openodd.coverage/1", "scenario": "s", "items": [
+        {"name": "odd.legacy", "attribute": "legacy", "buckets": ["a", "b"]}]});
+    let mut docs = vec![old];
+    docs.extend(docs_without_unsampled());
+    let data = Dataset::from_documents(&docs);
+    assert!(!data.attributes().contains(&"legacy".to_string()));
+    assert_eq!(data.matrix(&Query::default()).total.runs, 7);
+}
+
+fn docs_without_unsampled() -> Vec<Json> {
+    docs()
+        .into_iter()
+        .filter(|d| d.get("odd").is_some())
+        .collect()
+}
+
+#[test]
+fn inside_an_outside_cell_everything_is_outside() {
+    let mut docs = docs_without_unsampled();
+    docs.push(run(&[["[0, 30)", "snow", "day"]], Some(true), None, None));
+    let data = Dataset::from_documents(&docs);
+    let q = Query {
+        conditions: vec![("rain".into(), "snow".into())],
+        ..Query::default()
+    };
+    let m = data.matrix(&q);
+    assert!(m.total.outside);
+    assert!(m
+        .cells
+        .iter()
+        .flatten()
+        .all(|c| c.state == CellState::Outside));
+    let visited: u64 = m.cells.iter().flatten().map(|c| c.runs).sum();
+    assert_eq!(visited, 1); // still counted, only coloured as outside
+}
+
+#[test]
+fn default_axes_follow_the_selected_runs() {
+    // Another scenario that measured other attributes only.
+    let other = json!({"schema": "openodd.coverage/1", "scenario": "t", "items": [],
+        "odd": {"name": "o2", "cells": {"attributes": ["fog"], "rows": [[["thick"], 5, 1.0, 0.0]]}},
+        "outcome": {"passed": false}});
+    let mut docs = docs_without_unsampled();
+    docs.push(other);
+    let data = Dataset::from_documents(&docs);
+    let q = Query {
+        scenario: Some("t".into()),
+        ..Query::default()
+    };
+    let m = data.matrix(&q);
+    assert_eq!(m.x.as_ref().unwrap().name, "fog");
+    assert!(m.y.is_none());
+    assert_eq!(m.total.runs, 1);
+    assert_eq!(m.cells[0][0].state, CellState::Fail);
+    // The whole dataset still lays out its first attributes.
+    assert_eq!(data.matrix(&Query::default()).x.unwrap().name, "speed");
+}
+
+#[test]
+fn every_attribute_in_the_conditions_does_not_panic() {
+    let data = Dataset::from_documents(&docs());
+    let q = Query {
+        conditions: vec![
+            ("speed".into(), "[30, 60]".into()),
+            ("rain".into(), "none".into()),
+            ("light".into(), "night".into()),
+        ],
+        ..Query::default()
+    };
+    let m = data.matrix(&q);
+    assert!(m.x.is_none() && m.y.is_none());
+    assert_eq!(m.total.runs, 4);
+    assert!(html::fragment(&data, &m, &Options::default()).contains("oo-note"));
+    let m = data.matrix(&Query {
+        x: Some(String::new()),
+        ..Query::default()
+    });
+    assert!(m.x.is_none());
+    assert_eq!(m.total.runs, 7);
+}
+
+#[test]
+fn the_total_does_not_depend_on_the_axes() {
+    // A run that did not measure `light` still counts in the total.
+    let other = json!({"schema": "openodd.coverage/1", "scenario": "s", "items": [],
+        "odd": {"name": "o", "cells": {"attributes": ["speed", "rain"],
+                "rows": [[["[0, 30)", "none"], 3, 1.0, 0.0]]}},
+        "outcome": {"passed": true}});
+    let mut docs = docs_without_unsampled();
+    docs.push(other);
+    let data = Dataset::from_documents(&docs);
+    let by_light = data.matrix(&Query {
+        x: Some("light".into()),
+        ..Query::default()
+    });
+    let by_default = data.matrix(&Query::default());
+    assert_eq!(by_light.total.runs, by_default.total.runs);
+    assert_eq!(by_default.total.runs, 8);
+}
+
+#[test]
+fn bucket_order_is_an_ordered_union() {
+    let doc = |buckets: Json, cells: Json| {
+        json!({"schema": "openodd.coverage/1", "scenario": "s",
+               "items": [{"name": "odd.a", "attribute": "a", "buckets": buckets}],
+               "odd": {"name": "o", "cells": {"attributes": ["a"], "rows": cells}}})
+    };
+    let data = Dataset::from_documents(&[
+        doc(
+            json!([]),
+            json!([[["z"], 1, 1.0, 0.0], [["m"], 1, 1.0, 0.0]]),
+        ),
+        doc(json!(["a", "b"]), json!([[["b"], 1, 1.0, 0.0]])),
+        doc(
+            json!(["a", "b", "c"]),
+            json!([[["<missing>"], 1, 1.0, 0.0]]),
+        ),
+    ]);
+    assert_eq!(
+        data.axes["a"].labels,
+        ["a", "b", "c", "m", "z", "<missing>"]
+    );
+}
+
+#[test]
+fn the_explorer_says_when_it_stops_early() {
+    // Many buckets on three attributes: more panels than the cap.
+    let mut docs = Vec::new();
+    for i in 0..30 {
+        let rows: Vec<Json> = (0..30)
+            .map(|j| json!([[format!("a{i}"), format!("b{j}"), "c"], 1, 1.0, 0.0]))
+            .collect();
+        docs.push(
+            json!({"schema": "openodd.coverage/1", "scenario": "s", "items": [],
+            "odd": {"name": "o", "cells": {"attributes": ["a", "b", "c"], "rows": rows}},
+            "outcome": {"passed": true}}),
+        );
+    }
+    let data = Dataset::from_documents(&docs);
+    let html = html::explorer(&data, &Query::default(), 1, &Options::default());
+    assert_eq!(
+        html.matches("<section class=\"oo-panel\"").count(),
+        html::MAX_PANELS
+    );
+    assert!(html.contains("were not rendered ahead of time"));
 }

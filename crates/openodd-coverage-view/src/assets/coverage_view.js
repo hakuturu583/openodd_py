@@ -6,12 +6,13 @@
   window.__openoddCoverageView = true;
 
   function show(root, id) {
-    var panels = root.querySelectorAll(".oo-panel");
-    for (var i = 0; i < panels.length; i++) {
-      if (panels[i].closest(".oo-cov") === root) panels[i].hidden = panels[i].id !== id;
-    }
-    var here = document.getElementById(id);
-    if (here && here.scrollIntoView) here.scrollIntoView({ block: "nearest" });
+    var target = document.getElementById(id);
+    if (!target || target.closest(".oo-cov") !== root) return; // no such panel: stay
+    var panels = root.querySelectorAll(":scope > .oo-panel");
+    for (var i = 0; i < panels.length; i++) panels[i].hidden = panels[i] !== target;
+    // Keep the keyboard where the reader is: on the panel just shown.
+    target.focus({ preventScroll: true });
+    if (target.scrollIntoView) target.scrollIntoView({ block: "nearest" });
   }
 
   document.addEventListener("click", function (event) {

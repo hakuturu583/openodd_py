@@ -62,6 +62,8 @@ pub struct Labels {
     pub here: String,
     pub time: String,
     pub of_cells: String,
+    pub truncated: String,
+    pub levels: String,
 }
 
 impl Labels {
@@ -100,6 +102,8 @@ impl Labels {
             "here" => &mut self.here,
             "time" => &mut self.time,
             "of_cells" => &mut self.of_cells,
+            "truncated" => &mut self.truncated,
+            "levels" => &mut self.levels,
             _ => return false,
         };
         *slot = value.to_string();
@@ -145,6 +149,11 @@ impl Default for Labels {
             here: s("here"),
             time: s("Time in it"),
             of_cells: s("of {n} cells"),
+            truncated: s(
+                "Some cells were not rendered ahead of time (the page holds at most {n} levels); \
+                 render fewer levels below, or start from a cell.",
+            ),
+            levels: s("Drill-down levels"),
         }
     }
 }
@@ -403,6 +412,7 @@ type HasDepth<'a> = dyn Fn(&[(String, String)]) -> bool + 'a;
 /// conditions it was inside.
 #[allow(clippy::too_many_arguments)]
 fn panel(
+    truncated: bool,
     out: &mut String,
     m: &Matrix,
     opts: &Options,
@@ -415,12 +425,16 @@ fn panel(
     let labels = &opts.labels;
     let _ = write!(
         out,
-        "<section class=\"oo-panel\" id=\"{}\"{}>",
+        "<section class=\"oo-panel\" id=\"{}\" tabindex=\"-1\"{}>",
         escape(panel_id),
         if hidden { " hidden" } else { "" }
     );
     // Breadcrumbs: the whole ODD, then each level clicked into.
-    out.push_str("<nav class=\"oo-crumbs\">");
+    let _ = write!(
+        out,
+        "<nav class=\"oo-crumbs\" aria-label=\"{}\">",
+        escape(&labels.levels)
+    );
     let conds = &m.query.conditions;
     let mut levels: Vec<(usize, Option<String>)> = match crumbs {
         Some(up) => up.iter().map(|(id, n)| (*n, Some(id.clone()))).collect(),
@@ -449,7 +463,10 @@ fn panel(
             out.push_str("<span class=\"oo-sep\">&rsaquo;</span>");
         }
         if j + 1 == levels.len() {
-            let _ = write!(out, "<span class=\"oo-at\">{text}</span>");
+            let _ = write!(
+                out,
+                "<span class=\"oo-at\" aria-current=\"location\">{text}</span>"
+            );
             continue;
         }
         let target = match id {
@@ -645,6 +662,13 @@ fn panel(
         out.push_str("</tr>");
     }
     out.push_str("</tbody></table></div>");
+    if truncated {
+        let _ = write!(
+            out,
+            "<p class=\"oo-note\">{}</p>",
+            escape(&labels.truncated.replace("{n}", &MAX_PANELS.to_string()))
+        );
+    }
     if m.unsampled > 0 {
         let _ = write!(
             out,
@@ -679,15 +703,16 @@ fn open_root(out: &mut String, opts: &Options, mode: &str) {
 pub fn fragment(data: &Dataset, m: &Matrix, opts: &Options) -> String {
     let mut out = String::new();
     open_root(&mut out, opts, "host");
-    let has_depth = |conds: &[(String, String)]| !data.free_attributes(conds).is_empty();
+    let has_depth = |conds: &[(String, String)]| !data.free_attributes(&m.query, conds).is_empty();
     let id = format!("{}-p0", opts.root_id());
-    panel(&mut out, m, opts, &id, false, None, None, &has_depth);
+    panel(false, &mut out, m, opts, &id, false, None, None, &has_depth);
     out.push_str("</div>");
     out
 }
 
-/// The most panels the explorer renders, whatever the depth.
-pub const MAX_PANELS: usize = 2000;
+/// The most panels the explorer renders, whatever the depth: past it, a
+/// cell's level is not rendered, and its panel says so.
+pub const MAX_PANELS: usize = 400;
 
 /// The matrix `query` asks for and, `depth` levels down, the matrix inside
 /// each of its visited cells, as hidden panels a click shows. Nothing to
@@ -698,7 +723,7 @@ pub fn explorer(data: &Dataset, query: &Query, depth: usize, opts: &Options) -> 
     open_root(&mut out, opts, "explorer");
     let mut count = 0usize;
     let root = opts.root_id().to_string();
-    let has_depth = |conds: &[(String, String)]| !data.free_attributes(conds).is_empty();
+    let has_depth = |conds: &[(String, String)]| !data.free_attributes(query, conds).is_empty();
     // Breadth-first: (query, its panel id, the levels above, levels left).
     #[allow(clippy::type_complexity)]
     let mut queue: std::collections::VecDeque<(Query, String, Vec<(String, usize)>, usize)> =
@@ -708,11 +733,16 @@ pub fn explorer(data: &Dataset, query: &Query, depth: usize, opts: &Options) -> 
     while let Some((q, id, crumbs, left)) = queue.pop_front() {
         let m = data.matrix(&q);
         let mut children: Vec<((usize, usize), String)> = Vec::new();
+        let mut truncated = false;
         if left > 0 {
             for (r, row) in m.cells.iter().enumerate() {
                 for (c, cell) in row.iter().enumerate() {
                     let conds = m.conditions_of(r, c);
-                    if !cell.visited() || !has_depth(&conds) || count >= MAX_PANELS {
+                    if !cell.visited() || !has_depth(&conds) {
+                        continue;
+                    }
+                    if count >= MAX_PANELS {
+                        truncated = true;
                         continue;
                     }
                     let child = format!("{root}-p{count}");
@@ -735,6 +765,7 @@ pub fn explorer(data: &Dataset, query: &Query, depth: usize, opts: &Options) -> 
                 .map(|(_, id)| id.clone())
         };
         panel(
+            truncated,
             &mut out,
             &m,
             opts,

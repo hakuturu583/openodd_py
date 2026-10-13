@@ -228,7 +228,10 @@ pub struct Matrix {
     pub y: Option<Axis>,
     /// Rows (y's labels, one row without y) x columns (x's labels).
     pub cells: Vec<Vec<Cell>>,
-    /// Every run in the conditions, wherever in the matrix.
+    /// Every run in the conditions, wherever in the matrix (and whether or
+    /// not it measured the axes). With `min_seconds`, a run counts here when
+    /// its stay in the whole region reaches it, so it can count here and in
+    /// no single cell.
     pub total: Cell,
     /// Runs selected (scenario, environment), with cells; and documents
     /// without cells, which the matrix cannot place.
@@ -391,11 +394,19 @@ impl Dataset {
         })
     }
 
-    /// The attributes free for an axis inside `conditions`, in order.
-    pub fn free_attributes(&self, conditions: &[(String, String)]) -> Vec<String> {
+    /// The attributes free for an axis inside `q`'s conditions, in order:
+    /// those not in a condition that some run `q` selects (its scenario and
+    /// environment), and that measured every condition's attribute, measured.
+    pub fn free_attributes(&self, q: &Query, conditions: &[(String, String)]) -> Vec<String> {
+        let mut measured: std::collections::HashSet<&String> = std::collections::HashSet::new();
+        for run in self.selected(q) {
+            if conditions.iter().all(|(a, _)| run.index_of(a).is_some()) {
+                measured.extend(run.attributes.iter());
+            }
+        }
         self.axes
             .keys()
-            .filter(|a| !conditions.iter().any(|(c, _)| c == *a))
+            .filter(|a| measured.contains(a) && !conditions.iter().any(|(c, _)| c == *a))
             .cloned()
             .collect()
     }
@@ -407,7 +418,7 @@ impl Dataset {
         q.conditions.retain(|(a, _)| self.axes.contains_key(a));
         let mut seen = std::collections::HashSet::new();
         q.conditions.retain(|(a, _)| seen.insert(a.clone()));
-        let free = self.free_attributes(&q.conditions);
+        let free = self.free_attributes(&q, &q.conditions);
         let pick = |asked: &Option<String>, taken: &[&String]| -> Option<String> {
             match asked {
                 Some(a) if a.is_empty() => None,
@@ -450,11 +461,15 @@ impl Dataset {
                 .map(|(a, l)| run.index_of(a).map(|i| (i, l)))
                 .collect();
             let Some(conds) = conds else { continue };
-            let xi = x.as_ref().map(|a| run.index_of(&a.name));
-            let yi = y.as_ref().map(|a| run.index_of(&a.name));
-            if matches!(xi, Some(None)) || matches!(yi, Some(None)) {
-                continue; // it did not measure an axis
-            }
+            // Where its columns and rows are; `None` when the matrix has no
+            // column axis, or the run did not measure an axis: then it counts
+            // in the total only.
+            let xi = x.as_ref().and_then(|a| run.index_of(&a.name));
+            let yi = match &y {
+                Some(a) => run.index_of(&a.name).map(Some),
+                None => Some(None),
+            };
+            let placed = xi.is_some() && yi.is_some();
             let mut stays: IndexMap<(usize, usize), Stay> = IndexMap::new();
             let mut whole = Stay::default();
             for (labels, (ticks, seconds, meters)) in &run.cells {
@@ -462,19 +477,17 @@ impl Dataset {
                     continue;
                 }
                 let failed_here = run.failed_cell.as_ref() == Some(labels);
-                let column = match xi.flatten() {
-                    Some(i) => x_labels.iter().position(|l| *l == labels[i]),
-                    None => Some(0),
-                };
-                let row = match yi.flatten() {
-                    Some(i) => y_labels.iter().position(|l| *l == labels[i]),
-                    None => Some(0),
+                let column = xi.and_then(|i| x_labels.iter().position(|l| *l == labels[i]));
+                let row = match yi {
+                    Some(Some(i)) => y_labels.iter().position(|l| *l == labels[i]),
+                    Some(None) => Some(0),
+                    None => None,
                 };
                 whole.ticks += ticks;
                 whole.seconds += seconds;
                 whole.meters += meters;
                 whole.failed_here |= failed_here;
-                if let (Some(r), Some(c)) = (row, column) {
+                if let (true, Some(r), Some(c)) = (placed, row, column) {
                     let s = stays.entry((r, c)).or_default();
                     s.ticks += ticks;
                     s.seconds += seconds;
@@ -487,8 +500,15 @@ impl Dataset {
             }
             total.add(run, &whole, q.min_seconds);
         }
+        // A cell is outside the ODD when a bucket of it is: its row's, its
+        // column's, or one of the conditions it lies inside.
+        let total_outside = q
+            .conditions
+            .iter()
+            .any(|(a, l)| self.axes.get(a).is_some_and(|ax| ax.is_outside(l)));
         let outside = |row: usize, column: usize| {
-            x.as_ref().is_some_and(|a| a.is_outside(&x_labels[column]))
+            total_outside
+                || x.as_ref().is_some_and(|a| a.is_outside(&x_labels[column]))
                 || y.as_ref().is_some_and(|a| a.is_outside(&y_labels[row]))
         };
         let cells = grid
@@ -501,10 +521,6 @@ impl Dataset {
                     .collect()
             })
             .collect();
-        let total_outside = q
-            .conditions
-            .iter()
-            .any(|(a, l)| self.axes.get(a).is_some_and(|ax| ax.is_outside(l)));
         Matrix {
             attributes: self.attributes(),
             x,
