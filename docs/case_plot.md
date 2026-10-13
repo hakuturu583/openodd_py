@@ -34,7 +34,11 @@ them.
 | filled circle, green | every run of the case passed |
 | cross, red | every run of the case failed |
 | ring, yellow, with `n/m` | the runs did both: `n` of `m` passed |
-| dashed outline around any of them | a flaky search chose the case (`chosen_for: instability`) |
+| faint green / red / yellow background | what the flaky model predicts there: passes / fails / flaky ([below](#the-predicted-background)) |
+
+Why a case was drawn (`chosen_for`) is in its card and in the table. With
+`instability_rings=True` (`--cases-rings`), a case chosen for instability also
+gets a dashed outline.
 
 A case run more than once is labelled `passes/runs`. The shape says what the
 colour says, so colour is never the only signal. The colours are the coverage
@@ -65,6 +69,52 @@ Under the plot, **Repeated cases** lists the cases run more than once. Each
 row has the case's values (the plotted attributes first), its outcomes in
 order (`P`/`F`) and its verdict: flaky first, then failing, then passing.
 
+## The predicted background
+
+Behind the marks, the plot is shaded by what openodd's flaky model predicts
+over the two plotted attributes. It is the learner `FlakySearch` uses and the
+merged report assesses runs with ([flaky.md](flaky.md#the-model)): a
+Gaussian-process classifier with `FlakinessModel`'s defaults and seed
+`"report"`, fitted to every run the plot shows that recorded an outcome.
+
+- **The grid:** a numeric axis is cut into 48 cells over the plot's range, each
+  predicted at its middle. A categorical axis has one cell per band.
+- **The colours:**
+  - **yellow (flaky)** where `instability_confidence` is above 0.5. That is,
+    the model is more than 50% sure that a small change flips the outcome more
+    often than `threshold` (0.1). These are the report's rule for a flaky run
+    (`FLAKY_CONFIDENCE`) and `FlakySearch`'s threshold.
+  - otherwise **green (passes)** where `pass_probability` is at least 0.5, and
+    **red (fails)** where it is below.
+
+  Where runs are few the model is unsure, and an unsure point is a coin toss,
+  so it reads as flaky. A wide yellow area says "not enough evidence here" as
+  much as "unstable".
+- **Attributes not plotted are held at the runs' typical value:** the median
+  of a numeric one, the most common label of a categorical one (the first in
+  the space's order on a tie). The background is therefore a slice through
+  the space at those values, not an average over it. The caption under the
+  plot names them, so a reader does not read the background as true for every
+  rain or light condition.
+- **Which runs:** the cases the plot selects (scenario, environment) that
+  recorded their space. If they were drawn in different spaces or scenarios,
+  the model uses the group with the most runs.
+- **No background** when there are fewer than 3 runs (`stats::MIN_RUNS`), when
+  every run passed or every run failed, or when an axis is not a parameter of
+  the space. A note under the plot says which.
+
+The colours are the state colours, tinted into the plot's surface (opaque, so
+touching cells never darken), in both light and dark themes. A mark's card
+adds the model's pass probability at that case's own values ("Pass
+probability (model, now)"), next to the prediction recorded when the case was
+drawn.
+
+The fitting lives in openodd's core (`openodd::case_prediction::CasePredictor`),
+not in the view crate. The view takes any `prediction::Predictor`, and a grid
+is plain data (`prediction::Grid`, `Grid::to_json`), so a host that draws its
+own plot can use the same grid: `plot.prediction(x=..., y=...)` in Python,
+or `plot.data(...)["prediction"]`.
+
 ## Embedding
 
 ```python
@@ -77,7 +127,8 @@ html = plot.html(x="dynamic.vehicle_ahead_relative_speed",
                  y="dynamic.vehicle_ahead_gap",
                  link="/cases?{axes}", id="cases")    # host-driven
 table = plot.table_html(x=..., y=...)       # the repeated cases on their own
-data = plot.data(x=..., y=...)              # the axes and every case, as a dict
+data = plot.data(x=..., y=...)              # the axes and every case, and the prediction
+grid = plot.prediction(x=..., y=...)        # the background's grid alone
 page = plot.page("Drawn cases", x=..., y=...)          # standalone
 ```
 
@@ -105,6 +156,8 @@ openodd-coverage results/ --cases-html cases.html \
 ```
 
 Without `--cases-x`/`--cases-y`, the first numeric attributes are plotted.
+`--cases-no-prediction` leaves out the background, and `--cases-rings`
+outlines the cases chosen for instability.
 Tools that wrap `openodd-coverage` (`scenario-coverage` in
 autoware_carla_scenario) take the same flags.
 
@@ -114,6 +167,8 @@ autoware_carla_scenario) take the same flags.
 | `scenario` | Only this scenario's cases. |
 | `environment` | Only this environment's runs (`None`: those that recorded none). By default every environment, with a warning when more than one is pooled. |
 | `table` | Whether the repeated cases' table follows the plot (default `True`). |
+| `prediction` | Whether to shade the predicted background (default `True`; when the runs cannot support it, a note says why). |
+| `instability_rings` | Whether to outline the cases chosen for instability (default `False`). |
 | `labels` | The component's words, by name. |
 
 `labels={"title": "抽選ケース", "state_pass": "成功", "state_fail": "失敗",
@@ -121,7 +176,8 @@ autoware_carla_scenario) take the same flags.
 words by name. The names are the fields of `case_plot::Labels` in the crate.
 Text with placeholders keeps them: `runs_of` (`{n} runs`), `of_cases`,
 `passes_of` (`{p} of {n} passed`), `failed_at` (`{t}`), `run` and `case`
-(`{n}`), `more_runs`.
+(`{n}`), `more_runs`, `predicted_caption` (`{runs}`, `{confidence}`,
+`{threshold}`), `held` (`{held}`), `no_prediction` (`{reason}`).
 
 ## In Rust
 
@@ -132,5 +188,8 @@ let set = CaseSet::from_documents(&documents);
 let plot = set.plot(&CaseQuery { x: Some("speed".into()), y: Some("gap".into()), ..Default::default() });
 let json = plot.to_json();                                           // draw it your own way
 let fragment = case_plot::fragment(&set, &plot, &case_plot::Options::default());
+// With openodd's model behind it:
+let model = openodd::case_prediction::CasePredictor::new(&set, &CaseQuery::default());
+let shaded = case_plot::fragment_with(&set, &plot, &Default::default(), Some(&model));
 let page = case_plot::page("Cases", &case_plot::explorer(&set, &CaseQuery::default(), &Default::default()));
 ```

@@ -10,6 +10,7 @@
 // `!(x > 0.0)` is meant: it is true for NaN, which must be refused too.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+pub mod case_prediction;
 pub mod cell_flakiness;
 pub mod cells;
 pub mod error;

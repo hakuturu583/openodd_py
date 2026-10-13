@@ -69,7 +69,8 @@ def test_the_fragment() -> None:
     assert "抽選ケース" in html and "不安定" in html
     assert 'data-oo-view="cases" data-oo-link="/cases?{axes}"' in html
     assert html.count('role="img" aria-label=') == 40  # 20 cases, wide and compact
-    assert "oo-case oo-flaky" in html and "oo-instab" in html
+    assert "oo-case oo-flaky" in html and "oo-instab" not in html
+    assert "oo-instab" in plot.html(instability_rings=True)
     assert "Repeated cases" in html and "oo-o oo-o-fail" in html
     assert "1 coverage files without a case or an outcome" in html
     assert "Repeated cases" not in plot.html(table=False)
@@ -82,7 +83,7 @@ def test_the_table_and_the_explorer() -> None:
     table = plot.table_html(x="gap", y="rain")
     assert table.count("<tr class=\"oo-row-") == 3
     assert table.index('<tr class="oo-row-') == table.index('<tr class="oo-row-flaky')
-    explorer = plot.explorer_html(x="gap", y="rain")
+    explorer = plot.explorer_html(x="gap", y="rain", prediction=False)
     assert explorer.count('<section class="oo-panel"') == 2  # gap x rain, rain x gap
     assert "data-oo-map=" in explorer
     page = plot.page("Cases", x="gap")
@@ -122,3 +123,44 @@ def test_the_cli_writes_the_page(tmp_path: Path) -> None:
 def test_it_is_exported() -> None:
     assert openodd.CasePlot is CasePlot and ".oo-plot" in openodd.view.styles()
     assert "data-oo-tip-i" in openodd.view.script()
+
+
+def test_the_predicted_background() -> None:
+    plot = CasePlot(_campaign())
+    grid = plot.prediction(x="gap", y="rain")
+    assert grid["runs"] == 23
+    assert grid["x"]["name"] == "gap" and len(grid["x"]["edges"]) == 49
+    assert grid["y"]["labels"] == ["none", "light", "heavy"]
+    assert grid["held"] == []  # the space is gap and rain: nothing held
+    assert grid["flip_threshold"] == 0.1 and grid["flaky_confidence"] == 0.5
+    states = [c["state"] for row in grid["cells"] for c in row if c]
+    # Fails where the gap is short, passes where it is long.
+    first, last = grid["cells"][0][0], grid["cells"][0][-1]
+    assert first["state"] == "fail" and first["pass_probability"] < 0.5
+    assert last["pass_probability"] > 0.5
+    right = [c for row in grid["cells"] for c in row[len(row) // 2:] if c]
+    assert any(c["state"] == "pass" for c in right)
+    assert set(states) <= {"pass", "fail", "flaky"}
+    for c in (c for row in grid["cells"] for c in row if c):
+        if c["instability_confidence"] > 0.5:
+            assert c["state"] == "flaky"
+        else:
+            assert c["state"] == ("pass" if c["pass_probability"] >= 0.5 else "fail")
+    data = plot.data(x="gap", y="rain")
+    assert all(0 <= c["predicted_pass_probability"] <= 1 for c in data["cases"])
+    assert "prediction" not in plot.data(prediction=False)
+    html = plot.html(x="gap", y="rain")
+    assert '<g class="oo-pred"' in html and "Predicted: passes" in html
+    assert "fitted to these 23 runs" in html and "Pass probability (model, now)" in html
+    assert "oo-pred" not in plot.html(x="gap", y="rain", prediction=False)
+
+
+def test_one_outcome_has_no_background() -> None:
+    s = search()
+    docs = [_document(c, s.space, True, ticks=False) for c in s.sample(6)]
+    plot = CasePlot(docs)
+    assert "every run passed" in plot.prediction()["unavailable"]
+    html = plot.html()
+    assert '<g class="oo-pred"' not in html and "No predicted background: every run passed" in html
+    few = CasePlot(docs[:2])
+    assert "too few runs" in few.prediction()["unavailable"]

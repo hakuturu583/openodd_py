@@ -1458,12 +1458,14 @@ fn case_options(
     id: &str,
     link: Option<String>,
     table: bool,
+    rings: bool,
     labels: Option<indexmap::IndexMap<String, String>>,
 ) -> PyResult<openodd_coverage_view::case_plot::Options> {
     let mut opts = openodd_coverage_view::case_plot::Options {
         id: id.to_string(),
         link,
         table,
+        instability_rings: rings,
         ..Default::default()
     };
     for (k, v) in labels.unwrap_or_default() {
@@ -1504,27 +1506,47 @@ impl CasePlot {
     fn skipped(&self) -> (usize, usize) {
         (self.inner.without_case, self.inner.without_outcome)
     }
-    fn data_json(&self, query_json: &str) -> PyResult<String> {
-        Ok(self
-            .inner
-            .plot(&case_query(query_json)?)
-            .to_json()
-            .to_string())
+    #[pyo3(signature = (query_json, prediction=true))]
+    fn data_json(&self, query_json: &str, prediction: bool) -> PyResult<String> {
+        use openodd_coverage_view::prediction::Predictor;
+        let query = case_query(query_json)?;
+        let plot = self.inner.plot(&query);
+        let mut out = plot.to_json();
+        if prediction {
+            let predictor = crate::case_prediction::CasePredictor::new(&self.inner, &query);
+            out["prediction"] = predictor.grid_json(&plot);
+            if let Some(cases) = out["cases"].as_array_mut() {
+                for (json, case) in cases.iter_mut().zip(&plot.cases) {
+                    json["predicted_pass_probability"] =
+                        serde_json::json!(predictor.pass_probability(case));
+                }
+            }
+        }
+        Ok(out.to_string())
     }
-    #[pyo3(signature = (query_json, id="", link=None, table=true, labels=None))]
+    #[pyo3(signature = (query_json, id="", link=None, table=true, prediction=true, rings=false, labels=None))]
+    #[allow(clippy::too_many_arguments)]
     fn fragment(
         &self,
         query_json: &str,
         id: &str,
         link: Option<String>,
         table: bool,
+        prediction: bool,
+        rings: bool,
         labels: Option<indexmap::IndexMap<String, String>>,
     ) -> PyResult<String> {
-        let plot = self.inner.plot(&case_query(query_json)?);
-        Ok(openodd_coverage_view::case_plot::fragment(
+        let query = case_query(query_json)?;
+        let plot = self.inner.plot(&query);
+        let predictor =
+            prediction.then(|| crate::case_prediction::CasePredictor::new(&self.inner, &query));
+        Ok(openodd_coverage_view::case_plot::fragment_with(
             &self.inner,
             &plot,
-            &case_options(id, link, table, labels)?,
+            &case_options(id, link, table, rings, labels)?,
+            predictor
+                .as_ref()
+                .map(|p| p as &dyn openodd_coverage_view::prediction::Predictor),
         ))
     }
     #[pyo3(signature = (query_json, id="", labels=None))]
@@ -1537,21 +1559,29 @@ impl CasePlot {
         let plot = self.inner.plot(&case_query(query_json)?);
         Ok(openodd_coverage_view::case_plot::table(
             &plot,
-            &case_options(id, None, true, labels)?,
+            &case_options(id, None, true, false, labels)?,
         ))
     }
-    #[pyo3(signature = (query_json, id="", table=true, labels=None))]
+    #[pyo3(signature = (query_json, id="", table=true, prediction=true, rings=false, labels=None))]
     fn explorer(
         &self,
         query_json: &str,
         id: &str,
         table: bool,
+        prediction: bool,
+        rings: bool,
         labels: Option<indexmap::IndexMap<String, String>>,
     ) -> PyResult<String> {
-        Ok(openodd_coverage_view::case_plot::explorer(
+        let query = case_query(query_json)?;
+        let predictor =
+            prediction.then(|| crate::case_prediction::CasePredictor::new(&self.inner, &query));
+        Ok(openodd_coverage_view::case_plot::explorer_with(
             &self.inner,
-            &case_query(query_json)?,
-            &case_options(id, None, table, labels)?,
+            &query,
+            &case_options(id, None, table, rings, labels)?,
+            predictor
+                .as_ref()
+                .map(|p| p as &dyn openodd_coverage_view::prediction::Predictor),
         ))
     }
 }

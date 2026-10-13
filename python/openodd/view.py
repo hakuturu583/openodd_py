@@ -232,9 +232,10 @@ class CasePlot:
     (:meth:`~.collector.CoverageCollector.record_case`) and their
     ``outcome``. Runs with the same overrides ran the same case and are one
     mark: a filled circle if they all passed, a cross if they all failed, a
-    ring in the flaky colour (with ``passes/runs``) if they did both. A
-    case chosen for instability has a dashed outline. Documents without a
-    case or without an outcome are skipped and counted in a note.
+    ring in the flaky colour (with ``passes/runs``) if they did both.
+    Behind them, the plot is shaded by what the flaky model fitted to the
+    runs predicts (:meth:`prediction`). Documents without a case or without
+    an outcome are skipped and counted in a note.
 
     The component shares the coverage view's root class, styles and script:
     put :func:`styles` and :func:`script` on the page once for both.
@@ -282,11 +283,16 @@ class CasePlot:
         y: Optional[str] = None,
         scenario: Optional[str] = None,
         environment: Any = ANY,
+        prediction: bool = True,
     ) -> dict[str, Any]:
         """The plot as a dict, for a host that draws it its own way: both
         axes (``kind``, ``domain``, ``labels``, the ODD ``buckets``) and every
         case (``values``, ``buckets``, ``runs``, ``passes``, ``verdict``,
         ``chosen_for``, ``flaky``, ...).
+
+        With *prediction*, also ``prediction``: the grid the background is
+        drawn from (:meth:`prediction`), and each case's
+        ``predicted_pass_probability``.
 
         Args:
             x: The horizontal attribute; the first free one (numeric first)
@@ -295,8 +301,39 @@ class CasePlot:
             scenario: Only this scenario's cases.
             environment: Only this environment's runs (``None``: those that
                 recorded none); every environment when left out (:data:`ANY`).
+            prediction: Whether to fit the flaky model and add its grid.
         """
-        out: dict[str, Any] = json.loads(self._core.data_json(self._query(x, y, scenario, environment)))
+        q = self._query(x, y, scenario, environment)
+        out: dict[str, Any] = json.loads(self._core.data_json(q, bool(prediction)))
+        return out
+
+    def prediction(
+        self,
+        *,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        scenario: Optional[str] = None,
+        environment: Any = ANY,
+    ) -> dict[str, Any]:
+        """What the flaky model fitted to the plot's runs predicts over *x*
+        and *y*: the background's grid, as data.
+
+        The model is :class:`~.flaky.FlakinessModel`'s Gaussian-process
+        classifier with its defaults, fitted to every run with an outcome
+        (seed ``"report"``, as the merged report assesses runs). The result
+        holds ``x`` and ``y`` (``edges`` of a numeric axis's cells, or the
+        ``labels`` of a categorical one), ``cells`` (rows along *y*, columns
+        along *x*: ``pass_probability``, ``flip_probability``,
+        ``instability_confidence`` and ``state``), ``held`` (each attribute
+        not plotted and the value it is held at: the runs' median, or most
+        common label) and ``runs``; or ``{"unavailable": why}`` when there
+        are too few runs, or runs of one outcome only.
+
+        A cell is ``flaky`` where ``instability_confidence`` is above 0.5
+        (the report's rule), else ``pass`` where ``pass_probability`` is at
+        least 0.5, else ``fail``.
+        """
+        out: dict[str, Any] = self.data(x=x, y=y, scenario=scenario, environment=environment)["prediction"]
         return out
 
     def html(
@@ -309,6 +346,8 @@ class CasePlot:
         id: str = "",
         link: Optional[str] = None,
         table: bool = True,
+        prediction: bool = True,
+        instability_rings: bool = False,
         labels: Optional[Mapping[str, str]] = None,
     ) -> str:
         """One plot as an HTML fragment, host-driven: the axis pickers
@@ -316,9 +355,15 @@ class CasePlot:
         ``"cases"``) and, with *link* (``{axes}`` is replaced by
         ``x=...&y=...``), go there. *table* adds the repeated cases' table
         below; *labels* overrides the component's words by name (``title``,
-        ``state_flaky``, ...). The other arguments are :meth:`data`'s."""
+        ``state_flaky``, ...). The other arguments are :meth:`data`'s.
+
+        *prediction* shades the plot by what the flaky model predicts
+        (:meth:`prediction`) when the runs allow it -- runs of both outcomes,
+        at least three -- and otherwise says why there is no background.
+        *instability_rings* outlines the cases chosen for instability."""
         q = self._query(x, y, scenario, environment)
-        return str(self._core.fragment(q, id, link, bool(table), dict(labels) if labels else None))
+        return str(self._core.fragment(q, id, link, bool(table), bool(prediction),
+                                       bool(instability_rings), dict(labels) if labels else None))
 
     def table_html(
         self,
@@ -344,13 +389,17 @@ class CasePlot:
         environment: Any = ANY,
         id: str = "",
         table: bool = True,
+        prediction: bool = True,
+        instability_rings: bool = False,
         labels: Optional[Mapping[str, str]] = None,
     ) -> str:
         """The plot of *x* and *y* and, as hidden panels the axis pickers
         show, every other pair of attributes (at most 100): self-contained,
-        for a static report (needs :func:`script` on the page)."""
+        for a static report (needs :func:`script` on the page). The model
+        behind *prediction* is fitted once for every pair."""
         q = self._query(x, y, scenario, environment)
-        return str(self._core.explorer(q, id, bool(table), dict(labels) if labels else None))
+        return str(self._core.explorer(q, id, bool(table), bool(prediction), bool(instability_rings),
+                                       dict(labels) if labels else None))
 
     def page(self, title: str = "Drawn cases", **query: Any) -> str:
         """A standalone page with the explorer (:meth:`explorer_html`)."""
