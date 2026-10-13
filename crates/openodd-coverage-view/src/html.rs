@@ -426,24 +426,58 @@ enum AxesUi<'a> {
 /// The separator of a pair in the explorer's map of axis pairs.
 const PAIR_SEP: char = '\u{1f}';
 
-/// The rows and columns pickers, and the swap button between them.
-fn axes_html(out: &mut String, m: &Matrix, free: &[String], ui: &AxesUi, opts: &Options) {
-    let Some(x) = &m.x else { return };
-    if matches!(ui, AxesUi::None) || free.is_empty() {
-        return;
-    }
+/// The grid's axis headings: the attributes on the rows (in the corner,
+/// above the row labels) and on the columns (above the column labels) --
+/// pickers when `ui` offers them, else their names -- and the grid's
+/// attributes the script reads the pickers with.
+struct AxesParts {
+    attrs: String,
+    rows: String,
+    columns: String,
+}
+
+fn axes_parts(m: &Matrix, free: &[String], ui: &AxesUi, opts: &Options) -> AxesParts {
     let labels = &opts.labels;
-    let y = m.y.as_ref().map(|a| a.name.as_str()).unwrap_or("");
-    let _ = write!(
-        out,
-        "<div class=\"oo-axes\" data-oo-conditions=\"{}\"",
+    let x = m.x.as_ref().expect("a grid has columns");
+    let y_name = m.y.as_ref().map(|a| a.name.as_str()).unwrap_or("");
+    let pickers = !matches!(ui, AxesUi::None) && !free.is_empty();
+    let caption = |text: &str, arrow: &str| {
+        format!(
+            "<span class=\"oo-cap\">{} <span aria-hidden=\"true\">{arrow}</span></span>",
+            escape(text)
+        )
+    };
+    if !pickers {
+        let rows = match &m.y {
+            Some(y) => format!(
+                "{}<span class=\"oo-axis\">{}{}</span>",
+                caption(&labels.rows, "\u{2193}"),
+                escape(&y.name),
+                unit(&y.unit)
+            ),
+            None => String::new(),
+        };
+        let columns = format!(
+            "{}<span class=\"oo-axis\">{}{}</span>",
+            caption(&labels.columns, "\u{2192}"),
+            escape(&x.name),
+            unit(&x.unit)
+        );
+        return AxesParts {
+            attrs: String::new(),
+            rows,
+            columns,
+        };
+    }
+    let mut attrs = format!(
+        " data-oo-conditions=\"{}\"",
         escape(&conditions_json(&m.query.conditions))
     );
     match ui {
         AxesUi::Host => {
             if let Some(link) = &opts.link {
                 let _ = write!(
-                    out,
+                    attrs,
                     " data-oo-link=\"{}\" data-oo-at=\"{}\"",
                     escape(link),
                     escape(&conditions_query(&m.query.conditions))
@@ -456,20 +490,19 @@ fn axes_html(out: &mut String, m: &Matrix, free: &[String], ui: &AxesUi, opts: &
                 .map(|(k, v)| (k.clone(), serde_json::Value::from(v.as_str())))
                 .collect();
             let _ = write!(
-                out,
+                attrs,
                 " data-oo-map=\"{}\"",
                 escape(&serde_json::Value::Object(map).to_string())
             );
         }
         AxesUi::None => {}
     }
-    out.push('>');
-    let select = |out: &mut String, axis: &str, title: &str, current: &str, none: Option<&str>| {
-        let _ = write!(
-            out,
-            "<label class=\"oo-pick\"><span>{}</span><select data-oo-axis=\"{axis}\" data-oo-current=\"{}\">",
-            escape(title),
-            escape(current)
+    let select = |axis: &str, title: &str, arrow: &str, current: &str, none: Option<&str>| {
+        let mut out = format!(
+            "<label class=\"oo-pick oo-pick-{axis}\">{}<select data-oo-axis=\"{axis}\" data-oo-current=\"{}\" aria-label=\"{}\">",
+            caption(title, arrow),
+            escape(current),
+            escape(title)
         );
         if let Some(none) = none {
             let _ = write!(
@@ -489,18 +522,23 @@ fn axes_html(out: &mut String, m: &Matrix, free: &[String], ui: &AxesUi, opts: &
             );
         }
         out.push_str("</select></label>");
+        out
     };
-    select(out, "y", &labels.rows, y, Some(&labels.no_rows));
-    let _ = write!(
-        out,
+    let swap = format!(
         "<button type=\"button\" class=\"oo-swap\" data-oo-swap title=\"{0}\" aria-label=\"{0}\"{1}>\
-         <svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" aria-hidden=\"true\"><path d=\"M5 2v10M5 12l-2.5-2.5M5 12l2.5-2.5M11 14V4M11 4L8.5 6.5M11 4l2.5 2.5\" \
+         <svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" aria-hidden=\"true\"><path d=\"M3 5h10M13 5l-2.5-2.5M13 5l-2.5 2.5M13 11H3M3 11l2.5-2.5M3 11l2.5 2.5\" \
          fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg></button>",
         escape(&labels.swap),
-        if y.is_empty() { " disabled" } else { "" }
+        if y_name.is_empty() { " disabled" } else { "" }
     );
-    select(out, "x", &labels.columns, &x.name, None);
-    out.push_str("</div>");
+    AxesParts {
+        attrs,
+        rows: format!(
+            "<div class=\"oo-yctl\">{}{swap}</div>",
+            select("y", &labels.rows, "\u{2193}", y_name, Some(&labels.no_rows))
+        ),
+        columns: select("x", &labels.columns, "\u{2192}", &x.name, None),
+    }
 }
 
 /// How each cell of `m` can be clicked into.
@@ -693,7 +731,6 @@ fn panel(
         escape(&labels.failed_here)
     );
 
-    axes_html(out, m, axes.1, axes.0, opts);
     let Some(x) = &m.x else {
         let _ = write!(
             out,
@@ -703,27 +740,26 @@ fn panel(
         return;
     };
     let y_labels = m.y_labels();
-    out.push_str(
-        "<div class=\"oo-scroll\"><table class=\"oo-grid\"><thead><tr><th class=\"oo-corner\">",
-    );
-    if let Some(y) = &m.y {
-        let _ = write!(
-            out,
-            "<span class=\"oo-axis oo-axis-y\">{}{} &darr;</span>",
-            escape(&y.name),
-            unit(&y.unit)
-        );
-    }
+    let parts = axes_parts(m, axes.1, axes.0, opts);
     let _ = write!(
         out,
-        "<span class=\"oo-axis oo-axis-x\">{}{} &rarr;</span></th>",
-        escape(&x.name),
-        unit(&x.unit)
+        "<div class=\"oo-scroll\"><table class=\"oo-grid{}\"{}><thead><tr>\
+         <th class=\"oo-corner\" rowspan=\"2\">{}</th>\
+         <th class=\"oo-xhead\" colspan=\"{}\" scope=\"colgroup\">{}</th></tr><tr>",
+        if parts.attrs.is_empty() {
+            ""
+        } else {
+            " oo-axes"
+        },
+        parts.attrs,
+        parts.rows,
+        x.labels.len(),
+        parts.columns
     );
-    for l in &x.labels {
+    for (c, l) in x.labels.iter().enumerate() {
         let _ = write!(
             out,
-            "<th class=\"oo-col{}\" scope=\"col\">{}</th>",
+            "<th class=\"oo-col{}\" scope=\"col\" data-oo-c=\"{c}\">{}</th>",
             if x.is_outside(l) { " oo-out-h" } else { "" },
             escape(&label_title(l, labels))
         );
@@ -733,7 +769,7 @@ fn panel(
         let yl = &y_labels[r];
         let _ = write!(
             out,
-            "<tr><th class=\"oo-row{}\" scope=\"row\">{}</th>",
+            "<tr><th class=\"oo-row{}\" scope=\"row\" data-oo-r=\"{r}\">{}</th>",
             if m.y.as_ref().is_some_and(|y| y.is_outside(yl)) {
                 " oo-out-h"
             } else {
@@ -759,7 +795,7 @@ fn panel(
                     None => Target::Drill(&conds),
                 }
             };
-            out.push_str("<td>");
+            let _ = write!(out, "<td data-oo-r=\"{r}\" data-oo-c=\"{c}\">");
             cell_html(out, cell, &place, target, opts);
             out.push_str("</td>");
         }

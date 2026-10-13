@@ -91,25 +91,36 @@
 .oo-cov .oo-sw { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 5px;
   font: 700 10px/1 var(--oo-font); font-style: normal; border: 1px solid transparent; }
 
-/* Axis pickers */
-.oo-cov .oo-axes { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin: 16px 0 0; }
-.oo-cov .oo-pick { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; font-weight: 500; color: var(--oo-ink-3); }
-.oo-cov .oo-pick select { appearance: none; -webkit-appearance: none; min-width: 180px; height: 32px; padding: 0 30px 0 10px;
+/* Axis headings and pickers, on the grid's own edges */
+.oo-cov .oo-cap { display: block; font: 600 10.5px/1.2 var(--oo-font); letter-spacing: .06em; text-transform: uppercase;
+  color: var(--oo-accent); margin-bottom: 5px; }
+.oo-cov .oo-pick { display: inline-flex; flex-direction: column; text-align: left; }
+.oo-cov .oo-pick select { appearance: none; -webkit-appearance: none; min-width: 150px; height: 32px; padding: 0 30px 0 10px;
   border-radius: 9px; border: 1px solid var(--oo-border); background-color: var(--oo-surface); color: var(--oo-ink);
-  font: 500 12.5px var(--oo-font); cursor: pointer; box-shadow: var(--oo-shadow);
+  font: 600 12.5px var(--oo-font); cursor: pointer; box-shadow: var(--oo-shadow);
   background-image: linear-gradient(45deg, transparent 50%, var(--oo-ink-3) 50%), linear-gradient(135deg, var(--oo-ink-3) 50%, transparent 50%);
   background-position: calc(100% - 15px) 14px, calc(100% - 10px) 14px; background-size: 5px 5px; background-repeat: no-repeat;
   transition: border-color .15s, box-shadow .15s; }
 .oo-cov .oo-pick select:hover { border-color: var(--oo-border-strong); }
 .oo-cov .oo-pick select:focus-visible { outline: none; border-color: var(--oo-accent);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--oo-accent) 25%, transparent); }
+.oo-cov .oo-yctl { display: flex; align-items: flex-end; gap: 6px; }
 .oo-cov .oo-swap { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; cursor: pointer;
   border: 1px solid var(--oo-border); background: var(--oo-surface); color: var(--oo-ink-2); box-shadow: var(--oo-shadow);
-  transition: background .15s, color .15s, transform .2s; }
+  transition: background .15s, color .15s; }
 .oo-cov .oo-swap:hover:not([disabled]) { background: var(--oo-surface-2); color: var(--oo-ink); }
-.oo-cov .oo-swap:active:not([disabled]) { transform: rotate(180deg); }
 .oo-cov .oo-swap[disabled] { opacity: .4; cursor: default; }
 .oo-cov .oo-swap:focus-visible { outline: 2px solid var(--oo-accent); outline-offset: 2px; }
+.oo-cov .oo-xhead { text-align: left; padding: 0 2px 8px; vertical-align: bottom; }
+.oo-cov .oo-xhead .oo-axis, .oo-cov .oo-corner .oo-axis { font: 600 12.5px var(--oo-font); color: var(--oo-ink); }
+/* The axis each heading runs along: a tinted rule under the column heading,
+   beside the row labels. */
+.oo-cov .oo-xhead { box-shadow: inset 0 -2px 0 color-mix(in oklab, var(--oo-accent) 35%, transparent); }
+.oo-cov tbody .oo-row { box-shadow: inset -2px 0 0 color-mix(in oklab, var(--oo-accent) 35%, transparent); }
+/* The row and column of the cell under the pointer. */
+.oo-cov .oo-grid th.oo-hl { color: var(--oo-accent); font-weight: 700; }
+.oo-cov .oo-grid th.oo-col.oo-hl { background: color-mix(in oklab, var(--oo-accent) 10%, transparent); border-radius: 6px; }
+.oo-cov .oo-grid th.oo-row.oo-hl { background: color-mix(in oklab, var(--oo-accent) 10%, var(--oo-surface)); }
 
 /* The grid */
 .oo-cov .oo-scroll { overflow: auto; margin-top: 18px; max-width: 100%; }
@@ -120,7 +131,7 @@
   text-align: right; font: 500 11.5px var(--oo-mono); }
 .oo-cov .oo-out-h { color: var(--oo-ink-3); text-decoration: line-through; text-decoration-color: var(--oo-border-strong); }
 .oo-cov .oo-corner { position: sticky; left: 0; z-index: 2; background: var(--oo-surface); text-align: left;
-  vertical-align: bottom; padding: 0 10px 6px 2px; }
+  vertical-align: bottom; padding: 0 12px 8px 2px; }
 .oo-cov .oo-axis { display: flex; align-items: center; gap: 4px; font: 600 11px var(--oo-font); color: var(--oo-ink); letter-spacing: .01em; }
 .oo-cov .oo-axis-y { color: var(--oo-ink-2); font-weight: 500; margin-bottom: 2px; }
 .oo-cov .oo-unit { font-weight: 400; color: var(--oo-ink-3); }

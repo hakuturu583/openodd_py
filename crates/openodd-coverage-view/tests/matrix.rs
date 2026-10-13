@@ -454,8 +454,14 @@ fn the_pickers_offer_the_free_attributes() {
         ..Options::default()
     };
     let html = html::fragment(&data, &m, &opts);
-    assert!(html.contains("<select data-oo-axis=\"y\" data-oo-current=\"rain\">"));
-    assert!(html.contains("<select data-oo-axis=\"x\" data-oo-current=\"speed\">"));
+    assert!(html.contains("<select data-oo-axis=\"y\" data-oo-current=\"rain\""));
+    assert!(html.contains("<select data-oo-axis=\"x\" data-oo-current=\"speed\""));
+    // Each picker heads its own axis: rows in the corner, columns above them.
+    let corner = html.find("class=\"oo-corner\"").unwrap();
+    let xhead = html.find("class=\"oo-xhead\"").unwrap();
+    assert!(corner < html.find("data-oo-axis=\"y\"").unwrap());
+    assert!(xhead < html.find("data-oo-axis=\"x\"").unwrap());
+    assert!(html.contains("<td data-oo-r=\"1\" data-oo-c=\"1\">"));
     assert!(html.contains("<option value=\"light\">light</option>"));
     assert!(html.contains("data-oo-link=\"/c?{conditions}\""));
     // Inside a cell, only the attributes left.

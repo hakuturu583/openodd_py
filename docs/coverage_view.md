@@ -46,8 +46,10 @@ A host-driven fragment only knows its conditions, not the levels they came in,
 so there each condition is a crumb of its own (*Whole ODD › rain = heavy ›
 speed = [30, 60)*); the row's condition comes before the column's.
 
-**Choosing the axes.** Above the grid, *Rows* and *Columns* pick the two
-attributes (Rows can be *None* for a single row), and ⇅ swaps them. They
+**Choosing the axes.** Each axis has its picker on its own edge of the grid:
+*Columns →* above the column labels, *Rows ↓* in the corner above the row
+labels (*None* for a single row), and ⇄ swaps them. Hovering a cell
+highlights its row and column labels. They
 offer the attributes not already clicked into. When left alone, a level lays
 out the first two of those in the ODD's order.
 

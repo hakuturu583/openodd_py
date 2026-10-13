@@ -93,6 +93,22 @@
     apply(bar);
   });
 
+  // The row and column headings of the cell under the pointer.
+  var lit = [];
+  function light(td) {
+    for (var i = 0; i < lit.length; i++) lit[i].classList.remove("oo-hl");
+    lit = [];
+    if (!td) return;
+    var grid = td.closest("table");
+    var r = td.getAttribute("data-oo-r"), c = td.getAttribute("data-oo-c");
+    var heads = grid.querySelectorAll('th[data-oo-r="' + r + '"], th[data-oo-c="' + c + '"]');
+    for (var j = 0; j < heads.length; j++) { heads[j].classList.add("oo-hl"); lit.push(heads[j]); }
+  }
+  document.addEventListener("mouseover", function (event) {
+    var td = event.target.closest && event.target.closest(".oo-cov td[data-oo-c]");
+    light(td);
+  });
+
   // Tooltip cards, from each cell's data-oo-tip.
   var tip = null, current = null;
   function el(tag, cls, text) {
