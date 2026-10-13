@@ -1,5 +1,6 @@
-/* openodd coverage view: dispatches `openodd:drill` from host-driven cells,
-   shows the explorer's panels, and draws the cells' tooltip cards.
+/* openodd coverage view and case plot: dispatches `openodd:drill` from
+   host-driven cells and `openodd:axes` from the axis pickers, shows the
+   explorers' panels, and draws the cells' and cases' tooltip cards.
    Idempotent; no dependencies. */
 (function () {
   if (window.__openoddCoverageView) return;
@@ -61,13 +62,17 @@
     var conditions = JSON.parse(bar.getAttribute("data-oo-conditions"));
     var axes = new CustomEvent("openodd:axes", {
       bubbles: true, cancelable: true,
-      detail: { conditions: conditions, x: x, y: y, root: root.id },
+      detail: {
+        conditions: conditions, x: x, y: y, root: root.id,
+        view: bar.getAttribute("data-oo-view") || "coverage",
+      },
     });
     if (!bar.dispatchEvent(axes)) return;
     var link = bar.getAttribute("data-oo-link");
     if (link) {
       var q = [bar.getAttribute("data-oo-at"), "x=" + encodeURIComponent(x), "y=" + encodeURIComponent(y)];
-      window.location.href = link.replace("{conditions}", q.filter(Boolean).join("&"));
+      q = q.filter(Boolean).join("&");
+      window.location.href = link.replace("{conditions}", q).replace("{axes}", q);
     }
   }
   document.addEventListener("change", function (event) {
@@ -110,9 +115,25 @@
     current = null;
     if (tip) tip.classList.remove("oo-show");
   }
+  // A card is on the element (data-oo-tip), or in its root's shared list
+  // (script.oo-tips), by index (data-oo-tip-i).
+  var shared = typeof WeakMap === "function" ? new WeakMap() : null;
+  function tipData(cell) {
+    if (cell.hasAttribute("data-oo-tip")) return JSON.parse(cell.getAttribute("data-oo-tip"));
+    var root = cell.closest(".oo-cov");
+    var list = shared && shared.get(root);
+    if (!list) {
+      var src = root.querySelector(":scope > script.oo-tips");
+      list = src ? JSON.parse(src.textContent) : [];
+      if (shared) shared.set(root, list);
+    }
+    return list[+cell.getAttribute("data-oo-tip-i")];
+  }
+  var TIPPED = ".oo-cov [data-oo-tip], .oo-cov [data-oo-tip-i]";
   function showTip(cell, x, y) {
     var data;
-    try { data = JSON.parse(cell.getAttribute("data-oo-tip")); } catch (e) { return; }
+    try { data = tipData(cell); } catch (e) { return; }
+    if (!data) return;
     if (!tip) {
       tip = el("div", "oo-tip");
       tip.setAttribute("role", "tooltip");
@@ -123,6 +144,7 @@
     if (theme) tip.setAttribute("data-oo-theme", theme); else tip.removeAttribute("data-oo-theme");
     if (current !== cell) {
       current = cell;
+      tip.classList.toggle("oo-tip-wide", !!data.wide);
       tip.textContent = "";
       tip.appendChild(el("div", "oo-tip-place", data.place));
       var state = el("div", "oo-tip-state");
@@ -146,11 +168,11 @@
     tip.classList.add("oo-show");
   }
   document.addEventListener("mousemove", function (event) {
-    var cell = event.target.closest && event.target.closest(".oo-cov [data-oo-tip]");
+    var cell = event.target.closest && event.target.closest(TIPPED);
     if (cell) showTip(cell, event.clientX, event.clientY); else if (current) hideTip();
   });
   document.addEventListener("focusin", function (event) {
-    var cell = event.target.closest && event.target.closest(".oo-cov [data-oo-tip]");
+    var cell = event.target.closest && event.target.closest(TIPPED);
     if (!cell) return hideTip();
     var r = cell.getBoundingClientRect();
     showTip(cell, r.right, r.bottom);

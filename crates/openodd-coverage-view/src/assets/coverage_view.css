@@ -195,3 +195,72 @@
 .oo-tip dl { display: grid; grid-template-columns: 1fr auto; gap: 2px 16px; margin: 0; }
 .oo-tip dt { color: var(--oo-ink-2); } .oo-tip dd { margin: 0; text-align: right; font-weight: 600; }
 .oo-tip .oo-tip-note { margin-top: 6px; color: var(--oo-ink-3); font-size: 11.5px; }
+.oo-tip.oo-tip-wide { max-width: min(380px, calc(100vw - 16px)); }
+.oo-tip.oo-tip-wide dd { word-break: break-word; }
+
+/* The drawn cases (case_plot): a scatter of a sweep, on the same root. */
+.oo-cov .oo-case-axes { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 14px; }
+.oo-cov .oo-case-axes .oo-pick select { max-width: min(320px, 62vw); }
+.oo-cov .oo-plot { container-type: inline-size; margin-top: 12px; }
+.oo-cov .oo-svg { display: block; width: 100%; height: auto; overflow: visible; }
+.oo-cov .oo-plot-wide { max-width: 1040px; margin: 0 auto; }
+.oo-cov .oo-plot-compact { display: none; }
+@container (max-width: 560px) {
+  .oo-cov .oo-plot-wide { display: none; }
+  .oo-cov .oo-plot-compact { display: block; }
+}
+.oo-cov .oo-frame { fill: var(--oo-surface-2); stroke: var(--oo-border); }
+.oo-cov .oo-gl { stroke: var(--oo-border-strong); stroke-width: 1; stroke-dasharray: 3 3; opacity: .7; }
+.oo-cov .oo-tk { stroke: var(--oo-border-strong); }
+.oo-cov .oo-svg text { font-family: var(--oo-font); }
+.oo-cov .oo-tl { font-size: 12px; fill: var(--oo-ink-2); font-family: var(--oo-mono); }
+.oo-cov .oo-plot-compact .oo-tl { font-size: 11.5px; }
+.oo-cov .oo-bl { font-size: 11px; fill: var(--oo-ink-3); font-family: var(--oo-mono); }
+.oo-cov .oo-plot-compact .oo-bl { font-size: 10.5px; }
+.oo-cov .oo-atitle { font-size: 12px; font-weight: 600; fill: var(--oo-ink); }
+.oo-cov .oo-lead { stroke: var(--oo-ink-3); stroke-width: 1; }
+.oo-cov .oo-lead-tag { stroke-dasharray: 2 2; }
+.oo-cov .oo-dot { fill: var(--oo-ink-3); }
+/* Marks: a filled circle passes, a cross fails, a ring is flaky. */
+.oo-cov .oo-case { cursor: default; outline: none; }
+.oo-cov .oo-case .oo-hit { fill: transparent; stroke: none; }
+.oo-cov .oo-case.oo-pass .oo-m { fill: var(--oo-pass); stroke: var(--oo-surface); stroke-width: 1.5; }
+.oo-cov .oo-case.oo-fail .oo-m { fill: none; stroke: var(--oo-fail); stroke-width: 2.6; stroke-linecap: round; }
+.oo-cov .oo-case.oo-flaky .oo-m { fill: var(--oo-flaky-fill); stroke: var(--oo-flaky); stroke-width: 3; }
+/* Chosen for instability: a dashed outline. */
+.oo-cov .oo-case .oo-inst { fill: none; stroke: var(--oo-ink-2); stroke-width: 1.2; stroke-dasharray: 2.2 1.8; }
+.oo-cov .oo-svg .oo-case:hover .oo-hit, .oo-cov .oo-svg .oo-case:focus-visible .oo-hit {
+  fill: color-mix(in oklab, var(--oo-accent) 14%, transparent); stroke: var(--oo-accent); stroke-width: 1.5; }
+.oo-cov .oo-nm { font-size: 11px; font-weight: 650; fill: var(--oo-ink-2); paint-order: stroke;
+  stroke: var(--oo-surface-2); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+.oo-cov .oo-plot-compact .oo-nm { font-size: 10.5px; }
+.oo-cov .oo-nm-flaky { fill: var(--oo-flaky-ink); }
+.oo-cov .oo-nm-fail { fill: var(--oo-fail); }
+.oo-cov .oo-key { flex: none; overflow: visible; }
+.oo-cov .oo-nm-key { font: 650 11px var(--oo-font); font-style: normal; color: var(--oo-ink-2); }
+
+/* The repeated cases' table: it scrolls in its own box rather than squash. */
+.oo-cov .oo-case-table { margin-top: 18px; }
+.oo-cov .oo-case-table h4 { margin: 0; font-size: 13.5px; font-weight: 650; }
+.oo-cov .oo-table-scroll { margin-top: 8px; border: 1px solid var(--oo-border); border-radius: 10px; }
+.oo-cov table.oo-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.oo-cov .oo-table th, .oo-cov .oo-table td { padding: 7px 12px; text-align: left; white-space: nowrap;
+  border-bottom: 1px solid var(--oo-border); vertical-align: middle; }
+.oo-cov .oo-table tbody tr:last-child > * { border-bottom: none; }
+.oo-cov .oo-table thead th { font-size: 11.5px; font-weight: 600; color: var(--oo-ink-3); background: var(--oo-surface-2); }
+.oo-cov .oo-table thead th.oo-plotted { color: var(--oo-accent); }
+.oo-cov .oo-table .oo-val { font-family: var(--oo-mono); font-size: 12px; }
+.oo-cov .oo-table td.oo-plotted { font-weight: 600; }
+.oo-cov .oo-table th:first-child { position: sticky; left: 0; z-index: 1; }
+.oo-cov .oo-table tbody th:first-child { background: var(--oo-surface); font-weight: 600; }
+.oo-cov .oo-verdict { display: inline-flex; align-items: center; gap: 6px; }
+.oo-cov .oo-row-flaky .oo-v-cell { color: var(--oo-flaky-ink); }
+.oo-cov .oo-row-fail .oo-v-cell { color: var(--oo-fail); }
+.oo-cov .oo-seq { display: inline-flex; gap: 3px; }
+.oo-cov .oo-o { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 3px; border-radius: 5px;
+  font: 700 10.5px/1 var(--oo-font); }
+.oo-cov .oo-o-pass { background: var(--oo-pass-fill); color: var(--oo-pass); }
+.oo-cov .oo-o-fail { background: var(--oo-fail-fill); color: var(--oo-fail); }
+@media (max-width: 480px) {
+  .oo-cov.oo-cases { padding: 16px 14px 14px; }
+}

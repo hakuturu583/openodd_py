@@ -969,7 +969,7 @@ pub fn page(title: &str, body: &str) -> String {
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <meta name=\"color-scheme\" content=\"light dark\"><title>{}</title>\
-         <style>:root{{color-scheme:light dark}}body{{margin:0;padding:32px;background:#f2f4f7}}@media (prefers-color-scheme:dark){{body{{background:#0b0e12}}}}</style>\
+         <style>:root{{color-scheme:light dark}}body{{margin:0;padding:32px;background:#f2f4f7}}@media (max-width:600px){{body{{padding:12px}}}}@media (prefers-color-scheme:dark){{body{{background:#0b0e12}}}}</style>\
          <style>{}</style></head><body>{}<script>{}</script></body></html>\n",
         escape(title),
         styles(),

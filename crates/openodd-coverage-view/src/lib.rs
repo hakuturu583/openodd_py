@@ -9,6 +9,10 @@
 //! * [`html`] renders it: a fragment for a host page (host-driven drill-down),
 //!   or a self-contained explorer with the levels below rendered ahead of
 //!   time; plus the scoped CSS and the small script they need.
+//! * [`cases`] reads the drawn cases of a sweep (each run's `case`) and
+//!   groups the runs of each; [`case_plot`] renders them as a scatter over
+//!   any two attributes, with a table of the cases run more than once, on
+//!   the same styles and script.
 //!
 //! The crate has no I/O and no framework: the host gives it parsed JSON and
 //! gets strings back (or [`matrix::Matrix::to_json`] to draw it its own way).
@@ -22,10 +26,13 @@
 //! assert!(fragment.contains("oo-cov"));
 //! ```
 
+pub mod case_plot;
+pub mod cases;
 pub mod data;
 pub mod html;
 pub mod matrix;
 pub mod stats;
 
+pub use cases::{CaseQuery, CaseSet, Plot, Verdict};
 pub use data::Dataset;
 pub use matrix::{Cell, CellState, Matrix, Query};
