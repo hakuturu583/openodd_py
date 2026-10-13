@@ -20,12 +20,18 @@ Each cell is a pair of their buckets, and holds the runs that spent time there:
 | white | **not sampled**: no run was in it |
 | hatched | **covered, no outcome**: only runs that recorded no outcome were in it |
 
-A cell shows its failure rate and `failed/runs`. "⚠ n" counts the runs that
+A cell shows its failure rate and `failed/runs`. The red "● n" badge counts the runs that
 were in the cell *when they failed* (`outcome.failed_cell`, recorded by
 `record_outcome(failed_at=...)`). A run's verdict is the whole run's, so a run
 that failed elsewhere still counts as failed in every cell it drove through.
-That is why a slow cell can be red with no ⚠: the runs that drove through it
+That is why a slow cell can be red with no badge: the runs that drove through it
 all failed, but later, somewhere else.
+
+Each state also has an icon (✓ passes, ✕ fails, ∿ flaky, ⊘ outside), so colour
+never says it alone. Hovering (or focusing) a cell shows a card with its runs,
+failures, failures in it, failure rate, interval and time. The header sums up
+the level: its runs, how much of the ODD they covered, and how many cells are
+flaky or failing, with a bar showing the share of cells in each state.
 
 A **dashed outline** marks a cell with too little evidence to judge. That is
 fewer than `min_runs` runs, or both outcomes but a 95% Wilson interval reaching

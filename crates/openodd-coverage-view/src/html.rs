@@ -54,6 +54,14 @@ pub struct Labels {
     pub no_attributes: String,
     pub unsampled_documents: String,
     pub click_hint: String,
+    pub coverage: String,
+    pub cells: String,
+    pub flaky_cells: String,
+    pub failing_cells: String,
+    pub reached: String,
+    pub here: String,
+    pub time: String,
+    pub of_cells: String,
 }
 
 impl Labels {
@@ -84,6 +92,14 @@ impl Labels {
             "no_attributes" => &mut self.no_attributes,
             "unsampled_documents" => &mut self.unsampled_documents,
             "click_hint" => &mut self.click_hint,
+            "coverage" => &mut self.coverage,
+            "cells" => &mut self.cells,
+            "flaky_cells" => &mut self.flaky_cells,
+            "failing_cells" => &mut self.failing_cells,
+            "reached" => &mut self.reached,
+            "here" => &mut self.here,
+            "time" => &mut self.time,
+            "of_cells" => &mut self.of_cells,
             _ => return false,
         };
         *slot = value.to_string();
@@ -97,14 +113,14 @@ impl Default for Labels {
         Labels {
             title: s("ODD coverage"),
             whole: s("Whole ODD"),
-            runs: s("runs"),
-            failed: s("failed"),
-            failed_here: s("failed here"),
-            fail_rate: s("fail rate"),
+            runs: s("Runs"),
+            failed: s("Failed"),
+            failed_here: s("Failed here"),
+            fail_rate: s("Fail rate"),
             interval: s("95% interval"),
             seconds: s("s"),
-            no_runs: s("no run"),
-            tentative: s("too few runs to tell"),
+            no_runs: s("none"),
+            tentative: s("Too few runs to tell"),
             state_flaky: s("Flaky: both outcomes"),
             state_fail: s("Fails"),
             state_pass: s("Passes"),
@@ -114,13 +130,21 @@ impl Default for Labels {
             below: s("below range"),
             above: s("above range"),
             missing: s("no value"),
-            runs_without_outcome: s("runs without an outcome"),
+            runs_without_outcome: s("Runs without an outcome"),
             pooled_environments: s(
                 "Runs of different environments are pooled here; select one to tell flakiness from regressions.",
             ),
             no_attributes: s("No ODD attribute with cells to lay out."),
             unsampled_documents: s("coverage files without ODD cells are not shown"),
-            click_hint: s("click a cell to look inside it"),
+            click_hint: s("Click a cell to look inside it"),
+            coverage: s("ODD covered"),
+            cells: s("cells"),
+            flaky_cells: s("Flaky cells"),
+            failing_cells: s("Failing cells"),
+            reached: s("reached"),
+            here: s("here"),
+            time: s("Time in it"),
+            of_cells: s("of {n} cells"),
         }
     }
 }
@@ -222,43 +246,66 @@ fn state_label(state: CellState, labels: &Labels) -> &str {
     }
 }
 
-/// The tooltip of a cell.
-fn cell_title(c: &Cell, place: &str, labels: &Labels) -> String {
-    let mut t = format!("{place}: {}", state_label(c.state, labels));
+/// A cell's tooltip: a plain-text summary (its accessible name) and the
+/// rows the script shows in its tooltip card (`data-oo-tip`).
+fn cell_tip(c: &Cell, place: &str, labels: &Labels) -> (String, String) {
+    let mut state = state_label(c.state, labels).to_string();
     if c.outside && c.visited() {
-        // Outside the ODD but reached: say what the runs did there too.
-        t += " (reached)";
+        let _ = write!(state, " ({})", labels.reached);
     }
+    let mut rows: Vec<(String, String)> = Vec::new();
     if c.runs > 0 {
         let (lo, hi) = c.interval().unwrap_or((0.0, 1.0));
-        let _ = write!(
-            t,
-            " - {} {}, {} {}, {} {}; {} {} ({} {}-{})",
-            c.runs,
-            labels.runs,
-            c.failed,
-            labels.failed,
-            c.fail_at_cell,
-            labels.failed_here,
-            labels.fail_rate,
-            pct(c.fail_rate().unwrap_or(0.0)),
-            labels.interval,
-            pct(lo),
-            pct(hi)
-        );
-        if c.tentative {
-            let _ = write!(t, "; {}", labels.tentative);
-        }
+        rows.push((labels.runs.clone(), c.runs.to_string()));
+        rows.push((labels.failed.clone(), c.failed.to_string()));
+        rows.push((labels.failed_here.clone(), c.fail_at_cell.to_string()));
+        rows.push((labels.fail_rate.clone(), pct(c.fail_rate().unwrap_or(0.0))));
+        rows.push((
+            labels.interval.clone(),
+            format!("{} \u{2013} {}", pct(lo), pct(hi)),
+        ));
     } else if !c.visited() {
-        let _ = write!(t, " - {}", labels.no_runs);
+        rows.push((labels.runs.clone(), labels.no_runs.clone()));
     }
     if c.runs_unknown > 0 {
-        let _ = write!(t, "; {} {}", c.runs_unknown, labels.runs_without_outcome);
+        rows.push((
+            labels.runs_without_outcome.clone(),
+            c.runs_unknown.to_string(),
+        ));
     }
     if c.seconds > 0.0 {
-        let _ = write!(t, "; {:.1} {}", c.seconds, labels.seconds);
+        rows.push((
+            labels.time.clone(),
+            format!("{:.1} {}", c.seconds, labels.seconds),
+        ));
     }
-    t
+    let mut text = format!("{place}: {state}");
+    for (k, v) in &rows {
+        let _ = write!(text, ", {k} {v}");
+    }
+    if c.tentative {
+        let _ = write!(text, " ({})", labels.tentative);
+    }
+    let tip = serde_json::json!({
+        "place": place,
+        "state": state,
+        "kind": c.state.as_str(),
+        "tentative": if c.tentative { Some(&labels.tentative) } else { None },
+        "rows": rows,
+    });
+    (text, tip.to_string())
+}
+
+/// The icon of a state: what says it besides the colour.
+fn state_icon(state: CellState) -> &'static str {
+    match state {
+        CellState::Pass => "\u{2713}",
+        CellState::Fail => "\u{2715}",
+        CellState::Flaky => "\u{223F}",
+        CellState::Unknown => "?",
+        CellState::Outside => "\u{2298}",
+        CellState::Unsampled => "",
+    }
 }
 
 /// What a click on a cell (or crumb) does: its attributes.
@@ -302,16 +349,25 @@ fn cell_html(out: &mut String, c: &Cell, place: &str, target: Target, opts: &Opt
     } else {
         ""
     };
+    let (text, tip) = cell_tip(c, place, labels);
     let _ = write!(
         out,
-        "<{tag}{tag_attrs} class=\"{class}\" title=\"{}\"{attrs}>",
-        escape(&cell_title(c, place, labels))
+        "<{tag}{tag_attrs} class=\"{class}\" aria-label=\"{}\" data-oo-tip=\"{}\"{attrs}>",
+        escape(&text),
+        escape(&tip)
     );
+    let icon = state_icon(c.state);
+    if !icon.is_empty() {
+        let _ = write!(
+            out,
+            "<span class=\"oo-ic\" aria-hidden=\"true\">{icon}</span>"
+        );
+    }
     match c.fail_rate() {
         Some(rate) => {
             let _ = write!(
                 out,
-                "<span class=\"oo-rate\">{}</span><span class=\"oo-n\">{}/{}</span>",
+                "<span class=\"oo-rate\">{}</span><span class=\"oo-n\">{} / {}</span>",
                 pct(rate),
                 c.failed,
                 c.runs
@@ -319,8 +375,7 @@ fn cell_html(out: &mut String, c: &Cell, place: &str, target: Target, opts: &Opt
             if c.fail_at_cell > 0 {
                 let _ = write!(
                     out,
-                    "<span class=\"oo-here\" aria-label=\"{}\">&#9888; {}</span>",
-                    escape(&labels.failed_here),
+                    "<span class=\"oo-badge\" aria-hidden=\"true\">{}</span>",
                     c.fail_at_cell
                 );
             }
@@ -332,7 +387,7 @@ fn cell_html(out: &mut String, c: &Cell, place: &str, target: Target, opts: &Opt
                 c.runs_unknown
             );
         }
-        None => out.push_str("<span class=\"oo-rate\">&nbsp;</span>"),
+        None => {}
     }
     let _ = write!(out, "</{tag}>");
 }
@@ -412,15 +467,59 @@ fn panel(
             "<{tag}{tag_attrs} class=\"oo-crumb\"{attrs}>{text}</{tag}>"
         );
     }
+    out.push_str("</nav>");
     let t = &m.total;
-    let _ = write!(
+    let counts = m.counts();
+    let inside: usize = m.cells.iter().flatten().filter(|c| !c.outside).count();
+    let covered: usize = m
+        .cells
+        .iter()
+        .flatten()
+        .filter(|c| !c.outside && c.visited())
+        .count();
+    let stat = |out: &mut String, key: &str, value: String, sub: String, kind: &str| {
+        let _ = write!(
+            out,
+            "<div class=\"oo-stat oo-stat-{kind}\"><span class=\"oo-k\">{}</span>\
+             <span class=\"oo-v\">{value}</span><span class=\"oo-s\">{sub}</span></div>",
+            escape(key)
+        );
+    };
+    out.push_str("<div class=\"oo-stats\">");
+    stat(
         out,
-        "<span class=\"oo-total\">{} {}, {} {}</span></nav>",
-        t.runs + t.runs_unknown,
-        labels.runs,
-        t.failed,
-        labels.failed
+        &labels.runs,
+        (t.runs + t.runs_unknown).to_string(),
+        format!("{} {}", t.failed, escape(&labels.failed.to_lowercase())),
+        "runs",
     );
+    stat(
+        out,
+        &labels.coverage,
+        if inside == 0 {
+            "&ndash;".into()
+        } else {
+            pct(covered as f64 / inside as f64)
+        },
+        format!("{covered} / {inside} {}", escape(&labels.cells)),
+        "coverage",
+    );
+    let of_cells = escape(&labels.of_cells.replace("{n}", &covered.to_string()));
+    stat(
+        out,
+        &labels.flaky_cells,
+        counts["flaky"].to_string(),
+        of_cells.clone(),
+        "flaky",
+    );
+    stat(
+        out,
+        &labels.failing_cells,
+        counts["fail"].to_string(),
+        of_cells,
+        "fail",
+    );
+    out.push_str("</div>");
     if m.environments.len() > 1 {
         let _ = write!(
             out,
@@ -428,32 +527,50 @@ fn panel(
             escape(&labels.pooled_environments)
         );
     }
-    // Legend, with how many cells are in each state.
-    out.push_str("<div class=\"oo-legend\">");
-    let counts = m.counts();
-    for state in [
+    // How the cells split by state, then the legend with each count.
+    let states = [
         CellState::Flaky,
         CellState::Fail,
         CellState::Pass,
         CellState::Unknown,
         CellState::Unsampled,
         CellState::Outside,
-    ] {
+    ];
+    let all: usize = counts.values().sum();
+    if all > 0 {
+        out.push_str("<div class=\"oo-bar\" aria-hidden=\"true\">");
+        for state in states {
+            let n = counts[state.as_str()];
+            if n > 0 {
+                let _ = write!(
+                    out,
+                    "<span class=\"oo-{}\" style=\"flex-grow:{n}\"></span>",
+                    state.as_str()
+                );
+            }
+        }
+        out.push_str("</div>");
+    }
+    out.push_str("<div class=\"oo-legend\">");
+    for state in states {
         let n = counts[state.as_str()];
         if n == 0 && matches!(state, CellState::Unknown) {
             continue;
         }
         let _ = write!(
             out,
-            "<span><i class=\"oo-sw oo-{}\"></i>{} <b>{n}</b></span>",
+            "<span class=\"oo-chip\"><i class=\"oo-sw oo-{}\">{}</i>{}<b>{n}</b></span>",
             state.as_str(),
+            state_icon(state),
             escape(state_label(state, labels))
         );
     }
     let _ = write!(
         out,
-        "<span><i class=\"oo-sw oo-pass oo-tentative\"></i>{}</span></div>",
-        escape(&labels.tentative)
+        "<span class=\"oo-chip\"><i class=\"oo-sw oo-pass oo-tentative\"></i>{}</span>\
+         <span class=\"oo-chip\"><i class=\"oo-badge oo-badge-key\">n</i>{}</span></div>",
+        escape(&labels.tentative),
+        escape(&labels.failed_here)
     );
 
     let Some(x) = &m.x else {
@@ -471,14 +588,14 @@ fn panel(
     if let Some(y) = &m.y {
         let _ = write!(
             out,
-            "<span class=\"oo-axis\">{}{} &darr;</span>",
+            "<span class=\"oo-axis oo-axis-y\">{}{} &darr;</span>",
             escape(&y.name),
             unit(&y.unit)
         );
     }
     let _ = write!(
         out,
-        "<span class=\"oo-axis\">{}{} &rarr;</span></th>",
+        "<span class=\"oo-axis oo-axis-x\">{}{} &rarr;</span></th>",
         escape(&x.name),
         unit(&x.unit)
     );
@@ -543,14 +660,14 @@ fn unit(u: &str) -> String {
     if u.is_empty() {
         String::new()
     } else {
-        format!(" [{}]", escape(u))
+        format!(" <span class=\"oo-unit\">{}</span>", escape(u))
     }
 }
 
 fn open_root(out: &mut String, opts: &Options, mode: &str) {
     let _ = write!(
         out,
-        "<div class=\"oo-cov\" id=\"{}\" data-oo-mode=\"{mode}\"><div class=\"oo-head\"><h3>{}</h3><span class=\"oo-hint\">{}</span></div>",
+        "<div class=\"oo-cov\" id=\"{}\" data-oo-mode=\"{mode}\"><div class=\"oo-head\"><h3>{}</h3><p class=\"oo-hint\">{}</p></div>",
         escape(opts.root_id()),
         escape(&opts.labels.title),
         escape(&opts.labels.click_hint)
@@ -638,7 +755,7 @@ pub fn page(title: &str, body: &str) -> String {
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <meta name=\"color-scheme\" content=\"light dark\"><title>{}</title>\
-         <style>:root{{color-scheme:light dark}}body{{margin:0;padding:16px;background:Canvas;color:CanvasText}}</style>\
+         <style>:root{{color-scheme:light dark}}body{{margin:0;padding:32px;background:#f2f4f7}}@media (prefers-color-scheme:dark){{body{{background:#0b0e12}}}}</style>\
          <style>{}</style></head><body>{}<script>{}</script></body></html>\n",
         escape(title),
         styles(),

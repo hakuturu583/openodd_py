@@ -18,7 +18,7 @@ attributes out inside it. Each cell is coloured by what its runs did:
 | hatched | `unknown` | only runs without an outcome were in it |
 
 A dashed outline marks a cell with too few runs to judge, by the same
-thresholds as openodd's per-cell report (`stats`). "⚠ n" counts the runs
+thresholds as openodd's per-cell report (`stats`). The red "● n" badge counts the runs
 that were in the cell when they failed.
 
 ```rust
