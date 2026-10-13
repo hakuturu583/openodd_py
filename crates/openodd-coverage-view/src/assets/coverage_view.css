@@ -348,3 +348,48 @@
 @media (max-width: 480px) {
   .oo-cov.oo-cases { padding: 16px 14px 14px; }
 }
+
+/* The basis toggle: drawn / measured, next to the axis pickers. */
+.oo-cov .oo-basis { display: inline-flex; border: 1px solid var(--oo-border); border-radius: 999px; padding: 2px;
+  background: var(--oo-surface-2); }
+.oo-cov .oo-basis button { font: 600 12px var(--oo-font); color: var(--oo-ink-2); background: transparent; border: 0;
+  border-radius: 999px; padding: 4px 12px; cursor: pointer; }
+.oo-cov .oo-basis button[aria-pressed="true"] { background: var(--oo-surface); color: var(--oo-ink);
+  box-shadow: var(--oo-shadow); }
+.oo-cov .oo-basis button:focus-visible { outline: 2px solid var(--oo-accent); outline-offset: 1px; }
+/* A mark's line to its value on the other basis. */
+.oo-cov .oo-drift-lead { stroke: var(--oo-accent); stroke-width: 1.2; stroke-opacity: .7; }
+.oo-cov .oo-drift-dot { fill: var(--oo-surface); stroke: var(--oo-accent); stroke-width: 1.2; }
+
+/* The scenario's realisation (drift). */
+.oo-cov .oo-drift-summary .oo-bad, .oo-cov .oo-drift-stats .oo-bad { color: var(--oo-fail); font-weight: 700; }
+.oo-cov .oo-drift-summary a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--oo-ink-3); }
+.oo-cov .oo-drift-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: 16px; margin-top: 14px; }
+.oo-cov .oo-drift-card { min-width: 0; border: 1px solid var(--oo-border); border-radius: 12px; padding: 12px 14px;
+  background: var(--oo-surface); }
+.oo-cov .oo-drift-card h4 { margin: 0 0 6px; font: 600 12.5px var(--oo-mono); word-break: break-all; }
+.oo-cov .oo-drift-svg { max-width: 520px; margin: 0 auto; }
+.oo-cov .oo-identity { stroke: var(--oo-ink-3); stroke-width: 1.2; stroke-dasharray: 5 4; }
+.oo-cov .oo-identity-label { font-size: 10.5px; fill: var(--oo-ink-3); }
+.oo-cov .oo-fit { stroke: var(--oo-accent); stroke-width: 1.6; stroke-opacity: .8; }
+.oo-cov .oo-drift-miss { fill: none; stroke: var(--oo-flaky); stroke-width: 2; }
+.oo-cov .oo-drift-stats { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 8px 0 0; font-size: 12px; color: var(--oo-ink-2); }
+.oo-cov .oo-drift-stats b { color: var(--oo-ink); font-weight: 650; }
+.oo-cov .oo-drift-key { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12px; color: var(--oo-ink-2); }
+.oo-cov .oo-calib { margin-top: 8px; font-size: 12px; }
+.oo-cov .oo-calib p { margin: 2px 0 0; }
+.oo-cov .oo-calib-fit { color: var(--oo-ink-2); font-family: var(--oo-mono); font-size: 11.5px; }
+.oo-cov .oo-calib-fit b { font-family: var(--oo-font); color: var(--oo-ink); margin-right: 4px; }
+.oo-cov .oo-calib-suggest { color: var(--oo-ink); padding: 6px 10px; border-radius: 8px;
+  background: color-mix(in oklab, var(--oo-accent) 10%, var(--oo-surface)); }
+.oo-cov .oo-calib-ok { color: var(--oo-pass); }
+.oo-cov .oo-calib-no { color: var(--oo-ink-2); }
+.oo-cov .oo-agree { width: 100%; }
+.oo-cov .oo-agree th, .oo-cov .oo-agree td { padding: 6px 8px; }
+.oo-cov .oo-agree thead th { text-align: center; }
+.oo-cov .oo-agree thead th:first-child { white-space: normal; min-width: 5.5em; max-width: 7.5em; text-align: left;
+  font-size: 10.5px; line-height: 1.25; }
+.oo-cov .oo-agree td { text-align: center; font-family: var(--oo-mono); }
+.oo-cov .oo-agree td.oo-diag { background: var(--oo-pass-fill); }
+.oo-cov .oo-agree td.oo-off { background: var(--oo-fail-fill); font-weight: 700; }

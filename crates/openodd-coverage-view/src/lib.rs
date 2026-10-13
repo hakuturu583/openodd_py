@@ -30,6 +30,7 @@
 pub mod case_plot;
 pub mod cases;
 pub mod data;
+pub mod drift;
 pub mod html;
 pub mod matrix;
 pub mod prediction;

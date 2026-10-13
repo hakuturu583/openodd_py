@@ -77,8 +77,19 @@ pub fn case_options(raw: &str) -> Result<case_plot::Options, String> {
         link: text(&opts, "link"),
         table: flag(&opts, "table", true),
         instability_rings: flag(&opts, "instability_rings", false),
+        drift_leaders: flag(&opts, "drift_leaders", false),
         ..Default::default()
     };
+    if let Some(map) = opts.get("knobs").and_then(Json::as_object) {
+        for (k, v) in map {
+            let pair = v
+                .as_array()
+                .filter(|p| p.len() == 2)
+                .and_then(|p| Some((p[0].as_f64()?, p[1].as_f64()?)))
+                .ok_or(format!("knob {k}: [scale, offset]"))?;
+            out.knobs.insert(k.clone(), pair);
+        }
+    }
     for (k, v) in labels(&opts)? {
         if !out.labels.set(&k, &v) {
             return Err(format!("no such label: {k}"));
@@ -108,7 +119,8 @@ pub struct Viewer {
     coverage: Dataset,
     cases: CaseSet,
     documents: Vec<Json>,
-    /// The flaky models, by the selection of runs (scenario, environment):
+    /// The flaky models, by the selection of runs (scenario, environment,
+    /// basis and its window):
     /// each keeps its grids (by pair, either way round, and detail) and the
     /// cases' pass probabilities.
     models: RefCell<HashMap<String, CasePredictor>>,
@@ -136,7 +148,13 @@ impl Viewer {
     /// pass probability only (what the colour needs: far cheaper);
     /// [`CasePredictor::grid_with`] gives the full metrics.
     fn with_model<T>(&self, query: &CaseQuery, f: impl FnOnce(&CasePredictor) -> T) -> T {
-        let key = json!([query.scenario, query.environment]).to_string();
+        let key = json!([
+            query.scenario,
+            query.environment,
+            query.basis.as_str(),
+            query.window()
+        ])
+        .to_string();
         let mut models = self.models.borrow_mut();
         let model = models
             .entry(key)
@@ -170,6 +188,17 @@ impl Viewer {
         Ok(self.with_model(&q, |m| {
             case_plot::fragment_with(&self.cases, &plot, &opts, Some(m as &dyn Predictor))
         }))
+    }
+
+    pub fn drift_html_str(&self, query: &str, options: &str) -> Result<String, String> {
+        let q = CaseQuery::from_json(&parse(query, "query")?)?;
+        Ok(case_plot::drift(&self.cases, &q, &case_options(options)?))
+    }
+
+    pub fn drift_json_str(&self, query: &str, options: &str) -> Result<String, String> {
+        let q = CaseQuery::from_json(&parse(query, "query")?)?;
+        let opts = case_options(options)?;
+        Ok(self.cases.drift(&q).to_json_with(&opts.knobs).to_string())
     }
 
     pub fn cases_json_str(&self, query: &str, prediction: bool) -> Result<String, String> {
@@ -268,6 +297,19 @@ impl Viewer {
     /// unless `options.prediction` is false.
     pub fn cases_html(&self, query_json: &str, options_json: &str) -> Result<String, JsError> {
         self.cases_html_str(query_json, options_json).map_err(js)
+    }
+
+    /// The scenario's realisation: drawn against measured, per attribute,
+    /// with the knob calibration it suggests (`options.knobs`:
+    /// `{attribute: [scale, offset]}` adds the corrected knob).
+    pub fn drift_html(&self, query_json: &str, options_json: &str) -> Result<String, JsError> {
+        self.drift_html_str(query_json, options_json).map_err(js)
+    }
+
+    /// The drift as JSON (per attribute: runs, summary, fit, calibration;
+    /// with `options.knobs`, the suggested calibration's corrected knob).
+    pub fn drift_json(&self, query_json: &str, options_json: &str) -> Result<String, JsError> {
+        self.drift_json_str(query_json, options_json).map_err(js)
     }
 
     /// The case plot as JSON, with the prediction grid (`prediction`) and

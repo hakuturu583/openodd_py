@@ -9,6 +9,7 @@
 //   const viewer = new Viewer(JSON.stringify(documents));
 //   const plot = mount(viewer, el, { view: "cases", x: "speed", y: "gap" });
 //   plot.set({ y: "rain" });                     // or let the pickers do it
+//   mount(viewer, el2, { view: "drift" });       // the scenario's realisation
 //
 // No dependencies; every number is computed in WebAssembly.
 
@@ -37,9 +38,10 @@ export function install({ styles, script }) {
  * state and the time it took (`detail.ms`).
  */
 export function mount(viewer, el, options = {}) {
-  const view = options.view === "coverage" ? "coverage" : "cases";
-  const queryKeys = ["x", "y", "conditions", "scenario", "environment", "min_runs", "band", "min_seconds"];
-  const optionKeys = ["id", "labels", "table", "prediction", "instability_rings"];
+  const view = ["coverage", "drift"].includes(options.view) ? options.view : "cases";
+  const queryKeys = ["x", "y", "conditions", "scenario", "environment", "min_runs", "band", "min_seconds",
+    "basis", "measured_at"];
+  const optionKeys = ["id", "labels", "table", "prediction", "instability_rings", "drift_leaders", "knobs"];
   const state = {};
   for (const k of queryKeys) if (options[k] !== undefined) state[k] = options[k];
   const opts = {};
@@ -49,9 +51,10 @@ export function mount(viewer, el, options = {}) {
   function render() {
     const t0 = performance.now();
     const query = JSON.stringify(state);
-    el.innerHTML = view === "cases"
-      ? viewer.cases_html(query, JSON.stringify(opts))
-      : viewer.coverage_html(query, JSON.stringify(opts));
+    const o = JSON.stringify(opts);
+    el.innerHTML = view === "cases" ? viewer.cases_html(query, o)
+      : view === "drift" ? viewer.drift_html(query, o)
+      : viewer.coverage_html(query, o);
     const ms = performance.now() - t0;
     el.dispatchEvent(new CustomEvent("openodd:rendered", { detail: { view, state: { ...state }, ms } }));
     return ms;
@@ -64,6 +67,7 @@ export function mount(viewer, el, options = {}) {
     event.preventDefault();               // render here instead of following a link
     state.x = d.x;
     state.y = d.y;
+    if (d.basis) state.basis = d.basis;  // the case plot's drawn / measured toggle
     if (view === "coverage") state.conditions = d.conditions || [];
     render();
   }

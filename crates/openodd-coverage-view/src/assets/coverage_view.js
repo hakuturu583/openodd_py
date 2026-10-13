@@ -49,12 +49,15 @@
     s.x.value = s.x.getAttribute("data-oo-current");
     s.y.value = s.y.getAttribute("data-oo-current");
   }
-  function apply(bar) {
+  function apply(bar, basis) {
     var root = bar.closest(".oo-cov");
     var s = picks(bar), x = s.x.value, y = s.y.value;
+    // A case plot with measured values has a basis too (drawn / measured).
+    var hasBasis = bar.hasAttribute("data-oo-basis-current");
+    if (hasBasis && !basis) basis = bar.getAttribute("data-oo-basis-current");
     var map = bar.getAttribute("data-oo-map");
     if (map) {
-      var id = JSON.parse(map)[x + SEP + y];
+      var id = JSON.parse(map)[x + SEP + y + (hasBasis ? SEP + basis : "")];
       reset(bar); // this panel keeps showing its own pair
       if (id) show(root, id);
       return;
@@ -65,16 +68,25 @@
       detail: {
         conditions: conditions, x: x, y: y, root: root.id,
         view: bar.getAttribute("data-oo-view") || "coverage",
+        basis: hasBasis ? basis : undefined,
       },
     });
     if (!bar.dispatchEvent(axes)) return;
     var link = bar.getAttribute("data-oo-link");
     if (link) {
-      var q = [bar.getAttribute("data-oo-at"), "x=" + encodeURIComponent(x), "y=" + encodeURIComponent(y)];
+      var q = [bar.getAttribute("data-oo-at"), "x=" + encodeURIComponent(x), "y=" + encodeURIComponent(y),
+        hasBasis ? "basis=" + encodeURIComponent(basis) : ""];
       q = q.filter(Boolean).join("&");
       window.location.href = link.split("{conditions}").join(q).split("{axes}").join(q);
     }
   }
+  // The basis toggle: show (or ask for) the same axes on the other basis.
+  document.addEventListener("click", function (event) {
+    var btn = event.target.closest && event.target.closest(".oo-cov .oo-basis button[data-oo-basis]");
+    if (!btn || btn.getAttribute("aria-pressed") === "true") return;
+    var bar = btn.closest(".oo-axes");
+    if (bar) apply(bar, btn.getAttribute("data-oo-basis"));
+  });
   document.addEventListener("change", function (event) {
     var sel = event.target;
     if (!sel.matches || !sel.matches(".oo-axes select")) return;

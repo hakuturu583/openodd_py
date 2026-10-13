@@ -123,6 +123,36 @@ pub trait Predictor {
     }
 }
 
+/// One predictor per basis: the drawn values' model and the measured
+/// values' (each fitted on its own coordinates); a plot or a case is served
+/// by the one of its basis.
+pub struct ByBasis<'a> {
+    pub drawn: Option<&'a dyn Predictor>,
+    pub measured: Option<&'a dyn Predictor>,
+}
+
+impl ByBasis<'_> {
+    fn of(&self, basis: crate::cases::Basis) -> Option<&dyn Predictor> {
+        match basis {
+            crate::cases::Basis::Drawn => self.drawn,
+            crate::cases::Basis::Measured => self.measured,
+        }
+    }
+}
+
+impl Predictor for ByBasis<'_> {
+    fn grid(&self, plot: &Plot) -> Result<Grid, String> {
+        match self.of(plot.query.basis) {
+            Some(p) => p.grid(plot),
+            None => Err(String::new()),
+        }
+    }
+
+    fn pass_probability(&self, case: &Case) -> Option<f64> {
+        self.of(case.basis)?.pass_probability(case)
+    }
+}
+
 /// Grids computed ahead of time, by their axes, and the cases' pass
 /// probabilities by case key: a predictor for a host that has the data.
 #[derive(Debug, Clone, PartialEq, Default)]

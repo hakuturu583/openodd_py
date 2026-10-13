@@ -1,7 +1,7 @@
 //! The case plot over synthetic coverage documents, and its HTML.
 
 use openodd_coverage_view::case_plot::{self, Options};
-use openodd_coverage_view::cases::{AxisKind, CaseQuery, CaseSet, Verdict};
+use openodd_coverage_view::cases::{AxisKind, Basis, CaseQuery, CaseSet, Verdict};
 use openodd_coverage_view::html::MAX_AXIS_PAIRS;
 use openodd_coverage_view::prediction::{Grid, GridAxis, Precomputed, Predicted};
 use serde_json::{json, Value as Json};
@@ -443,4 +443,93 @@ fn the_card_shrinks_with_its_container() {
     assert!(css.contains(".oo-cov.oo-cases { min-width: 0; max-width: 100%; }"));
     let scroll = &css[css.find(".oo-cov .oo-table-scroll {").unwrap()..];
     assert!(scroll[..scroll.find('}').unwrap()].contains("container-type: inline-size"));
+}
+
+/// The documents, each with what its probes measured: the gap 2 m longer
+/// than drawn (from t = 0.05 s), the speed and rain as drawn.
+fn measured_docs() -> Vec<Json> {
+    docs()
+        .into_iter()
+        .map(|mut d| {
+            if let Some(case) = d.get("case").filter(|c| c.is_object()).cloned() {
+                let v = &case["values"];
+                let gap = v["gap"].as_f64().unwrap() + 2.0;
+                d["odd"] = json!({"samples": {
+                    "attributes": [{"name": "gap"}, {"name": "speed"}, {"name": "rain"}],
+                    "rows": [[0.05, 0, 0, gap, v["speed"], v["rain"]],
+                             [0.10, 0, 0, gap - 0.5, v["speed"], v["rain"]]],
+                }});
+            }
+            d
+        })
+        .collect()
+}
+
+#[test]
+fn the_measured_basis_places_the_cases_where_they_were_staged() {
+    let set = CaseSet::from_documents(&measured_docs());
+    let q = |basis| CaseQuery {
+        x: Some("gap".into()),
+        y: Some("speed".into()),
+        basis,
+        ..Default::default()
+    };
+    let drawn = set.plot(&q(Basis::Drawn));
+    let measured = set.plot(&q(Basis::Measured));
+    for (d, m) in drawn.cases.iter().zip(&measured.cases) {
+        let (dg, mg) = (d.number("gap").unwrap(), m.number("gap").unwrap());
+        assert!((mg - dg - 2.0).abs() < 1e-9);
+        assert_eq!(m.other["gap"], d.values["gap"]);
+    }
+    // The axes span both bases, so they do not move when the basis does.
+    assert_eq!(
+        drawn.x.as_ref().unwrap().domain(),
+        measured.x.as_ref().unwrap().domain()
+    );
+    assert_eq!(measured.to_json()["basis"], "measured");
+    let opts = Options {
+        drift_leaders: true,
+        ..Default::default()
+    };
+    let html = case_plot::fragment(&set, &drawn, &opts);
+    assert!(
+        html.contains("data-oo-basis-current=\"drawn\"")
+            && html.contains("class=\"oo-drift-lead\"")
+    );
+    assert!(case_plot::fragment(&set, &measured, &Options::default())
+        .contains("Placed by measured values"));
+    // The explorer holds every pair on both bases.
+    let ex = case_plot::explorer(&set, &q(Basis::Drawn), &Options::default());
+    assert!(ex.contains("\\u001fmeasured") || ex.contains("\u{1f}measured"));
+    // A window before the first sample measures nothing.
+    let none = set.plot(&CaseQuery {
+        measured_at: Some(0.01),
+        ..q(Basis::Measured)
+    });
+    assert!(none.cases.is_empty());
+    assert!(CaseQuery::from_json(&json!({"basis": "aimed"})).is_err());
+    assert!(CaseQuery::from_json(&json!({"measured_at": 99})).is_err());
+}
+
+#[test]
+fn the_drift_view_says_what_to_recalibrate() {
+    let set = CaseSet::from_documents(&measured_docs());
+    let d = set.drift(&CaseQuery::default());
+    assert_eq!(d.runs, 8);
+    let gap = d.attributes.iter().find(|a| a.name() == "gap").unwrap();
+    let s = gap.summary();
+    assert!((s.bias.unwrap() - 2.0).abs() < 1e-9 && s.shifted == Some(1.0));
+    let mut opts = Options::default();
+    opts.knobs.insert("gap".into(), (1.0, 11.0));
+    let html = case_plot::drift(&set, &CaseQuery::default(), &opts);
+    assert!(html.contains("Scenario realisation") && html.contains("oo-drift-summary"));
+    assert!(html.contains("offset 9.000"), "{html}");
+    // Categorical: the agreement table; nothing measured, a note.
+    assert!(html.contains("oo-agree"));
+    let bare = CaseSet::from_documents(&docs());
+    assert!(
+        case_plot::drift(&bare, &CaseQuery::default(), &Options::default())
+            .contains("No run recorded measured values")
+    );
+    assert_eq!(d.to_json()["attributes"][0]["kind"], "numeric");
 }

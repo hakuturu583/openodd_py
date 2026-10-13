@@ -42,6 +42,7 @@ package always has it.
     view: "cases", x: "dynamic.vehicle_ahead_relative_speed", y: "dynamic.vehicle_ahead_gap",
   });
   mount(viewer, document.getElementById("coverage"), { view: "coverage" });
+  mount(viewer, document.getElementById("drift"), { view: "drift" });   // drawn vs measured
   plot.set({ y: "environment.fog" });                // or let the reader use the pickers
 </script>
 ```
@@ -65,6 +66,7 @@ it live:
   - `table`
   - `prediction`: `false` for no background
   - `instability_rings`
+  - `basis` (`"drawn"` / `"measured"`, in the query), `measured_at`, `drift_leaders`
 
 The components' words are English by default; `labels` replaces them.
 
@@ -79,6 +81,7 @@ and the options as JSON strings:
 | `cases_html(query, options)` | the case plot, with its background |
 | `cases_json(query, prediction)` | the plot as data; with `prediction`, the grid with every cell's full metrics, and each case's `predicted_pass_probability` |
 | `coverage_html(query, options)`, `coverage_json(query)` | the coverage matrix |
+| `drift_html(query, options)`, `drift_json(query, options)` | the scenario's realisation: drawn against measured, with the knob calibration ([drift.md](drift.md)); `options.knobs` = `{attribute: [scale, offset]}` |
 | `styles()`, `script()` | the components' CSS and script |
 
 The background needs only each cell's pass probability: one posterior mean

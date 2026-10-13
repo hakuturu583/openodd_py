@@ -431,6 +431,22 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
                         "fitted to the runs predicts)")
     parser.add_argument("--cases-rings", action="store_true",
                         help="outline the cases chosen for instability in the case plot")
+    parser.add_argument("--cases-basis", choices=["drawn", "measured"], default="drawn",
+                        help="place the case plot's cases by what the sampler drew (default) or by "
+                        "what the run measured at its start")
+    parser.add_argument("--measured-at", type=float, metavar="SECONDS",
+                        help="the measurement window: an attribute's measured value is its first "
+                        "sample within this many seconds of the start (default: 1)")
+    parser.add_argument(
+        "--drift-html",
+        type=Path,
+        metavar="FILE",
+        help="also write the scenario's realisation (each attribute's drawn values against the "
+        "measured ones, and the knob calibration they suggest) as a standalone HTML page here",
+    )
+    parser.add_argument("--knob", action="append", default=[], metavar="ATTRIBUTE=SCALE,OFFSET",
+                        help="the knob that writes ATTRIBUTE (its current scale and offset): the "
+                        "drift page then gives the corrected ones; repeat for more")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     documents = load_coverage_files(args.paths)
@@ -471,7 +487,23 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
         args.cases_html.parent.mkdir(parents=True, exist_ok=True)
         args.cases_html.write_text(plot.page(
             x=args.cases_x, y=args.cases_y, prediction=not args.cases_no_prediction,
-            instability_rings=args.cases_rings), encoding="utf-8")
+            instability_rings=args.cases_rings, basis=args.cases_basis,
+            measured_at=args.measured_at), encoding="utf-8")
+    if args.drift_html is not None:
+        from .view import CasePlot, page  # noqa: PLC0415 - view imports nothing of the report
+
+        knobs = {}
+        for spec in args.knob:
+            name, _, pair = spec.partition("=")
+            try:
+                scale, offset = (float(v) for v in pair.split(","))
+            except ValueError:
+                parser.error(f"--knob {spec}: expected ATTRIBUTE=SCALE,OFFSET")
+            knobs[name] = (scale, offset)
+        plot = CasePlot([doc for _, doc in documents])
+        args.drift_html.parent.mkdir(parents=True, exist_ok=True)
+        args.drift_html.write_text(page("Scenario realisation", plot.drift_html(
+            measured_at=args.measured_at, knobs=knobs)), encoding="utf-8")
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")

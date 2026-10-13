@@ -6,7 +6,8 @@ WASM viewer demo. Deterministic; needs only the openodd package.
 Each run records its ODD cells (gap, relative speed, rain), its case (the
 values it was drawn with, why, and the space) and its outcome. A run passes
 when the gap is long enough for the closing speed -- less so in heavy rain --
-with some noise near that boundary; a few cases are run again.
+with some noise near that boundary; a few cases are run again. The scenario
+stages every gap 1.5 m longer than drawn, for the drift view to find.
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ import openodd
 from openodd import OddAttribute, OddDefinition, OddModule
 
 HERE = Path(__file__).resolve().parent
+#: How much longer the scenario stages the gap than drawn: what the
+#: drift view finds.
+STAGING_OFFSET = 1.5
 
 
 def odd() -> OddDefinition:
@@ -65,8 +69,9 @@ def main() -> None:
             overrides=[f"scenario.gap_m={case['gap']}", f"scenario.relative_speed_kmh={case['relative_speed']}",
                        f"environment.rain={case['rain']}"],
             flaky=flaky), space=space)
-        # The run closes the gap from the case's values: its cells move.
-        t, gap = 0.0, case["gap"]
+        # The run closes the gap from what the scenario staged: 1.5 m more
+        # than drawn (a knob whose offset is off), its cells moving.
+        t, gap = 0.0, case["gap"] + STAGING_OFFSET
         collector.start({"gap": gap, "speed": case["relative_speed"], "rain": case["rain"]}, 0.0)
         for _ in range(40):
             t += 0.1

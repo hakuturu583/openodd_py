@@ -61,6 +61,128 @@ pub struct CaseRun {
     pub chosen_for: String,
     /// The flakiness predicted for it when it was drawn, if any.
     pub flaky: Option<Json>,
+    /// What the probes measured at the start of the run (`odd.samples`):
+    /// the rows within [`MAX_WINDOW`] seconds, `(t, attribute -> value)`,
+    /// only the case's attributes and only values that are not null.
+    pub start: Vec<(f64, IndexMap<String, Json>)>,
+}
+
+/// How much of a run's start is kept to measure it by: the longest
+/// measurement window a query may ask for, in seconds.
+pub const MAX_WINDOW: f64 = 10.0;
+
+/// The measurement window when a query names none: an attribute's measured
+/// value is its first sample within this many seconds of the start.
+pub const DEFAULT_WINDOW: f64 = 1.0;
+
+impl CaseRun {
+    /// What the run measured: each attribute's first sample at or before
+    /// `window` seconds (from t = 0) that has a value.
+    pub fn measured(&self, window: f64) -> IndexMap<String, Json> {
+        let mut out: IndexMap<String, Json> = IndexMap::new();
+        for (t, row) in &self.start {
+            if *t > window + 1e-9 {
+                break;
+            }
+            for (k, v) in row {
+                if !out.contains_key(k) {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Which values the cases are placed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Basis {
+    /// What the sampler drew (`case.values`): what the run aimed at.
+    #[default]
+    Drawn,
+    /// What the probes measured at the start of the run (`odd.samples`).
+    Measured,
+}
+
+impl Basis {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Basis::Drawn => "drawn",
+            Basis::Measured => "measured",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Basis> {
+        match s {
+            "drawn" => Some(Basis::Drawn),
+            "measured" => Some(Basis::Measured),
+            _ => None,
+        }
+    }
+
+    pub fn other(&self) -> Basis {
+        match self {
+            Basis::Drawn => Basis::Measured,
+            Basis::Measured => Basis::Drawn,
+        }
+    }
+}
+
+/// The rows of a document's `odd.samples` within [`MAX_WINDOW`], keeping
+/// `wanted` attributes with a value.
+fn start_samples(doc: &Json, wanted: &[&String]) -> Vec<(f64, IndexMap<String, Json>)> {
+    let Some(table) = doc.pointer("/odd/samples").filter(|t| t.is_object()) else {
+        return Vec::new();
+    };
+    let names: Vec<Option<String>> = table
+        .get("attributes")
+        .and_then(Json::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|x| {
+                    x.get("name")
+                        .and_then(Json::as_str)
+                        .or(x.as_str())
+                        .map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Columns: t, lat, lon, then one per attribute.
+    let columns: Vec<(usize, String)> = names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            n.clone()
+                .filter(|n| wanted.contains(&n))
+                .map(|n| (i + 3, n))
+        })
+        .collect();
+    let mut out = Vec::new();
+    for row in table
+        .get("rows")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(t) = row.get(0).and_then(Json::as_f64) else {
+            continue;
+        };
+        if t > MAX_WINDOW {
+            break;
+        }
+        let values: IndexMap<String, Json> = columns
+            .iter()
+            .filter_map(|(i, n)| {
+                let v = row.get(*i)?;
+                (!v.is_null()).then(|| (n.clone(), v.clone()))
+            })
+            .collect();
+        if !values.is_empty() {
+            out.push((t, values));
+        }
+    }
+    out
 }
 
 /// A distinct case: its drawn values, and every run of it.
@@ -79,6 +201,14 @@ pub struct Case {
     /// The space it was drawn in (`case.space`), as recorded: what a model
     /// of its outcomes codes it in.
     pub space: Option<Json>,
+    /// Which values `values` (and `buckets`) are: drawn, unless a query
+    /// asked for the measured ones ([`CaseSet::selected`]).
+    pub basis: Basis,
+    /// The values of the other basis: the measured ones (the mean over its
+    /// runs, or the most common label) when `values` are drawn, and the
+    /// drawn ones when they are measured. Empty when the runs recorded no
+    /// samples.
+    pub other: IndexMap<String, Json>,
     /// In the order of the documents.
     pub runs: Vec<CaseRun>,
 }
@@ -156,6 +286,8 @@ impl Case {
             "chosen_for": self.chosen_for(),
             "instability": self.for_instability(),
             "flaky": self.flaky(),
+            "basis": self.basis.as_str(),
+            "other_values": self.other,
         })
     }
 }
@@ -265,6 +397,23 @@ impl CaseAxis {
     }
 }
 
+/// The label of the span a number falls in: `[low, high)`, the last one
+/// closed; `<below>` / `<above>` outside them all.
+pub fn span_label(spans: &[Span], v: f64) -> String {
+    let n = spans.len();
+    for (i, s) in spans.iter().enumerate() {
+        if v >= s.low && (v < s.high || (i + 1 == n && v <= s.high)) {
+            return s.label.clone();
+        }
+    }
+    let lowest = spans.iter().map(|s| s.low).fold(f64::INFINITY, f64::min);
+    if v < lowest {
+        crate::data::BELOW_RANGE.into()
+    } else {
+        crate::data::ABOVE_RANGE.into()
+    }
+}
+
 /// Parse an interval bucket label, `[low, high)` or `[low, high]`.
 pub fn parse_span(label: &str) -> Option<(f64, f64)> {
     let t = label.trim();
@@ -368,6 +517,7 @@ impl CaseSet {
                     .unwrap_or("")
                     .to_string(),
                 flaky: case.get("flaky").filter(|f| f.is_object()).cloned(),
+                start: start_samples(doc, &values.keys().collect::<Vec<_>>()),
             };
             // The space: each attribute's range or labels.
             for dim in case
@@ -418,6 +568,8 @@ impl CaseSet {
                         buckets,
                         overrides,
                         space: case.get("space").filter(|s| s.is_array()).cloned(),
+                        basis: Basis::Drawn,
+                        other: IndexMap::new(),
                         runs: vec![run],
                     });
                 }
@@ -561,9 +713,81 @@ impl CaseSet {
                     .filter(|r| q.environment.as_ref().is_none_or(|e| &r.environment == e))
                     .cloned()
                     .collect();
-                (!runs.is_empty()).then(|| Case { runs, ..c.clone() })
+                if runs.is_empty() {
+                    return None;
+                }
+                let mut case = Case { runs, ..c.clone() };
+                let measured = self.measured_values(&case, q.window());
+                match q.basis {
+                    Basis::Drawn => case.other = measured,
+                    // A case nothing was measured of has nothing to place.
+                    Basis::Measured if measured.is_empty() => return None,
+                    Basis::Measured => {
+                        case.buckets = measured
+                            .iter()
+                            .map(|(k, v)| (k.clone(), self.bucket_of(k, v)))
+                            .collect();
+                        case.other = std::mem::replace(&mut case.values, measured);
+                        case.basis = Basis::Measured;
+                    }
+                }
+                Some(case)
             })
             .collect()
+    }
+
+    /// A case's measured values: per attribute, the mean of its runs'
+    /// measured numbers, or their most common label (the first seen on a
+    /// tie); only the attributes it was drawn with.
+    pub fn measured_values(&self, case: &Case, window: f64) -> IndexMap<String, Json> {
+        let per_run: Vec<IndexMap<String, Json>> =
+            case.runs.iter().map(|r| r.measured(window)).collect();
+        let mut out = IndexMap::new();
+        for name in case.values.keys() {
+            let vals: Vec<&Json> = per_run.iter().filter_map(|m| m.get(name)).collect();
+            if vals.is_empty() {
+                continue;
+            }
+            let numeric = self
+                .axes
+                .get(name)
+                .is_some_and(|a| a.kind == AxisKind::Numeric);
+            let nums: Vec<f64> = vals.iter().filter_map(|v| v.as_f64()).collect();
+            if numeric && !nums.is_empty() {
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                out.insert(name.clone(), serde_json::json!(mean));
+            } else {
+                let mut counts: IndexMap<String, usize> = IndexMap::new();
+                for v in &vals {
+                    *counts.entry(value_text(v)).or_default() += 1;
+                }
+                let best = counts
+                    .iter()
+                    .max_by_key(|(_, n)| **n)
+                    .map(|(l, _)| l.clone())
+                    .unwrap_or_default();
+                // Keep the label's form: the first value with that text.
+                let v = vals
+                    .iter()
+                    .find(|v| value_text(v) == best)
+                    .map(|v| (*v).clone())
+                    .unwrap_or(Json::String(best));
+                out.insert(name.clone(), v);
+            }
+        }
+        out
+    }
+
+    /// The ODD bucket a value falls in: a numeric attribute's span (below or
+    /// above them all: `<below>` / `<above>`), or the label itself.
+    pub fn bucket_of(&self, attribute: &str, value: &Json) -> String {
+        let Some(axis) = self.axes.get(attribute) else {
+            return value_text(value);
+        };
+        match (axis.kind, value.as_f64()) {
+            (AxisKind::Numeric, Some(v)) if !axis.spans.is_empty() => span_label(&axis.spans, v),
+            _ => value_text(value),
+        }
     }
 
     /// The plot `query` asks for. An axis on an attribute no selected case
@@ -610,10 +834,39 @@ impl CaseSet {
         let (placed, unplaced): (Vec<Case>, Vec<Case>) = cases
             .into_iter()
             .partition(|c| has(c, &x_name) && has(c, &y_name));
+        // The axes span the values on this basis (the measured ones may lie
+        // outside what was drawn, or be labels the space has not).
+        let widen = |name: String| {
+            let mut axis = self.axes[&name].clone();
+            for c in &placed {
+                match axis.kind {
+                    AxisKind::Numeric => {
+                        // The other basis's values too: the axes stay the
+                        // same when the toggle switches, and a line to the
+                        // other value stays inside.
+                        let other = c.other.get(&name).and_then(Json::as_f64);
+                        for v in c.number(&name).into_iter().chain(other) {
+                            axis.extent = Some(match axis.extent {
+                                Some((a, b)) => (a.min(v), b.max(v)),
+                                None => (v, v),
+                            });
+                        }
+                    }
+                    AxisKind::Categorical => {
+                        if let Some(l) = c.label(&name) {
+                            if !axis.labels.contains(&l) {
+                                axis.labels.push(l);
+                            }
+                        }
+                    }
+                }
+            }
+            axis
+        };
         Plot {
             attributes: free,
-            x: x_name.map(|n| self.axes[&n].clone()),
-            y: y_name.map(|n| self.axes[&n].clone()),
+            x: x_name.map(widen),
+            y: y_name.map(widen),
             cases: placed,
             unplaced: unplaced.len(),
             without_case: self.without_case,
@@ -637,9 +890,22 @@ pub struct CaseQuery {
     /// Only the runs of this environment (`Some(None)`: those that recorded
     /// none); all when `None`.
     pub environment: Option<Option<String>>,
+    /// Which values the cases are placed by (and the model is fitted on).
+    pub basis: Basis,
+    /// The measurement window, in seconds from t = 0: an attribute's
+    /// measured value is its first sample within it ([`DEFAULT_WINDOW`]
+    /// when `None`, at most [`MAX_WINDOW`]).
+    pub measured_at: Option<f64>,
 }
 
 impl CaseQuery {
+    /// The measurement window in force.
+    pub fn window(&self) -> f64 {
+        self.measured_at
+            .unwrap_or(DEFAULT_WINDOW)
+            .clamp(0.0, MAX_WINDOW)
+    }
+
     /// A query from JSON: `{"x", "y", "scenario", "environment"}`, every key
     /// optional; `"environment": null` selects the runs that recorded none.
     pub fn from_json(raw: &Json) -> Result<Self, String> {
@@ -658,9 +924,21 @@ impl CaseQuery {
             y: text("y")?.filter(|s| !s.is_empty()),
             scenario: text("scenario")?,
             environment: None,
+            basis: Basis::Drawn,
+            measured_at: None,
         };
         if obj.contains_key("environment") {
             q.environment = Some(text("environment")?);
+        }
+        if let Some(b) = text("basis")? {
+            q.basis = Basis::parse(&b).ok_or("'basis' is \"drawn\" or \"measured\"")?;
+        }
+        if let Some(w) = obj.get("measured_at").filter(|w| !w.is_null()) {
+            q.measured_at = Some(
+                w.as_f64()
+                    .filter(|w| w.is_finite() && (0.0..=MAX_WINDOW).contains(w))
+                    .ok_or(format!("'measured_at' must be 0 to {MAX_WINDOW} seconds"))?,
+            );
         }
         Ok(q)
     }
@@ -719,6 +997,8 @@ impl Plot {
             "y": axis(&self.y),
             "scenario": self.query.scenario,
             "environment": self.query.environment,
+            "basis": self.query.basis.as_str(),
+            "measured_at": self.query.window(),
             "attributes": self.attributes,
             "cases": self.cases.iter().map(Case::to_json).collect::<Vec<_>>(),
             "counts": self.counts(),
