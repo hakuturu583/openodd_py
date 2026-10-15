@@ -400,8 +400,8 @@
    within it, dotted for coverage gained or lost) and an arrow or sign. */
 .oo-cov { --oo-regressed: var(--oo-fail); --oo-improved: var(--oo-pass); --oo-new: var(--oo-accent);
   --oo-dropped: var(--oo-ink-3); --oo-delta-tint: 48%; }
-.oo-cov .oo-cmp-cell { display: grid; grid-template-columns: 1fr 1fr; align-items: stretch; padding: 0; gap: 0;
-  overflow: hidden; min-width: 132px; height: 74px; border: 1.5px solid var(--oo-border); background: var(--oo-surface); }
+.oo-cov .oo-cmp-cell { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 18px; align-items: stretch;
+  padding: 0; gap: 0; overflow: hidden; min-width: 132px; height: 90px; border: 1.5px solid var(--oo-border); background: var(--oo-surface); }
 .oo-cov .oo-cmp-cell .oo-half { position: relative; display: flex; flex-direction: column; justify-content: flex-end;
   min-width: 0; padding: 6px 7px; border: 0; }
 .oo-cov .oo-cmp-cell .oo-half-other { box-shadow: inset 1px 0 0 var(--oo-surface); }
@@ -417,11 +417,12 @@
 .oo-cov .oo-chg-improved.oo-sig.oo-cmp-cell, .oo-cov .oo-sw.oo-chg-improved.oo-sig { border: 3px solid var(--oo-improved); }
 .oo-cov .oo-chg-new.oo-cmp-cell, .oo-cov .oo-sw.oo-chg-new { border: 2px dotted var(--oo-new); }
 .oo-cov .oo-chg-dropped.oo-cmp-cell, .oo-cov .oo-sw.oo-chg-dropped { border: 2px dotted var(--oo-dropped); }
-.oo-cov .oo-chg-badge { position: absolute; top: 5px; right: 5px; height: 16px; padding: 0 5px; border-radius: 999px;
-  display: inline-flex; align-items: center; font: 700 10px/1 var(--oo-font); white-space: nowrap;
-  color: var(--oo-ink-2); background: var(--oo-surface); border: 1px solid var(--oo-border); }
-.oo-cov .oo-chg-regressed .oo-chg-badge { color: #fff; background: var(--oo-regressed); border-color: transparent; }
-.oo-cov .oo-chg-improved .oo-chg-badge { color: #fff; background: var(--oo-improved); border-color: transparent; }
+/* The change, in a strip under both halves. */
+.oo-cov .oo-chg-badge { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center;
+  font: 700 10px/1 var(--oo-font); white-space: nowrap; color: var(--oo-ink-2); background: var(--oo-surface-2); }
+.oo-cov .oo-cmp-cell:not(:has(.oo-chg-badge)) { grid-template-rows: 1fr; }
+.oo-cov .oo-chg-regressed .oo-chg-badge { color: #fff; background: var(--oo-regressed); }
+.oo-cov .oo-chg-improved .oo-chg-badge { color: #fff; background: var(--oo-improved); }
 .oo-cov .oo-chg-new .oo-chg-badge { color: var(--oo-new); }
 .oo-cov .oo-sw.oo-chg-sw { width: 18px; height: 16px; background: var(--oo-surface); color: var(--oo-ink-2); font-size: 9px; }
 .oo-cov .oo-sw.oo-chg-regressed { color: var(--oo-regressed); }
