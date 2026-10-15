@@ -30,7 +30,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib claude-agent-sdk
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q
 
@@ -69,6 +69,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: cargo test --workspace
-      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib claude-agent-sdk
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q
