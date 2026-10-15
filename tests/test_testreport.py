@@ -122,7 +122,11 @@ def test_the_plugin_ships_the_skill_and_the_prompts() -> None:
 # -- the agent, with the Claude Agent SDK's transport replaced ----------------------
 
 
-sdk = pytest.importorskip("claude_agent_sdk")
+try:
+    import claude_agent_sdk as sdk
+except ImportError:  # the optional extra: only the tests below that need it skip
+    sdk = None
+needs_sdk = pytest.mark.skipif(sdk is None, reason="claude-agent-sdk is not installed")
 
 
 def _call(tool: Any, args: dict[str, Any]) -> Any:
@@ -131,6 +135,7 @@ def _call(tool: Any, args: dict[str, Any]) -> Any:
     return out.get("is_error", False), text
 
 
+@needs_sdk
 def test_the_tools_read_the_report() -> None:
     report = _report()
     tools = {t.name: t for t in openodd.agent.report_tools(report)}
@@ -158,6 +163,7 @@ def _result(**kwargs: Any) -> Any:
     return sdk.ResultMessage(**{**fields, **kwargs})
 
 
+@needs_sdk
 def test_analyze_through_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 
@@ -188,6 +194,7 @@ def test_analyze_through_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "{" not in seen["prompt"]
 
 
+@needs_sdk
 def test_analyze_reads_json_from_the_text_and_reports_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     results = iter([
         _result(result='Here: {"verdict": "pass", "headline": "ok", "summary": "s"}'),
@@ -207,6 +214,7 @@ def test_analyze_reads_json_from_the_text_and_reports_errors(monkeypatch: pytest
         openodd.agent.analyze(report)
 
 
+@needs_sdk
 def test_the_cli_keeps_going_without_an_analysis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
                                                  capsys: pytest.CaptureFixture[str]) -> None:
     async def fake_query(*, prompt: str, options: Any) -> Any:
@@ -220,6 +228,7 @@ def test_the_cli_keeps_going_without_an_analysis(monkeypatch: pytest.MonkeyPatch
     assert "no analysis" in capsys.readouterr().err and out.exists()
 
 
+@needs_sdk
 def test_own_prompts_and_plugins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     seen: list[Any] = []
 
@@ -270,8 +279,54 @@ def test_the_cli_passes_prompts_and_plugins(monkeypatch: pytest.MonkeyPatch, tmp
     assert seen["plugins"] == [tmp_path] and seen["skills"] == ["house:criteria"]
 
 
+@needs_sdk
 def test_the_tools_round_their_figures() -> None:
     tools = {t.name: t for t in openodd.agent.report_tools(_report())}
     _, text = _call(tools["summary"], {})
     figures = re.findall(r"\d+\.\d+", text)
     assert figures and all(len(f.replace(".", "").lstrip("0")) <= 4 for f in figures)
+
+
+def test_the_task_prompt_keeps_other_braces(monkeypatch: pytest.MonkeyPatch) -> None:
+    report = _report()
+    prompt = openodd.agent._prompt(report, 'Answer like {"verdict": "pass"} for {title}, {0} }', "en", "")
+    assert prompt == 'Answer like {"verdict": "pass"} for Nightly, {0} }'
+
+
+def test_relative_reads_resolve_against_claudes_cwd(tmp_path: Path) -> None:
+    hook = openodd.agent._read_only_under([openodd.agent.PLUGIN_DIR])
+
+    def decide(path: str, cwd: Any) -> Any:
+        out = asyncio.run(hook({"tool_input": {"file_path": path}, "cwd": cwd}, None, None))
+        return out.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
+
+    assert decide("prompts/system.md", str(openodd.agent.PLUGIN_DIR)) == "allow"
+    assert decide("prompts/system.md", str(tmp_path)) == "deny"
+
+
+@needs_sdk
+def test_any_sdk_error_becomes_an_analysis_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                 capsys: pytest.CaptureFixture[str]) -> None:
+    async def fake_query(*, prompt: str, options: Any) -> Any:
+        raise Exception("Control request timeout: initialize")  # noqa: TRY002 - as the SDK does
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(sdk, "query", fake_query)
+    with pytest.raises(openodd.agent.AnalysisError, match="timeout"):
+        openodd.agent.analyze(_report())
+    (tmp_path / "r_coverage.json").write_text(json.dumps(_campaign()[0]), encoding="utf-8")
+    assert main([str(tmp_path), "-o", str(tmp_path / "r.html")]) == 0
+    assert "the analysis failed" in capsys.readouterr().err and (tmp_path / "r.html").exists()
+
+
+def test_unusual_fields_still_render() -> None:
+    doc = _campaign()[0]
+    doc["outcome"] = {"passed": False, "failed_at": "3.2", "failed_cell": "abc", "environment": None}
+    doc["case"] = {"values": ["gap", 1], "chosen_for": "coverage"}
+    html = TestReport([doc]).html(views=False)
+    assert "3.2" in html and "abc" in html and "a · b" not in html
+    bool_doc = dict(doc, outcome={"passed": False, "failed_at": True})
+    assert "1 s" not in TestReport([bool_doc]).html(views=False)
+    odd = ReportAnalysis("pass", "h", "s", [openodd.Finding("high", "t1", "d"), openodd.Finding("critical", "t2", "d")])
+    html = TestReport([doc]).html(analysis=odd, views=False)
+    assert html.index("t2") < html.index("t1")

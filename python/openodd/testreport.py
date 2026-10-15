@@ -135,8 +135,12 @@ class TestReport:
         """The coverage files under *paths* (files, or directories searched)."""
         loaded = load_coverage_files(paths)
         files = [p.resolve() for p, _ in loaded]
-        root = Path(os.path.commonpath([f.parent for f in files])) if files else Path()
-        return cls([doc for _, doc in loaded], names=[f.relative_to(root).as_posix() for f in files], **kwargs)
+        try:
+            root: Optional[Path] = Path(os.path.commonpath([f.parent for f in files])) if files else None
+        except ValueError:  # on different drives
+            root = None
+        names = [f.relative_to(root).as_posix() if root else str(f) for f in files]
+        return cls([doc for _, doc in loaded], names=names, **kwargs)
 
     # -- the figures --------------------------------------------------------
 
@@ -294,9 +298,11 @@ def _table(head: Sequence[str], rows: Iterable[Sequence[str]], *, cls: str = "")
             f"<tbody>{body}</tbody></table></div>")
 
 
-def _values(values: Optional[Mapping[str, Any]]) -> str:
+def _values(values: Any) -> str:
     if not values:
         return "–"
+    if not isinstance(values, Mapping):
+        return escape(str(values))
     return ", ".join(f"{escape(str(k))}={_num(v)}" for k, v in values.items())
 
 
@@ -355,7 +361,8 @@ def _analysis(a: Optional[ReportAnalysis]) -> str:
         + ("<ul class=\"oo-r-evidence\">" + "".join(f"<li>{escape(e)}</li>" for e in f.evidence) + "</ul>"
            if f.evidence else "")
         + "</li>"
-        for f in sorted(a.findings, key=lambda f: SEVERITIES.index(f.severity)))
+        for f in sorted(a.findings, key=lambda f: SEVERITIES.index(f.severity)
+                        if f.severity in SEVERITIES else len(SEVERITIES)))
     recs = "".join(f"<li>{escape(r)}</li>" for r in a.recommendations)
     body = (f'<div class="oo-r-analysis"><p class="oo-r-headline">{_badge(a.verdict, tone)} '
             f"{escape(a.headline)}</p><p>{escape(a.summary)}</p>"
@@ -392,11 +399,26 @@ def _failures(s: Mapping[str, Any]) -> str:
     if not s["failures"]:
         return ""
     rows = [[escape(f["name"]), escape(f["scenario"]), escape(str(f["environment"] or "–")),
-             _values(f["values"]), "–" if f["failed_at"] is None else f"{f['failed_at']:g} s",
-             escape(" · ".join(map(str, f["failed_cell"]))) if f["failed_cell"] else "–",
+             _values(f["values"]), _seconds(f["failed_at"]), _cell(f["failed_cell"]),
              escape(str(f["chosen_for"] or "–"))] for f in s["failures"]]
     return _section(f"Failed runs ({len(rows)})", _table(
         ["Run", "Scenario", "Environment", "Case", "Failed at", "Failed in cell", "Chosen for"], rows))
+
+
+def _seconds(value: Any) -> str:
+    if value is None:
+        return "–"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:g} s"
+    return escape(str(value))
+
+
+def _cell(labels: Any) -> str:
+    if not labels:
+        return "–"
+    if isinstance(labels, (list, tuple)):
+        return escape(" · ".join(map(str, labels)))
+    return escape(str(labels))
 
 
 def _coverage(s: Mapping[str, Any]) -> str:

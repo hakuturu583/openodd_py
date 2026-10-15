@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -62,6 +63,8 @@ __all__ = [
     "default_task_prompt",
     "report_tools",
 ]
+
+logger = logging.getLogger(__name__)
 
 #: The model asked when none is named.
 DEFAULT_MODEL = "claude-opus-5-5"
@@ -241,17 +244,14 @@ def _sdk() -> Any:
     return claude_agent_sdk
 
 
-class _Blank(dict):  # type: ignore[type-arg]
-    def __missing__(self, key: str) -> str:
-        return "{" + key + "}"
-
-
 def _prompt(report: "TestReport", template: str, language: str, instructions: str) -> str:
     s = report.summary()
     fields = {k: s[k] for k in ("title", "runs", "passed", "failed", "no_outcome")}
     fields["language"] = language
     fields["instructions"] = f"Also consider: {instructions}" if instructions else ""
-    return template.format_map(_Blank(fields)).strip()
+    for key, value in fields.items():  # only these: other braces stay as written
+        template = template.replace("{" + key + "}", str(value))
+    return template.strip()
 
 
 def _read_only_under(roots: Sequence[Path]) -> Any:
@@ -260,11 +260,12 @@ def _read_only_under(roots: Sequence[Path]) -> Any:
 
     async def hook(input_data: Mapping[str, Any], tool_use_id: Optional[str], context: Any) -> dict[str, Any]:
         path = (input_data.get("tool_input") or {}).get("file_path") or ""
+        base = input_data.get("cwd")  # Claude Code's own, which may not be ours
         try:
-            target = Path(path).resolve()
+            target = (Path(base) / path if base else Path(path)).resolve() if path else None
         except (OSError, ValueError):
             target = None
-        if target is not None and any(target.is_relative_to(r) for r in resolved):
+        if target is not None and target.is_absolute() and any(target.is_relative_to(r) for r in resolved):
             return {}
         return {"hookSpecificOutput": {
             "hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -322,6 +323,9 @@ async def analyze_async(
         "output_format": {"type": "json_schema", "schema": ANALYSIS_SCHEMA},
     }
     enabled = ([SKILL_NAME] if skill else []) + list(skills)
+    if plugins and not skills:
+        logger.warning("agent: plugins %s loaded, but none of their skills enabled (skills=)",
+                       ", ".join(map(str, plugins)))
     if enabled:
         dirs = ([PLUGIN_DIR] if skill else []) + [Path(p) for p in plugins]
         kwargs["plugins"] = [{"type": "local", "path": str(d)} for d in dirs]
@@ -348,8 +352,8 @@ async def analyze_async(
                 result = message
     except sdk.CLINotFoundError as e:
         raise AgentUnavailable(f"Claude Code was not found: {e}") from e
-    except sdk.ClaudeSDKError as e:
-        raise AnalysisError(str(e)) from e
+    except Exception as e:  # noqa: BLE001 - the SDK raises bare errors too (timeouts, bad options)
+        raise AnalysisError(f"{type(e).__name__}: {e}") from e
     if result is None:
         raise AnalysisError("Claude returned no result")
     if result.is_error:
