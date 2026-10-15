@@ -84,6 +84,36 @@ and the options as JSON strings:
 | `drift_html(query, options)`, `drift_json(query, options)` | the scenario's realisation: drawn against measured, with the knob calibration ([drift.md](drift.md)); `options.knobs` = `{attribute: [scale, offset]}` |
 | `styles()`, `script()` | the components' CSS and script |
 
+## Comparing two sets on the same ODD
+
+`Comparison` reads two sets of coverage documents measured on the same ODD
+-- a baseline and another set, say two versions of the software -- and lays
+them over one another in both views ([compare.md](compare.md)). It has the
+`Viewer`'s methods, so `mount` drives it the same way:
+
+```js
+import init, { Comparison, styles, script } from "./pkg/openodd_wasm.js";
+const cmp = new Comparison(JSON.stringify(before), JSON.stringify(after), "v1.2", "v1.3");
+mount(cmp, document.getElementById("cases"), { view: "cases", background: "delta" });
+mount(cmp, document.getElementById("coverage"), { view: "coverage" });
+JSON.parse(cmp.odd()).same;   // were both sets measured on the same ODD?
+```
+
+| Method | Returns |
+|---|---|
+| `new Comparison(base, other, base_name, other_name)` | read both sets (JSON arrays); `""` names them *Baseline* / *Compared* |
+| `documents`, `split`, `cases` | counts: all documents, the baseline's, distinct cases |
+| `attributes()`, `case_attributes()` | JSON arrays, of both sets |
+| `odd()` | whether both sets were measured on the same ODD, and the attributes whose buckets differ |
+| `coverage_html(query, options)`, `coverage_json(query)` | the matrix, each cell split in two, with its change |
+| `cases_html(query, options)`, `cases_json(query, prediction)` | the case plot, each mark split in two; with `prediction`, both sets' grids and their change |
+
+`options` takes the components' options, `names` (`[baseline, other]`),
+the comparison's words in `labels` (`regressed`, `improved`, ...), and for
+the case plot `background`: `"delta"` (the change of the predicted pass
+rate, the default), `"base"`, `"other"` or `"none"`. A comparison has no
+drift view; mount each set's `Viewer` for it.
+
 The background needs only each cell's pass probability: one posterior mean
 and variance per cell, not the 32 neighbours and 256 posterior draws behind
 the flip probability. That keeps it interactive. `cases_json(query, true)`
@@ -107,7 +137,10 @@ sweep (31 cases, 5 parameters):
 
 `examples/wasm-viewer/index.html` loads coverage files from a file picker or
 by drag-and-drop, or the bundled synthetic sample (`sample.json`, written by
-`make_sample.py`). It shows both views with live axis pickers. A module page
+`make_sample.py`). It shows both views with live axis pickers. Below them,
+it compares two sets: the sample and `sample_compare.json` (the same cases
+run by a "next version" that is worse in heavy rain and better in none), or
+two sets of files picked. A module page
 cannot be opened from `file://`, so serve the folder:
 
 ```bash
@@ -118,6 +151,7 @@ python3 -m http.server -d examples/wasm-viewer 8000   # http://localhost:8000
 The URL hash can choose the starting point:
 
 - `#data=URL` loads other coverage JSON.
+- `#compare=URL` compares it (or the sample) with other coverage JSON.
 - `#x=...&y=...` and `#cx=...&cy=...` set the starting axes of the case plot
   and of the matrix.
 - `#pick-x=...&pick-y=...` then changes the case plot's axes through its own

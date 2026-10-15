@@ -46,6 +46,10 @@
   page computes the matrix and the case plot -- the flaky model's background included --
   from coverage JSON on the client, with live axis pickers; no Python, no server
   ([docs/wasm.md](docs/wasm.md), demo in [examples/wasm-viewer](examples/wasm-viewer)).
+- **Comparing two sets on one ODD**: the same views with two sets of runs laid over one
+  another -- a baseline and, say, the next version of the software -- each cell and each
+  case split in two and outlined by how its failure rate moved, behind the cases the
+  change of the predicted pass rate ([docs/compare.md](docs/compare.md)).
 - **Test report**: `openodd-test-report runs/ -o report.html` lays a campaign's coverage
   files out as one HTML page -- verdict, results per scenario, every failed run, ODD
   coverage, flakiness and the interactive views -- with an analysis Claude writes through

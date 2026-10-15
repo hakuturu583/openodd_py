@@ -29,6 +29,7 @@
 
 pub mod case_plot;
 pub mod cases;
+pub mod compare;
 pub mod data;
 pub mod drift;
 pub mod html;
