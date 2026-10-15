@@ -1,0 +1,6 @@
+{
+  "name": "openodd",
+  "description": "Analyse ASAM OpenODD simulation test campaigns from openodd_py coverage files.",
+  "author": {"name": "Masaya Kataoka"},
+  "homepage": "https://github.com/hakuturu583/openodd_py"
+}

@@ -12,7 +12,15 @@ only tools, served in-process, that read this report:
 * ``odd_matrix`` -- the ODD matrix of any two attributes, drilled into any cells;
 * ``drift`` -- how far the scenario staged each run from what the sampler drew.
 
-and answers with a :class:`~.testreport.ReportAnalysis` -- a verdict, a
+How to analyse is an Agent Skill shipped with the package, ``odd-test-analysis``
+in the ``openodd`` Claude Code plugin (:data:`PLUGIN_DIR`): the workflow, what
+every figure means and the triage rules. Claude loads it with the ``Skill``
+tool and may ``Read`` its reference files -- and no other file. The prompts are
+files of the plugin too (``prompts/system.md``, ``prompts/task.md``); pass your
+own (``system_prompt=``, ``task_prompt=``), and more plugins with skills of your
+own -- house pass criteria, say -- with ``plugins=`` and ``skills=``.
+
+Claude answers with a :class:`~.testreport.ReportAnalysis` -- a verdict, a
 headline, a summary, findings with the figures they rest on, and
 recommendations -- that :meth:`~.testreport.TestReport.page` puts at the top
 of the report::
@@ -29,7 +37,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from .testreport import SEVERITIES, VERDICTS, ReportAnalysis
@@ -41,11 +50,16 @@ if TYPE_CHECKING:
 __all__ = [
     "ANALYSIS_SCHEMA",
     "DEFAULT_MODEL",
+    "PLUGIN_DIR",
     "SERVER_NAME",
+    "SKILL_DIR",
+    "SKILL_NAME",
     "AgentUnavailable",
     "AnalysisError",
     "analyze",
     "analyze_async",
+    "default_system_prompt",
+    "default_task_prompt",
     "report_tools",
 ]
 
@@ -82,25 +96,25 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
     },
 }
 
-SYSTEM_PROMPT = """\
-You are a test engineer reviewing a simulation test campaign of an automated driving \
-function against its Operational Design Domain (ODD, ASAM OpenODD). Every run wrote a \
-coverage file; they have been merged into the report your tools read.
+#: The ``openodd`` Claude Code plugin shipped with the package: the
+#: ``odd-test-analysis`` skill and the analysis prompts.
+PLUGIN_DIR = Path(__file__).resolve().parent / "claude_plugin"
+#: The analysis skill, as the agent names it.
+SKILL_NAME = "openodd:odd-test-analysis"
+#: The skill's own directory (``SKILL.md`` and ``references/``).
+SKILL_DIR = PLUGIN_DIR / "skills" / "odd-test-analysis"
 
-Work out, from the tools' results only:
-- whether the campaign passed: how many runs failed, in which scenarios and environments, \
-and where in the ODD (the failed runs' cases and failed cells);
-- whether the failures are systematic (always-failing cells, a region of a parameter) or \
-flaky (flaky cells, flaky cases with a high instability confidence);
-- how well the runs covered the ODD (grades, holes) and whether runs left the ODD;
-- whether the scenario staged what the sampler drew (drift), when cases were recorded.
 
-Start with `summary`; look deeper only where it points. Quote the figures a finding rests \
-on in its evidence; never state a number no tool gave you. The verdict is "fail" when any \
-run failed for a reason that is not plainly flakiness, "inconclusive" when no run recorded \
-an outcome or the evidence is too thin, and "pass" otherwise. Recommendations name the next \
-runs or fixes: which cells to sample, which cases to re-run, which knobs to calibrate.\
-"""
+def default_system_prompt() -> str:
+    """The analyst's system prompt (``prompts/system.md`` of the plugin)."""
+    return (PLUGIN_DIR / "prompts" / "system.md").read_text(encoding="utf-8").strip()
+
+
+def default_task_prompt() -> str:
+    """The task prompt's template (``prompts/task.md`` of the plugin): ``{title}``,
+    ``{runs}``, ``{passed}``, ``{failed}``, ``{no_outcome}``, ``{language}`` and
+    ``{instructions}`` are filled in."""
+    return (PLUGIN_DIR / "prompts" / "task.md").read_text(encoding="utf-8").strip()
 
 
 class AgentUnavailable(RuntimeError):
@@ -111,8 +125,19 @@ class AnalysisError(RuntimeError):
     """Claude did not return an analysis."""
 
 
+def _rounded(value: Any) -> Any:
+    """*value* with its floats to 4 significant digits: figures Claude quotes as given."""
+    if isinstance(value, float):
+        return float(f"{value:.4g}")
+    if isinstance(value, Mapping):
+        return {k: _rounded(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_rounded(v) for v in value]
+    return value
+
+
 def _text(value: Any) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, default=str)}]}
+    return {"content": [{"type": "text", "text": json.dumps(_rounded(value), ensure_ascii=False, default=str)}]}
 
 
 def _error(message: str) -> dict[str, Any]:
@@ -173,7 +198,7 @@ def report_tools(report: "TestReport") -> list[Any]:
         if entry is None:
             names = [e.name for e in report.report.entries]
             return _error(f"no item {args['name']!r}; items: {', '.join(names)}")
-        return {"content": [{"type": "text", "text": entry.to_json()}]}
+        return _text(json.loads(entry.to_json()))
 
     @tool("odd_matrix", "The ODD matrix of two attributes: per pair of buckets, the runs that were "
           "there, how many failed and failed there, and the cell's state (flaky, failing, passing, "
@@ -216,16 +241,37 @@ def _sdk() -> Any:
     return claude_agent_sdk
 
 
-def _prompt(report: "TestReport", language: str, instructions: str) -> str:
+class _Blank(dict):  # type: ignore[type-arg]
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def _prompt(report: "TestReport", template: str, language: str, instructions: str) -> str:
     s = report.summary()
-    lines = [
-        f"Review the test report \"{s['title']}\": {s['runs']} runs, {s['passed']} passed, "
-        f"{s['failed']} failed, {s['no_outcome']} without an outcome.",
-        f"Write the analysis in {language}.",
-    ]
-    if instructions:
-        lines.append(f"Also consider: {instructions}")
-    return "\n".join(lines)
+    fields = {k: s[k] for k in ("title", "runs", "passed", "failed", "no_outcome")}
+    fields["language"] = language
+    fields["instructions"] = f"Also consider: {instructions}" if instructions else ""
+    return template.format_map(_Blank(fields)).strip()
+
+
+def _read_only_under(roots: Sequence[Path]) -> Any:
+    """A PreToolUse hook: ``Read`` only files under *roots* (the skills')."""
+    resolved = [r.resolve() for r in roots]
+
+    async def hook(input_data: Mapping[str, Any], tool_use_id: Optional[str], context: Any) -> dict[str, Any]:
+        path = (input_data.get("tool_input") or {}).get("file_path") or ""
+        try:
+            target = Path(path).resolve()
+        except (OSError, ValueError):
+            target = None
+        if target is not None and any(target.is_relative_to(r) for r in resolved):
+            return {}
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny",
+            "permissionDecisionReason": "only the skills' files may be read; "
+                                        "the report is read with the mcp__openodd__ tools"}}
+
+    return hook
 
 
 def _parse(result: Any) -> dict[str, Any]:
@@ -254,6 +300,11 @@ async def analyze_async(
     effort: Optional[str] = "high",
     max_turns: int = 30,
     max_budget_usd: Optional[float] = None,
+    system_prompt: Optional[str] = None,
+    task_prompt: Optional[str] = None,
+    skill: bool = True,
+    plugins: Sequence[Path] = (),
+    skills: Sequence[str] = (),
     options: Optional[Mapping[str, Any]] = None,
 ) -> ReportAnalysis:
     """:func:`analyze`, for a caller already in an event loop."""
@@ -261,23 +312,35 @@ async def analyze_async(
     tools = report_tools(report)
     server = sdk.create_sdk_mcp_server(name=SERVER_NAME, version="1.0.0", tools=tools)
     kwargs: dict[str, Any] = {
-        "system_prompt": SYSTEM_PROMPT,
+        "system_prompt": default_system_prompt() if system_prompt is None else system_prompt,
         "model": model,
         "mcp_servers": {SERVER_NAME: server},
         "tools": [],  # no built-in tools: no shell, no files
         "allowed_tools": [f"mcp__{SERVER_NAME}__{t.name}" for t in tools],
+        "setting_sources": [],  # nothing from the user's or the project's settings
         "max_turns": max_turns,
         "output_format": {"type": "json_schema", "schema": ANALYSIS_SCHEMA},
     }
+    enabled = ([SKILL_NAME] if skill else []) + list(skills)
+    if enabled:
+        dirs = ([PLUGIN_DIR] if skill else []) + [Path(p) for p in plugins]
+        kwargs["plugins"] = [{"type": "local", "path": str(d)} for d in dirs]
+        kwargs["skills"] = enabled
+        # The Skill tool, and Read for the skills' reference files only.
+        kwargs["tools"] = ["Skill", "Read"]
+        kwargs["allowed_tools"].append("Read")
+        kwargs["hooks"] = {"PreToolUse": [sdk.HookMatcher(matcher="Read", hooks=[_read_only_under(dirs)])]}
     if effort is not None:
         kwargs["effort"] = effort
     if max_budget_usd is not None:
         kwargs["max_budget_usd"] = max_budget_usd
     kwargs.update(options or {})
+    prompt = _prompt(report, default_task_prompt() if task_prompt is None else task_prompt,
+                     language, instructions)
     result = None
     served_by = model
     try:
-        async for message in sdk.query(prompt=_prompt(report, language, instructions),
+        async for message in sdk.query(prompt=prompt,
                                        options=sdk.ClaudeAgentOptions(**kwargs)):
             if isinstance(message, sdk.AssistantMessage) and message.model:
                 served_by = message.model
@@ -305,6 +368,11 @@ def analyze(report: "TestReport", **kwargs: Any) -> ReportAnalysis:
         model: The Claude model (default :data:`DEFAULT_MODEL`).
         language: The language to write the analysis in.
         instructions: More for Claude to consider -- the pass criteria, say.
+        system_prompt: The system prompt (default :func:`default_system_prompt`).
+        task_prompt: The task prompt's template (default :func:`default_task_prompt`).
+        skill: Whether Claude has the ``odd-test-analysis`` skill.
+        plugins: More Claude Code plugin directories, with skills of your own.
+        skills: Their skills to enable (``plugin:skill``).
         effort: The effort Claude spends (``low`` ... ``max``; ``None``: the model's).
         max_turns: The most turns the agent takes.
         max_budget_usd: The most the analysis may cost.

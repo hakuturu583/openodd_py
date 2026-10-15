@@ -25,8 +25,9 @@ Every number on the page is the merged report's own; the analysis only reads the
 
 ## How Claude reads the report
 
-`openodd.agent.analyze` runs the Claude Agent SDK with **no built-in tools** -- no shell,
-no files -- and serves it, in-process, tools that read this report only:
+`openodd.agent.analyze` runs the Claude Agent SDK with no shell and no file access beyond
+its skill. It serves the SDK, in-process, tools that read this report only (their
+numbers rounded to 4 significant digits):
 
 | Tool | Returns |
 |---|---|
@@ -37,6 +38,51 @@ no files -- and serves it, in-process, tools that read this report only:
 | `coverage_item` | one cover item's buckets |
 | `odd_matrix` | `CoverageView.matrix` of any two attributes, drilled into any cells |
 | `drift` | `CasePlot.drift`: drawn against measured, and the knob calibration |
+
+## The skill and the prompts
+
+How to analyse is not hard-coded: it ships as a Claude Code plugin inside the package,
+`openodd/claude_plugin` (`openodd.agent.PLUGIN_DIR`):
+
+```
+claude_plugin/
+  .claude-plugin/plugin.json          the "openodd" plugin
+  skills/odd-test-analysis/
+    SKILL.md                          the workflow: outcome, where failures are,
+                                      systematic or flaky, coverage, drift, write-up
+    references/metrics.md             what every figure means and how to read it
+    references/triage.md              verdict rules, severities, findings, recommendations
+  prompts/
+    system.md                         the analyst's system prompt
+    task.md                           the task, with {title} {runs} {passed} {failed}
+                                      {no_outcome} {language} {instructions}
+```
+
+The agent loads the plugin and enables only the `openodd:odd-test-analysis` skill. Its
+built-in tools are `Skill` and `Read`, and a `PreToolUse` hook lets `Read` open the
+skills' files and nothing else. No user or project settings are loaded
+(`setting_sources=[]`).
+
+To change the analysis:
+
+- **Edit the skill** to change the method: the files above.
+- **Use your own prompts**: `--system-prompt FILE`, `--task-prompt FILE` (or
+  `system_prompt=`, `task_prompt=`).
+- **Add your own skills** -- house pass criteria, a known-defects list -- as a plugin of
+  your own, `my_plugin/skills/criteria/SKILL.md`:
+  `--plugin my_plugin --skill my_plugin:criteria` (`plugins=`, `skills=`). The plugin's
+  name is its `.claude-plugin/plugin.json` name, or its directory's.
+- **Leave the skill out**: `--no-skill`. Claude then has the system prompt only.
+
+The same skill works in Claude Code itself. There it builds the figures with the command
+line instead of the agent's tools:
+
+```bash
+claude --plugin-dir "$(python -c 'import openodd.agent as a; print(a.PLUGIN_DIR)')"
+> /openodd:odd-test-analysis analyse the runs in runs/nightly
+```
+
+## The answer
 
 Claude answers in the `openodd.agent.ANALYSIS_SCHEMA` JSON schema (the SDK's structured
 output), which becomes a `ReportAnalysis`. Claude is reached as the SDK reaches it:
@@ -52,6 +98,9 @@ output), which becomes a `ReportAnalysis`. Claude is reached as the SDK reaches 
 | `--language` | the analysis's language (default English) |
 | `--instructions` | more for Claude to weigh, e.g. `"the release bar is a 95% pass rate"` |
 | `--model`, `--max-turns`, `--max-budget-usd` | the agent's model and limits |
+| `--system-prompt FILE`, `--task-prompt FILE` | prompts of your own |
+| `--plugin DIR`, `--skill PLUGIN:SKILL` | skills of your own (repeat for more) |
+| `--no-skill` | leave out the `odd-test-analysis` skill |
 | `--analysis-out JSON` / `--analysis JSON` | keep an analysis, and build a page from a kept one without asking Claude again |
 | `--summary-json JSON` | also write the figures |
 | `--no-views`, `--cases-x`, `--cases-y` | leave out the interactive views; the case plot's axes |

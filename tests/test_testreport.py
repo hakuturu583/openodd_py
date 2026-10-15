@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +104,21 @@ def test_it_is_exported() -> None:
     assert openodd.TestReport is TestReport and openodd.agent.DEFAULT_MODEL
 
 
+def test_the_plugin_ships_the_skill_and_the_prompts() -> None:
+    plugin = openodd.agent.PLUGIN_DIR
+    assert json.loads((plugin / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["name"] == "openodd"
+    skill = (openodd.agent.SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    front = skill.split("---")[1]
+    assert "name: odd-test-analysis" in front and "description:" in front
+    for ref in re.findall(r"\]\((references/[^)]+)\)", skill):
+        assert (openodd.agent.SKILL_DIR / ref).is_file(), ref
+    assert openodd.agent.SKILL_NAME == "openodd:odd-test-analysis"
+    assert "odd-test-analysis" in openodd.agent.default_system_prompt()
+    template = openodd.agent.default_task_prompt()
+    for field in ("{title}", "{runs}", "{failed}", "{language}", "{instructions}"):
+        assert field in template
+
+
 # -- the agent, with the Claude Agent SDK's transport replaced ----------------------
 
 
@@ -121,7 +137,7 @@ def test_the_tools_read_the_report() -> None:
     assert set(tools) == {"summary", "markdown_report", "failed_runs", "run", "coverage_item",
                           "odd_matrix", "drift"}
     err, text = _call(tools["summary"], {})
-    assert not err and json.loads(text) == json.loads(json.dumps(report.summary()))
+    assert not err and json.loads(text) == openodd.agent._rounded(report.summary())
     err, text = _call(tools["failed_runs"], {"scenario": "cut_in", "limit": 2})
     assert not err and len(json.loads(text)) == 2
     err, text = _call(tools["run"], {"document": 0})
@@ -158,12 +174,18 @@ def test_analyze_through_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     assert analysis.verdict == "fail" and analysis.findings[0].evidence == ["e"]
     assert analysis.author == "claude-served" and analysis.cost_usd == pytest.approx(0.12)
     options = seen["options"]
-    assert options.tools == [] and options.model == openodd.agent.DEFAULT_MODEL
+    assert options.model == openodd.agent.DEFAULT_MODEL
+    # The skill, and Read for its files; no shell, no other built-in tool, no settings.
+    assert options.tools == ["Skill", "Read"] and options.setting_sources == []
+    assert options.skills == [openodd.agent.SKILL_NAME]
+    assert options.plugins == [{"type": "local", "path": str(openodd.agent.PLUGIN_DIR)}]
     assert sorted(options.allowed_tools) == sorted(
-        f"mcp__openodd__{n}" for n in ("summary", "markdown_report", "failed_runs", "run",
-                                       "coverage_item", "odd_matrix", "drift"))
+        ["Read"] + [f"mcp__openodd__{n}" for n in ("summary", "markdown_report", "failed_runs", "run",
+                                                   "coverage_item", "odd_matrix", "drift")])
     assert options.output_format["schema"] is openodd.agent.ANALYSIS_SCHEMA
-    assert "Japanese" in seen["prompt"] and "pass rate 95%" in seen["prompt"]
+    assert options.system_prompt == openodd.agent.default_system_prompt()
+    assert "Japanese" in seen["prompt"] and "Also consider: pass rate 95%" in seen["prompt"]
+    assert "{" not in seen["prompt"]
 
 
 def test_analyze_reads_json_from_the_text_and_reports_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,3 +218,60 @@ def test_the_cli_keeps_going_without_an_analysis(monkeypatch: pytest.MonkeyPatch
     out = tmp_path / "report.html"
     assert main([str(tmp_path), "-o", str(out)]) == 0
     assert "no analysis" in capsys.readouterr().err and out.exists()
+
+
+def test_own_prompts_and_plugins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[Any] = []
+
+    async def fake_query(*, prompt: str, options: Any) -> Any:
+        seen.append((prompt, options))
+        yield _result(structured_output={"verdict": "pass", "headline": "h", "summary": "s",
+                                         "findings": [], "recommendations": []})
+
+    monkeypatch.setattr(sdk, "query", fake_query)
+    report = _report()
+    openodd.agent.analyze(report, skill=False, system_prompt="be brief",
+                          task_prompt="{title}: {failed}/{runs} failed {unknown}")
+    prompt, options = seen[-1]
+    assert prompt == f"Nightly: {report.summary()['failed']}/{report.summary()['runs']} failed {{unknown}}"
+    assert options.system_prompt == "be brief" and options.tools == [] and options.skills is None
+    openodd.agent.analyze(report, plugins=[tmp_path], skills=["house:criteria"])
+    options = seen[-1][1]
+    assert options.skills == [openodd.agent.SKILL_NAME, "house:criteria"]
+    assert [p["path"] for p in options.plugins] == [str(openodd.agent.PLUGIN_DIR), str(tmp_path)]
+
+
+def test_read_is_kept_to_the_skills(tmp_path: Path) -> None:
+    hook = openodd.agent._read_only_under([openodd.agent.PLUGIN_DIR])
+
+    def decide(path: str) -> Any:
+        out = asyncio.run(hook({"tool_name": "Read", "tool_input": {"file_path": path}}, None, None))
+        return out.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
+
+    assert decide(str(openodd.agent.SKILL_DIR / "references" / "metrics.md")) == "allow"
+    assert decide(str(openodd.agent.SKILL_DIR / ".." / ".." / ".." / "agent.py")) == "deny"
+    assert decide("/etc/hostname") == "deny" and decide("") == "deny"
+
+
+def test_the_cli_passes_prompts_and_plugins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_analyze(report: Any, **kwargs: Any) -> ReportAnalysis:
+        seen.update(kwargs)
+        return ReportAnalysis("pass", "h", "s")
+
+    monkeypatch.setattr(openodd.agent, "analyze", fake_analyze)
+    (tmp_path / "r_coverage.json").write_text(json.dumps(_campaign()[0]), encoding="utf-8")
+    (tmp_path / "system.md").write_text("sys", encoding="utf-8")
+    assert main([str(tmp_path / "r_coverage.json"), "-o", str(tmp_path / "r.html"),
+                 "--system-prompt", str(tmp_path / "system.md"), "--no-skill",
+                 "--plugin", str(tmp_path), "--skill", "house:criteria", "--model", "m"]) == 0
+    assert seen["system_prompt"] == "sys" and seen["skill"] is False and seen["model"] == "m"
+    assert seen["plugins"] == [tmp_path] and seen["skills"] == ["house:criteria"]
+
+
+def test_the_tools_round_their_figures() -> None:
+    tools = {t.name: t for t in openodd.agent.report_tools(_report())}
+    _, text = _call(tools["summary"], {})
+    figures = re.findall(r"\d+\.\d+", text)
+    assert figures and all(len(f.replace(".", "").lstrip("0")) <= 4 for f in figures)

@@ -502,6 +502,17 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-test-repo
     parser.add_argument("--model", default=None, help="the Claude model (default: openodd.agent.DEFAULT_MODEL)")
     parser.add_argument("--language", default="English", help="the analysis's language (default: English)")
     parser.add_argument("--instructions", default="", help="more for Claude to consider, e.g. the pass criteria")
+    parser.add_argument("--system-prompt", type=Path, metavar="FILE",
+                        help="the analyst's system prompt (default: the plugin's prompts/system.md)")
+    parser.add_argument("--task-prompt", type=Path, metavar="FILE",
+                        help="the task prompt's template, with {title} {runs} {passed} {failed} "
+                        "{no_outcome} {language} {instructions} (default: the plugin's prompts/task.md)")
+    parser.add_argument("--no-skill", action="store_true",
+                        help="leave out the odd-test-analysis skill: the system prompt only")
+    parser.add_argument("--plugin", type=Path, action="append", default=[], metavar="DIR",
+                        help="a Claude Code plugin with skills of your own; repeat for more")
+    parser.add_argument("--skill", action="append", default=[], metavar="PLUGIN:SKILL",
+                        help="a skill of those plugins to enable; repeat for more")
     parser.add_argument("--max-turns", type=int, default=None, help="the agent's turn limit")
     parser.add_argument("--max-budget-usd", type=float, default=None, help="the agent's spending limit")
     parser.add_argument("--no-views", action="store_true", help="leave out the interactive views")
@@ -520,7 +531,11 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-test-repo
     elif not args.no_agent:
         from . import agent  # noqa: PLC0415 - the SDK is optional
 
-        options: dict[str, Any] = {"language": args.language, "instructions": args.instructions}
+        options: dict[str, Any] = {"language": args.language, "instructions": args.instructions,
+                                   "skill": not args.no_skill, "plugins": args.plugin, "skills": args.skill}
+        for name, path in (("system_prompt", args.system_prompt), ("task_prompt", args.task_prompt)):
+            if path is not None:
+                options[name] = path.read_text(encoding="utf-8")
         if args.model:
             options["model"] = args.model
         if args.max_turns is not None:
