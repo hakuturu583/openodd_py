@@ -136,6 +136,20 @@ pub struct Viewer {
     models: RefCell<HashMap<String, CasePredictor>>,
 }
 
+/// What a fitted model is cached by: the selection of runs (scenario,
+/// environment, basis and its window). `environment` keeps "all" (`None`)
+/// apart from "those that recorded none" (`Some(None)`).
+fn model_key(query: &CaseQuery) -> String {
+    json!([
+        query.scenario,
+        query.environment.is_some(),
+        query.environment,
+        query.basis.as_str(),
+        query.window()
+    ])
+    .to_string()
+}
+
 /// Coverage documents from JSON: an array of them, or one.
 fn documents(raw: &str) -> Result<Vec<Json>, String> {
     match serde_json::from_str(raw).map_err(|e| e.to_string())? {
@@ -192,13 +206,7 @@ impl Viewer {
     /// pass probability only (what the colour needs: far cheaper);
     /// [`CasePredictor::grid_with`] gives the full metrics.
     fn with_model<T>(&self, query: &CaseQuery, f: impl FnOnce(&CasePredictor) -> T) -> T {
-        let key = json!([
-            query.scenario,
-            query.environment,
-            query.basis.as_str(),
-            query.window()
-        ])
-        .to_string();
+        let key = model_key(query);
         let mut models = self.models.borrow_mut();
         let model = models
             .entry(key)
@@ -386,13 +394,7 @@ impl Comparison {
     }
 
     fn with_models<T>(&self, query: &CaseQuery, f: impl FnOnce(&[CasePredictor; 2]) -> T) -> T {
-        let key = json!([
-            query.scenario,
-            query.environment,
-            query.basis.as_str(),
-            query.window()
-        ])
-        .to_string();
+        let key = model_key(query);
         let mut models = self.models.borrow_mut();
         let pair = models.entry(key).or_insert_with(|| {
             [Side::Base, Side::Other]

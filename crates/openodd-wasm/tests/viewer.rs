@@ -261,3 +261,27 @@ fn a_comparison_says_when_the_odds_differ() {
     let html = c.coverage_html_str("{}", "{}").unwrap();
     assert!(html.contains("oo-cmp-odd"));
 }
+
+#[wasm_bindgen_test]
+#[test]
+fn the_models_keep_all_environments_apart_from_none_recorded() {
+    // The sample's runs all recorded an environment: those that recorded
+    // none are no runs, and no model; every environment's model still is.
+    let q_none = r#"{"x": "gap", "y": "rain", "environment": null}"#;
+    let q_all = r#"{"x": "gap", "y": "rain"}"#;
+    let v = viewer();
+    assert!(!v
+        .cases_html_str(q_none, "{}")
+        .unwrap()
+        .contains("<g class=\"oo-pred\""));
+    assert!(v
+        .cases_html_str(q_all, "{}")
+        .unwrap()
+        .contains("<g class=\"oo-pred\""));
+    let c = comparison();
+    assert!(!c.cases_html_str(q_none, "{}").unwrap().contains("oo-pd-"));
+    assert!(c
+        .cases_html_str(q_all, "{}")
+        .unwrap()
+        .contains("<rect class=\"oo-pd-"));
+}

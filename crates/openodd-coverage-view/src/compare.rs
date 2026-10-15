@@ -192,13 +192,18 @@ impl OddCheck {
     /// One ODD on both sides: the same structure (or, when a side recorded
     /// none, the same name), and the same buckets for every attribute.
     pub fn same(&self) -> bool {
-        fn digests(s: &[(String, String)]) -> Vec<&String> {
-            let mut d: Vec<&String> = s.iter().map(|(_, d)| d).collect();
+        // An ODD is known by its structure digest, or by its name when a
+        // document recorded no digest.
+        fn ids(s: &[(String, String)]) -> Vec<&String> {
+            let mut d: Vec<&String> = s
+                .iter()
+                .map(|(name, digest)| if digest.is_empty() { name } else { digest })
+                .collect();
             d.sort();
             d.dedup();
             d
         }
-        let (a, b) = (digests(&self.base), digests(&self.other));
+        let (a, b) = (ids(&self.base), ids(&self.other));
         a.len() <= 1 && a == b && self.attributes.is_empty()
     }
 
@@ -759,5 +764,22 @@ mod tests {
         assert_eq!(Delta::of((0, 0), (2, 1)).change, Change::New);
         assert_eq!(Delta::of((3, 0), (0, 0)).change, Change::Dropped);
         assert_eq!(Delta::of((0, 0), (0, 0)).change, Change::Neither);
+    }
+
+    #[test]
+    fn odds_without_a_digest_are_known_by_name() {
+        let check = |a: &str, b: &str| OddCheck {
+            base: vec![(a.into(), String::new())],
+            other: vec![(b.into(), String::new())],
+            attributes: Vec::new(),
+        };
+        assert!(check("cut_in", "cut_in").same());
+        assert!(!check("cut_in", "merge").same());
+        let digests = OddCheck {
+            base: vec![("a".into(), "d1".into())],
+            other: vec![("b".into(), "d1".into())],
+            attributes: Vec::new(),
+        };
+        assert!(digests.same());
     }
 }
