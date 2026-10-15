@@ -316,6 +316,7 @@ async def analyze_async(
         "system_prompt": default_system_prompt() if system_prompt is None else system_prompt,
         "model": model,
         "mcp_servers": {SERVER_NAME: server},
+        "strict_mcp_config": True,  # no MCP server from the user's or the project's config
         "tools": [],  # no built-in tools: no shell, no files
         "allowed_tools": [f"mcp__{SERVER_NAME}__{t.name}" for t in tools],
         "setting_sources": [],  # nothing from the user's or the project's settings

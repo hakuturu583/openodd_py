@@ -61,7 +61,7 @@ claude_plugin/
 The agent loads the plugin and enables only the `openodd:odd-test-analysis` skill. Its
 built-in tools are `Skill` and `Read`, and a `PreToolUse` hook lets `Read` open the
 skills' files and nothing else. No user or project settings are loaded
-(`setting_sources=[]`).
+(`setting_sources=[]`), and no MCP server but the report's (`strict_mcp_config=True`).
 
 To change the analysis:
 

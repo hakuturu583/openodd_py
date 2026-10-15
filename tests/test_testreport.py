@@ -183,6 +183,7 @@ def test_analyze_through_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     assert options.model == openodd.agent.DEFAULT_MODEL
     # The skill, and Read for its files; no shell, no other built-in tool, no settings.
     assert options.tools == ["Skill", "Read"] and options.setting_sources == []
+    assert options.strict_mcp_config and list(options.mcp_servers) == ["openodd"]
     assert options.skills == [openodd.agent.SKILL_NAME]
     assert options.plugins == [{"type": "local", "path": str(openodd.agent.PLUGIN_DIR)}]
     assert sorted(options.allowed_tools) == sorted(
