@@ -46,6 +46,12 @@
   page computes the matrix and the case plot -- the flaky model's background included --
   from coverage JSON on the client, with live axis pickers; no Python, no server
   ([docs/wasm.md](docs/wasm.md), demo in [examples/wasm-viewer](examples/wasm-viewer)).
+- **Test report**: `openodd-test-report runs/ -o report.html` lays a campaign's coverage
+  files out as one HTML page -- verdict, results per scenario, every failed run, ODD
+  coverage, flakiness and the interactive views -- with an analysis Claude writes through
+  the Claude Agent SDK, reading the report with tools of its own and nothing else
+  (`pip install "openodd-py[agent]"`; `TestReport`, `openodd.agent.analyze`;
+  [docs/test_report.md](docs/test_report.md)).
 - **Find flaky regions of the ODD**: the merged report counts, per ODD cell, the runs
   that drove through it, how many failed (with a 95% Wilson interval) and how many
   failed *in* it, per scenario and environment (`CoverageReport.cell_flakiness`,

@@ -63,6 +63,8 @@ from .report import (
 )
 from . import view
 from .view import CasePlot, CoverageView
+from .testreport import Finding, ReportAnalysis, TestReport
+from . import agent
 from .sampler import OddDraws, OddKnob, OddSample, OddSampler, knobs_from_mapping
 from .flaky import FlakinessModel, FlakyMetrics, FlakySearch, ParameterSpace
 from .model import (
@@ -85,6 +87,10 @@ except _metadata.PackageNotFoundError:  # a source tree, not installed
     __version__ = "0+unknown"
 
 __all__ = [
+    "Finding",
+    "ReportAnalysis",
+    "TestReport",
+    "agent",
     "FlakinessModel",
     "FlakyMetrics",
     "FlakySearch",
