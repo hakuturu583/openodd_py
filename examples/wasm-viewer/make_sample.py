@@ -8,6 +8,10 @@ values it was drawn with, why, and the space) and its outcome. A run passes
 when the gap is long enough for the closing speed -- less so in heavy rain --
 with some noise near that boundary; a few cases are run again. The scenario
 stages every gap 1.5 m longer than drawn, for the drift view to find.
+
+It also writes sample_compare.json: the same cases on the same ODD, run by a
+"next version" of the software that needs 8 m more gap in heavy rain (a
+regression) and 6 m less in none (an improvement), for the comparison view.
 """
 
 from __future__ import annotations
@@ -41,7 +45,14 @@ def bucket(value: float, edges: list[float]) -> str:
     return f"[{edges[-2]:g}, {edges[-1]:g}]"
 
 
-def main() -> None:
+#: How much more gap the next version needs, by rain: what the comparison
+#: finds (more is worse).
+NEXT_VERSION = {"none": -6, "light": 0, "heavy": 8}
+
+
+def sweep(version: int) -> list[dict]:
+    """The sweep's coverage documents, as run by `version` (1 or 2) of the
+    software: the same cases and the same random draws either way."""
     rng = random.Random(7)
     space = openodd.ParameterSpace(numeric={"gap": (6.0, 30.0), "relative_speed": (-15.0, 5.0)},
                                    categorical={"rain": ["none", "light", "heavy"]})
@@ -53,6 +64,8 @@ def main() -> None:
     docs = []
     for n, (case, _) in enumerate(runs):
         need = 12 - 0.6 * case["relative_speed"] + {"none": 0, "light": 2, "heavy": 6}[case["rain"]]
+        if version == 2:
+            need += NEXT_VERSION[case["rain"]]
         p_pass = 1 / (1 + math.exp(-(case["gap"] - need) / 1.5))
         passed = rng.random() < p_pass
         collector = openodd.CoverageCollector([], odd=odd())
@@ -78,11 +91,18 @@ def main() -> None:
             gap = max(0.5, gap + case["relative_speed"] / 3.6 * 0.1)
             collector.tick({"gap": gap, "speed": case["relative_speed"], "rain": case["rain"]}, t)
         collector.end({}, t)
-        collector.record_outcome(passed, failed_at=None if passed else round(t * 0.8, 2), environment="sample")
+        collector.record_outcome(passed, failed_at=None if passed else round(t * 0.8, 2),
+                                 environment="sample" if version == 1 else "sample-v2")
         docs.append(collector.to_dict("CutIn"))
-    out = HERE / "sample.json"
-    out.write_text(json.dumps(docs, separators=(",", ":")), encoding="utf-8")
-    print(f"{out}: {len(docs)} runs, {out.stat().st_size // 1024} KiB")
+    return docs
+
+
+def main() -> None:
+    for name, version in (("sample.json", 1), ("sample_compare.json", 2)):
+        docs = sweep(version)
+        out = HERE / name
+        out.write_text(json.dumps(docs, separators=(",", ":")), encoding="utf-8")
+        print(f"{out}: {len(docs)} runs, {out.stat().st_size // 1024} KiB")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,11 @@
   .load input[type=file] { display: none; }
   #status { color: var(--ink-2); font-size: 12.5px; }
   .views { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .compare h2 { margin: 12px 0 0; font-size: 17px; }
+  .compare > p { margin: 4px 0 0; color: var(--ink-2); }
+  .load select, .load input[type=text] { font: inherit; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); }
+  .load input[type=text] { width: 9em; }
 </style>
 </head>
 <body>
@@ -39,9 +44,33 @@
     <div id="drift"></div>
     <div id="coverage"></div>
   </section>
+  <section class="compare">
+    <h2>Compare two sets on the same ODD</h2>
+    <p>A baseline and another set of runs measured on the same ODD -- two versions of the software, say -- laid over one another:
+      each mark and each cell split in two, outlined by how its failure rate moved.</p>
+  </section>
+  <section class="load" id="cmp-drop">
+    <label class="file">Baseline files<input type="file" id="cmp-base" multiple accept=".json,application/json"></label>
+    <input type="text" id="cmp-base-name" value="Baseline" aria-label="Baseline name">
+    <label class="file">Compared files<input type="file" id="cmp-other" multiple accept=".json,application/json"></label>
+    <input type="text" id="cmp-other-name" value="Compared" aria-label="Compared set name">
+    <button type="button" id="cmp-sample">Load the sample comparison</button>
+    <label>Background
+      <select id="cmp-background">
+        <option value="delta">Predicted change</option>
+        <option value="base">Baseline's prediction</option>
+        <option value="other">Compared set's prediction</option>
+        <option value="none">None</option>
+      </select></label>
+    <span id="cmp-status"></span>
+  </section>
+  <section class="views">
+    <div id="cmp-cases"></div>
+    <div id="cmp-coverage"></div>
+  </section>
 </main>
 <script type="module">
-  import init, { Viewer, styles, script } from "./pkg/openodd_wasm.js";
+  import init, { Viewer, Comparison, styles, script } from "./pkg/openodd_wasm.js";
   import { install, mount } from "./pkg/viewer.js";
 
   const status = document.getElementById("status");
@@ -134,6 +163,67 @@
   }
   document.getElementById("sample").addEventListener("click", loadSample);
   await loadSample();
+
+  // The comparison: two sets of runs on the same ODD. #compare=URL loads
+  // another set to compare the sample (or #data) with.
+  const cmpStatus = document.getElementById("cmp-status");
+  const background = document.getElementById("cmp-background");
+  let compared = [];
+  const sets = { base: null, other: null };
+  function compare() {
+    if (!sets.base || !sets.other) return;
+    compared.forEach((v) => v.unmount());
+    const t = performance.now();
+    const cmp = new Comparison(JSON.stringify(sets.base), JSON.stringify(sets.other),
+      document.getElementById("cmp-base-name").value, document.getElementById("cmp-other-name").value);
+    const odd = JSON.parse(cmp.odd());
+    const caseAttrs = JSON.parse(cmp.case_attributes());
+    const coverageAttrs = JSON.parse(cmp.attributes());
+    const shared = caseAttrs.filter((a) => coverageAttrs.includes(a));
+    compared = [
+      mount(cmp, document.getElementById("cmp-cases"), {
+        view: "cases", id: "cmp-cases-plot", x: hash.get("x") || undefined, y: hash.get("y") || undefined,
+        background: background.value,
+      }),
+      mount(cmp, document.getElementById("cmp-coverage"), {
+        view: "coverage", id: "cmp-coverage-matrix", x: hash.get("cx") || shared[0], y: hash.get("cy") ?? shared[1],
+      }),
+    ];
+    cmpStatus.textContent = `${cmp.split} + ${cmp.documents - cmp.split} files, ${cmp.cases} cases; ` +
+      `${odd.same ? "the same ODD" : "different ODDs"}; ${(performance.now() - t).toFixed(0)} ms`;
+    window.openoddDemo.comparison = { cmp, views: compared };
+  }
+  background.addEventListener("change", () => {
+    compare();
+  });
+  for (const side of ["base", "other"]) {
+    document.getElementById("cmp-" + side).addEventListener("change", async (e) => {
+      const docs = [];
+      for (const f of e.target.files) {
+        try {
+          const doc = JSON.parse(await f.text());
+          (Array.isArray(doc) ? doc : [doc]).forEach((d) => docs.push(d));
+        } catch (err) {
+          console.warn(`${f.name}: not JSON`, err);
+        }
+      }
+      sets[side] = docs;
+      cmpStatus.textContent = sets.base && sets.other ? "" : `Now the ${side === "base" ? "compared" : "baseline"} files.`;
+      compare();
+    });
+  }
+  async function loadComparison() {
+    const base = hash.get("data") || "./sample.json";
+    const other = hash.get("compare") || "./sample_compare.json";
+    [sets.base, sets.other] = await Promise.all([base, other].map(async (u) => (await fetch(u)).json()));
+    if (!hash.get("compare")) {
+      document.getElementById("cmp-base-name").value = "v1";
+      document.getElementById("cmp-other-name").value = "v2";
+    }
+    compare();
+  }
+  document.getElementById("cmp-sample").addEventListener("click", loadComparison);
+  await loadComparison();
 </script>
 </body>
 </html>

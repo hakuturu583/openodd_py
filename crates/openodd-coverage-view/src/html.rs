@@ -27,6 +27,8 @@ use std::fmt::Write as _;
 use crate::data::{Dataset, ABOVE_RANGE, BELOW_RANGE, MISSING};
 use crate::matrix::{Cell, CellState, Matrix, Query};
 
+pub mod compare;
+
 /// The words the component shows, for a host to translate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Labels {
@@ -546,42 +548,23 @@ fn axes_parts(m: &Matrix, free: &[String], ui: &AxesUi, opts: &Options) -> AxesP
     }
 }
 
-/// How each cell of `m` can be clicked into.
-type Targets<'a> = dyn Fn(usize, usize) -> Option<String> + 'a;
-/// Whether there is anything left to lay out inside these conditions.
-type HasDepth<'a> = dyn Fn(&[(String, String)]) -> bool + 'a;
-
-/// One matrix as a panel: breadcrumbs, legend, grid. `open` gives, in the
-/// self-contained explorer, the panel of a cell (row, column); `crumbs` the
-/// panels of the levels above, outermost first, each with how many of the
-/// conditions it was inside.
-#[allow(clippy::too_many_arguments)]
-fn panel(
-    axes: (&AxesUi, &[String]),
-    truncated: bool,
+/// The breadcrumbs: the whole ODD, then each level clicked into. `crumbs`
+/// gives, in the self-contained explorer, the panels of the levels above,
+/// outermost first, each with how many of the conditions it was inside;
+/// without it each condition is a crumb that drills there.
+fn crumbs_html(
     out: &mut String,
-    m: &Matrix,
-    opts: &Options,
-    panel_id: &str,
-    hidden: bool,
-    open: Option<&Targets>,
+    conds: &[(String, String)],
     crumbs: Option<&[(String, usize)]>,
-    has_depth: &HasDepth,
+    opts: &Options,
 ) {
     let labels = &opts.labels;
-    let _ = write!(
-        out,
-        "<section class=\"oo-panel\" id=\"{}\" tabindex=\"-1\"{}>",
-        escape(panel_id),
-        if hidden { " hidden" } else { "" }
-    );
     // Breadcrumbs: the whole ODD, then each level clicked into.
     let _ = write!(
         out,
         "<nav class=\"oo-crumbs\" aria-label=\"{}\">",
         escape(&labels.levels)
     );
-    let conds = &m.query.conditions;
     let mut levels: Vec<(usize, Option<String>)> = match crumbs {
         Some(up) => up.iter().map(|(id, n)| (*n, Some(id.clone()))).collect(),
         None => (0..conds.len()).map(|n| (n, None)).collect(),
@@ -631,6 +614,38 @@ fn panel(
         );
     }
     out.push_str("</nav>");
+}
+
+/// How each cell of `m` can be clicked into.
+type Targets<'a> = dyn Fn(usize, usize) -> Option<String> + 'a;
+/// Whether there is anything left to lay out inside these conditions.
+type HasDepth<'a> = dyn Fn(&[(String, String)]) -> bool + 'a;
+
+/// One matrix as a panel: breadcrumbs, legend, grid. `open` gives, in the
+/// self-contained explorer, the panel of a cell (row, column); `crumbs` the
+/// panels of the levels above, outermost first, each with how many of the
+/// conditions it was inside.
+#[allow(clippy::too_many_arguments)]
+fn panel(
+    axes: (&AxesUi, &[String]),
+    truncated: bool,
+    out: &mut String,
+    m: &Matrix,
+    opts: &Options,
+    panel_id: &str,
+    hidden: bool,
+    open: Option<&Targets>,
+    crumbs: Option<&[(String, usize)]>,
+    has_depth: &HasDepth,
+) {
+    let labels = &opts.labels;
+    let _ = write!(
+        out,
+        "<section class=\"oo-panel\" id=\"{}\" tabindex=\"-1\"{}>",
+        escape(panel_id),
+        if hidden { " hidden" } else { "" }
+    );
+    crumbs_html(out, &m.query.conditions, crumbs, opts);
     let t = &m.total;
     let counts = m.counts();
     let inside: usize = m.cells.iter().flatten().filter(|c| !c.outside).count();

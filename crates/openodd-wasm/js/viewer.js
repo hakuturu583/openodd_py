@@ -11,6 +11,11 @@
 //   plot.set({ y: "rain" });                     // or let the pickers do it
 //   mount(viewer, el2, { view: "drift" });       // the scenario's realisation
 //
+//   // Two sets on the same ODD, laid over one another: the same mount.
+//   const cmp = new Comparison(JSON.stringify(before), JSON.stringify(after), "v1.2", "v1.3");
+//   mount(cmp, el3, { view: "cases", background: "delta" });
+//   mount(cmp, el4, { view: "coverage" });
+//
 // No dependencies; every number is computed in WebAssembly.
 
 /** Put the components' CSS and script on the page, once. */
@@ -27,11 +32,13 @@ export function install({ styles, script }) {
 }
 
 /**
- * Render a view of `viewer` in `el`, and keep it live.
+ * Render a view of `viewer` (a `Viewer`, or a `Comparison` of two sets) in
+ * `el`, and keep it live.
  *
  * `options`: `view` ("cases" or "coverage"), the query (`x`, `y`,
  * `conditions`, `scenario`, `environment`, ...) and the component's options
- * (`id`, `labels`, `table`, `prediction`, `instability_rings`). The view's
+ * (`id`, `labels`, `table`, `prediction`, `instability_rings`; for a
+ * `Comparison`, `names` and the case plot's `background`). The view's
  * own `openodd:axes` (and, for the coverage matrix, `openodd:drill`) events
  * are handled here: the chosen pair, or the cell clicked into, is rendered
  * at once. Each render dispatches `openodd:rendered` on `el`, with the
@@ -41,7 +48,11 @@ export function mount(viewer, el, options = {}) {
   const view = ["coverage", "drift"].includes(options.view) ? options.view : "cases";
   const queryKeys = ["x", "y", "conditions", "scenario", "environment", "min_runs", "band", "min_seconds",
     "basis", "measured_at"];
-  const optionKeys = ["id", "labels", "table", "prediction", "instability_rings", "drift_leaders", "knobs"];
+  const optionKeys = ["id", "labels", "table", "prediction", "instability_rings", "drift_leaders", "knobs",
+    "names", "background"];
+  if (view === "drift" && typeof viewer.drift_html !== "function") {
+    throw new Error("openodd: a Comparison has no drift view; mount each set's Viewer for it");
+  }
   const state = {};
   for (const k of queryKeys) if (options[k] !== undefined) state[k] = options[k];
   const opts = {};

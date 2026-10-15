@@ -431,10 +431,35 @@ impl Dataset {
             Some(x) => pick(&q.y, &[x]),
             None => None,
         };
-        q.x = x_name.clone();
-        q.y = Some(y_name.clone().unwrap_or_default());
-        let x = x_name.map(|n| self.axes[&n].clone());
-        let y = y_name.map(|n| self.axes[&n].clone());
+        q.x = x_name;
+        q.y = Some(y_name.unwrap_or_default());
+        self.tabulate(q)
+    }
+
+    /// The matrix on the axes `query` names, as they are: `x` (`None`: no
+    /// columns) and `y` (`None` or `""`: one row), each an attribute of
+    /// [`Dataset::axes`] or not used. What [`Dataset::matrix`] lays out
+    /// once it has chosen them; a comparison counts two sets of runs on the
+    /// same axes with it, whether or not each set measured them.
+    pub fn matrix_on(&self, query: &Query) -> Matrix {
+        let mut q = query.clone();
+        q.conditions.retain(|(a, _)| self.axes.contains_key(a));
+        let mut seen = std::collections::HashSet::new();
+        q.conditions.retain(|(a, _)| seen.insert(a.clone()));
+        q.x = q.x.filter(|a| self.axes.contains_key(a));
+        q.y = Some(
+            q.y.filter(|a| self.axes.contains_key(a) && q.x.is_some())
+                .unwrap_or_default(),
+        );
+        self.tabulate(q)
+    }
+
+    fn tabulate(&self, q: Query) -> Matrix {
+        let x = q.x.as_ref().map(|n| self.axes[n].clone());
+        let y =
+            q.y.as_ref()
+                .filter(|n| !n.is_empty())
+                .map(|n| self.axes[n].clone());
 
         let selected: Vec<&Run> = self.selected(&q).collect();
         let mut environments: Vec<Option<String>> = Vec::new();

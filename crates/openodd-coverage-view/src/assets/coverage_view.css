@@ -393,3 +393,104 @@
 .oo-cov .oo-agree td { text-align: center; font-family: var(--oo-mono); }
 .oo-cov .oo-agree td.oo-diag { background: var(--oo-pass-fill); }
 .oo-cov .oo-agree td.oo-off { background: var(--oo-fail-fill); font-weight: 700; }
+
+/* Comparisons: two sets of runs on one ODD (compare), the baseline's on the
+   left and the other set's on the right. How a failure rate moved is said by
+   the outline's colour, its line (solid when beyond the runs' noise, dashed
+   within it, dotted for coverage gained or lost) and an arrow or sign. */
+.oo-cov { --oo-regressed: var(--oo-fail); --oo-improved: var(--oo-pass); --oo-new: var(--oo-accent);
+  --oo-dropped: var(--oo-ink-3); --oo-delta-tint: 48%; }
+.oo-cov .oo-cmp-cell { display: grid; grid-template-columns: 1fr 1fr; align-items: stretch; padding: 0; gap: 0;
+  overflow: hidden; min-width: 132px; height: 74px; border: 1.5px solid var(--oo-border); background: var(--oo-surface); }
+.oo-cov .oo-cmp-cell .oo-half { position: relative; display: flex; flex-direction: column; justify-content: flex-end;
+  min-width: 0; padding: 6px 7px; border: 0; }
+.oo-cov .oo-cmp-cell .oo-half-other { box-shadow: inset 1px 0 0 var(--oo-surface); }
+.oo-cov .oo-cmp-cell .oo-half.oo-unsampled { background: var(--oo-surface); }
+.oo-cov .oo-cmp-cell .oo-half.oo-tentative { opacity: .72; }
+.oo-cov .oo-cmp-cell .oo-ic { top: 6px; left: 7px; }
+.oo-cov .oo-cmp-cell .oo-rate { font-size: 13.5px; }
+.oo-cov .oo-cmp-cell .oo-n { font-size: 10.5px; }
+.oo-cov .oo-cmp-cell.oo-outside { opacity: .7; }
+.oo-cov .oo-chg-regressed.oo-cmp-cell, .oo-cov .oo-sw.oo-chg-regressed { border: 2px dashed var(--oo-regressed); }
+.oo-cov .oo-chg-improved.oo-cmp-cell, .oo-cov .oo-sw.oo-chg-improved { border: 2px dashed var(--oo-improved); }
+.oo-cov .oo-chg-regressed.oo-sig.oo-cmp-cell, .oo-cov .oo-sw.oo-chg-regressed.oo-sig { border: 3px solid var(--oo-regressed); }
+.oo-cov .oo-chg-improved.oo-sig.oo-cmp-cell, .oo-cov .oo-sw.oo-chg-improved.oo-sig { border: 3px solid var(--oo-improved); }
+.oo-cov .oo-chg-new.oo-cmp-cell, .oo-cov .oo-sw.oo-chg-new { border: 2px dotted var(--oo-new); }
+.oo-cov .oo-chg-dropped.oo-cmp-cell, .oo-cov .oo-sw.oo-chg-dropped { border: 2px dotted var(--oo-dropped); }
+.oo-cov .oo-chg-badge { position: absolute; top: 5px; right: 5px; height: 16px; padding: 0 5px; border-radius: 999px;
+  display: inline-flex; align-items: center; font: 700 10px/1 var(--oo-font); white-space: nowrap;
+  color: var(--oo-ink-2); background: var(--oo-surface); border: 1px solid var(--oo-border); }
+.oo-cov .oo-chg-regressed .oo-chg-badge { color: #fff; background: var(--oo-regressed); border-color: transparent; }
+.oo-cov .oo-chg-improved .oo-chg-badge { color: #fff; background: var(--oo-improved); border-color: transparent; }
+.oo-cov .oo-chg-new .oo-chg-badge { color: var(--oo-new); }
+.oo-cov .oo-sw.oo-chg-sw { width: 18px; height: 16px; background: var(--oo-surface); color: var(--oo-ink-2); font-size: 9px; }
+.oo-cov .oo-sw.oo-chg-regressed { color: var(--oo-regressed); }
+.oo-cov .oo-sw.oo-chg-improved { color: var(--oo-improved); }
+.oo-cov .oo-sw.oo-chg-same, .oo-cov .oo-sw.oo-chg-none { border: 1.5px solid var(--oo-border-strong); }
+.oo-cov .oo-cmp-key { display: inline-grid; grid-template-columns: 1fr 1fr; gap: 2px; width: 24px; padding: 0;
+  border: 0; background: transparent; }
+.oo-cov .oo-cmp-key b { display: block; height: 14px; border-radius: 3px; background: var(--oo-pass-fill);
+  border: 1px solid var(--oo-border-strong); }
+/* The case plot: a ring per case, each side's mark inside it. */
+.oo-cov .oo-chg-ring { fill: var(--oo-surface); stroke: var(--oo-border-strong); stroke-width: 1.2; }
+.oo-cov .oo-chg-regressed .oo-chg-ring { stroke: var(--oo-regressed); stroke-width: 2.2; stroke-dasharray: 3 2; }
+.oo-cov .oo-chg-improved .oo-chg-ring { stroke: var(--oo-improved); stroke-width: 2.2; stroke-dasharray: 3 2; }
+.oo-cov .oo-chg-regressed.oo-sig .oo-chg-ring, .oo-cov .oo-chg-improved.oo-sig .oo-chg-ring { stroke-width: 3; stroke-dasharray: none; }
+.oo-cov .oo-chg-new .oo-chg-ring { stroke: var(--oo-new); stroke-width: 1.8; stroke-dasharray: 1.2 2.2; stroke-linecap: round; }
+.oo-cov .oo-chg-dropped .oo-chg-ring { stroke: var(--oo-dropped); stroke-width: 1.8; stroke-dasharray: 1.2 2.2; stroke-linecap: round; }
+.oo-cov .oo-chg-arrow { stroke: var(--oo-surface); stroke-width: 1; stroke-linejoin: round; }
+.oo-cov .oo-chg-regressed .oo-chg-arrow { fill: var(--oo-regressed); }
+.oo-cov .oo-chg-improved .oo-chg-arrow { fill: var(--oo-improved); }
+.oo-cov .oo-cmp-none { fill: var(--oo-ink-3); }
+.oo-cov .oo-cmp-case .oo-case.oo-pass .oo-m { stroke-width: 1; }
+.oo-cov .oo-cmp-case .oo-case.oo-fail .oo-m { stroke-width: 2; }
+.oo-cov .oo-cmp-case .oo-case.oo-flaky .oo-m { stroke-width: 1.8; }
+.oo-cov .oo-cmp-row.oo-chg-regressed .oo-v-cell { color: var(--oo-regressed); }
+.oo-cov .oo-cmp-row.oo-chg-improved .oo-v-cell { color: var(--oo-improved); }
+.oo-cov .oo-cmp-notrun { color: var(--oo-ink-3); font-size: 11.5px; }
+/* The change of the predicted pass rate: red where the other set is
+   predicted to pass less often, the plot's surface where nothing moved,
+   green where more often; in 21 steps. */
+.oo-cov { --oo-pd-0: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 1), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-1: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 0.9), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-2: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 0.8), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-3: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 0.7), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-4: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 0.6), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-5: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 0.5), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-6: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 0.4), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-7: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 0.3), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-8: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 0.2), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-9: color-mix(in oklab, var(--oo-fail) calc(var(--oo-delta-tint) * 0.1), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-10: var(--oo-surface-2); }
+.oo-cov { --oo-pd-11: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 0.1), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-12: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 0.2), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-13: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 0.3), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-14: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 0.4), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-15: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 0.5), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-16: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 0.6), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-17: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 0.7), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-18: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 0.8), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-19: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 0.9), var(--oo-surface-2)); }
+.oo-cov { --oo-pd-20: color-mix(in oklab, var(--oo-pass) calc(var(--oo-delta-tint) * 1), var(--oo-surface-2)); }
+.oo-cov rect.oo-pd-0 { fill: var(--oo-pd-0); }
+.oo-cov rect.oo-pd-1 { fill: var(--oo-pd-1); }
+.oo-cov rect.oo-pd-2 { fill: var(--oo-pd-2); }
+.oo-cov rect.oo-pd-3 { fill: var(--oo-pd-3); }
+.oo-cov rect.oo-pd-4 { fill: var(--oo-pd-4); }
+.oo-cov rect.oo-pd-5 { fill: var(--oo-pd-5); }
+.oo-cov rect.oo-pd-6 { fill: var(--oo-pd-6); }
+.oo-cov rect.oo-pd-7 { fill: var(--oo-pd-7); }
+.oo-cov rect.oo-pd-8 { fill: var(--oo-pd-8); }
+.oo-cov rect.oo-pd-9 { fill: var(--oo-pd-9); }
+.oo-cov rect.oo-pd-10 { fill: var(--oo-pd-10); }
+.oo-cov rect.oo-pd-11 { fill: var(--oo-pd-11); }
+.oo-cov rect.oo-pd-12 { fill: var(--oo-pd-12); }
+.oo-cov rect.oo-pd-13 { fill: var(--oo-pd-13); }
+.oo-cov rect.oo-pd-14 { fill: var(--oo-pd-14); }
+.oo-cov rect.oo-pd-15 { fill: var(--oo-pd-15); }
+.oo-cov rect.oo-pd-16 { fill: var(--oo-pd-16); }
+.oo-cov rect.oo-pd-17 { fill: var(--oo-pd-17); }
+.oo-cov rect.oo-pd-18 { fill: var(--oo-pd-18); }
+.oo-cov rect.oo-pd-19 { fill: var(--oo-pd-19); }
+.oo-cov rect.oo-pd-20 { fill: var(--oo-pd-20); }
+.oo-cov .oo-pred-bar.oo-delta-bar { background: linear-gradient(90deg, var(--oo-pd-0), var(--oo-pd-10), var(--oo-pd-20)); }

@@ -31,6 +31,8 @@ use crate::cases::{AxisKind, Case, CaseAxis, CaseQuery, CaseSet, Plot, Verdict};
 use crate::html::{escape, MAX_AXIS_PAIRS};
 use crate::prediction::{Grid, GridAxis, Predictor};
 
+pub mod compare;
+
 /// The words the component shows, for a host to translate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Labels {
@@ -1255,8 +1257,9 @@ fn level(p: f64) -> usize {
 }
 
 /// The predicted pass probability, as faint rectangles behind everything
-/// else: each row's runs of one colour step as one rectangle.
-fn background(out: &mut String, lay: &Layout, grid: &Grid) {
+/// else: each row's runs of one colour step as one rectangle, of the class
+/// `scale` and the step (`oo-pp-` for the pass probability).
+fn background(out: &mut String, lay: &Layout, grid: &Grid, scale: &str) {
     let (l, t, r, b) = lay.area;
     if lay.x.axis.map(|a| a.name.as_str()) != Some(grid.x.name())
         || lay.y.axis.map(|a| a.name.as_str()) != Some(grid.y.name())
@@ -1287,7 +1290,7 @@ fn background(out: &mut String, lay: &Layout, grid: &Grid) {
             let x1 = xs[end].map(|s| s.1).unwrap_or(*x0);
             let _ = write!(
                 out,
-                "<rect class=\"oo-pp-{}\" x=\"{x0:.1}\" y=\"{y0:.1}\" width=\"{:.1}\" height=\"{:.1}\"/>",
+                "<rect class=\"{scale}{}\" x=\"{x0:.1}\" y=\"{y0:.1}\" width=\"{:.1}\" height=\"{:.1}\"/>",
                 level(cell.pass_probability),
                 (x1 - x0).max(0.0) + 0.4,
                 (y1 - y0).max(0.0) + 0.4
@@ -1591,7 +1594,7 @@ fn svg(
     );
     let found = grid.map(|g| contours(lay, g)).unwrap_or_default();
     if let Some(grid) = grid {
-        background(out, lay, grid);
+        background(out, lay, grid, "oo-pp-");
     }
     axis_svg(out, lay, true, labels);
     axis_svg(out, lay, false, labels);
