@@ -247,7 +247,7 @@ jobs:
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
 
       - run: cargo test --locked --workspace
-      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib claude-agent-sdk
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q
 
@@ -266,7 +266,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: cargo test --locked --workspace
-      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib claude-agent-sdk
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q
 
@@ -302,7 +302,7 @@ jobs:
         shell: bash
         run: |
           uv venv --python 3.12 "$RUNNER_TEMP/fresh"
-          uv pip install --python "$RUNNER_TEMP/fresh" dist/*.whl pytest hypothesis pyyaml
+          uv pip install --python "$RUNNER_TEMP/fresh" dist/*.whl pytest hypothesis pyyaml html5lib claude-agent-sdk
           PY="$RUNNER_TEMP/fresh/bin/python"
           [ -x "$PY" ] || PY="$RUNNER_TEMP/fresh/Scripts/python"
           # Run from a directory without python/openodd, so the installed wheel is
