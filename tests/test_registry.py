@@ -27,6 +27,7 @@ def _clean_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry, "_REGISTRY", {})
     monkeypatch.setattr(registry, "_GROUPS", [registry.ENTRY_POINT_GROUP])
     monkeypatch.setattr(registry, "_LOADED_GROUPS", set())
+    monkeypatch.setattr(registry, "_LOADING", [])
 
 
 def test_register_and_resolve_by_name() -> None:
@@ -43,11 +44,16 @@ def test_register_and_resolve_by_name() -> None:
         openodd.resolve_odd("small")
 
 
-def test_register_rejects_bundled_and_empty_names() -> None:
+def test_register_rejects_names_it_could_not_resolve() -> None:
     with pytest.raises(ValueError, match="bundled"):
         openodd.register_odd("default", small_odd)
     with pytest.raises(ValueError, match="empty"):
         openodd.register_odd("", small_odd)
+    with pytest.raises(ValueError, match="whitespace"):
+        openodd.register_odd(" small ", small_odd)
+    for name in ("urban.yaml", "urban.YML"):
+        with pytest.raises(ValueError, match="as a file"):
+            openodd.register_odd(name, small_odd)
 
 
 def _bundled_backend() -> openodd.Backend:
@@ -101,15 +107,55 @@ def test_yaml_paths(tmp_path: Path) -> None:
         openodd.odd_builder(tmp_path / "odd.json")
 
 
+class EntryPoint:
+    def __init__(self, name: str, register) -> None:
+        self.name, self.value, self._register = name, f"{name}:register", register
+
+    def load(self):
+        return self._register
+
+
+def _entry_points(monkeypatch: pytest.MonkeyPatch, points: dict) -> None:
+    import importlib.metadata
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda *, group: points.get(group, []))
+
+
+def other_odd() -> OddDefinition:
+    return OddDefinition("other", [OddAttribute("speed", _speed, buckets=[0, 1])])
+
+
+def test_code_wins_over_entry_points(monkeypatch: pytest.MonkeyPatch) -> None:
+    _entry_points(monkeypatch, {
+        "openodd.odds": [EntryPoint("a", lambda: openodd.register_odd("urban", other_odd))],
+        "late.odds": [EntryPoint("b", lambda: openodd.register_odd("small", other_odd))],
+    })
+    openodd.register_odd("urban", small_odd)
+    assert openodd.resolve_odd("urban").name == "small"  # loading the entry point kept it
+    openodd.register_odd("small", small_odd)
+    openodd.add_entry_point_group("late.odds")
+    assert openodd.odd_builder("small") is small_odd
+
+
+def test_unregister_sticks_for_an_entry_point(monkeypatch: pytest.MonkeyPatch) -> None:
+    _entry_points(monkeypatch, {
+        "openodd.odds": [EntryPoint("a", lambda: openodd.register_odd("urban", small_odd))],
+    })
+    assert openodd.unregister_odd("urban") is small_odd
+    assert "urban" not in openodd.odd_names()
+
+
+def test_a_failing_entry_point_registers_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def half() -> None:
+        openodd.register_odd("half", small_odd)
+        raise RuntimeError("broken half way")
+
+    _entry_points(monkeypatch, {"openodd.odds": [EntryPoint("half", half)]})
+    assert "half" not in openodd.odd_names()
+
+
 def test_entry_points(monkeypatch: pytest.MonkeyPatch) -> None:
     loaded: list[str] = []
-
-    class EntryPoint:
-        def __init__(self, name: str, register) -> None:
-            self.name, self.value, self._register = name, f"{name}:register", register
-
-        def load(self):
-            return self._register
 
     def broken() -> None:
         raise RuntimeError("broken plugin")

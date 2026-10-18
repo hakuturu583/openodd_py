@@ -63,23 +63,46 @@ OddSpec = Union[str, "os.PathLike[str]", OddDefinition, None]
 _REGISTRY: dict[str, OddBuilder] = {}
 _GROUPS: list[str] = [ENTRY_POINT_GROUP]
 _LOADED_GROUPS: set[str] = set()
+#: The entry point being loaded, if any: what it registers never replaces a name.
+_LOADING: list[str] = []
 
 
 def register_odd(name: str, builder: OddBuilder) -> None:
     """Register *builder* (taking nothing, returning an ODD) under *name*.
 
+    A name registered in code replaces one an entry point registered; an
+    entry point never replaces a name already registered, whichever loaded
+    first.
+
     Raises:
-        ValueError: if *name* is empty or names a bundled ODD.
+        ValueError: if *name* is empty, has surrounding whitespace, ends in
+            ``.yaml`` / ``.yml`` (it would be read as a file), or names a
+            bundled ODD.
     """
     if not name:
         raise ValueError("register_odd(): name must not be empty")
+    if name != name.strip():
+        raise ValueError(f"register_odd(): {name!r} has surrounding whitespace")
+    if _is_yaml(name):
+        raise ValueError(f"register_odd(): {name!r} would be read as a file")
     if name in BUNDLED_ODDS:
         raise ValueError(f"register_odd(): {name!r} is a bundled ODD")
+    previous = _REGISTRY.get(name)
+    if previous is not None and previous is not builder:
+        if _LOADING:
+            logger.warning(
+                "ODD plugin %r registers %r, which is registered already; keeping that one",
+                _LOADING[-1],
+                name,
+            )
+            return
+        logger.warning("register_odd(): replacing the ODD registered as %r", name)
     _REGISTRY[name] = builder
 
 
 def unregister_odd(name: str) -> Optional[OddBuilder]:
     """Forget the ODD registered under *name*; return its builder, if any."""
+    _load_plugins()  # else an entry point would register it again later
     return _REGISTRY.pop(name, None)
 
 
@@ -110,11 +133,18 @@ def _load_plugins() -> None:
             continue
         _LOADED_GROUPS.add(group)
         for entry_point in importlib_metadata.entry_points(group=group):
+            before = dict(_REGISTRY)
+            _LOADING.append(entry_point.name)
             try:
                 entry_point.load()()
                 logger.info("Loaded ODD plugin %r from %s", entry_point.name, entry_point.value)
             except Exception:  # one bad plugin must not stop the rest
+                # Nothing of a plugin that failed half way is kept.
+                _REGISTRY.clear()
+                _REGISTRY.update(before)
                 logger.exception("Failed to load ODD plugin %r; skipping.", entry_point.name)
+            finally:
+                _LOADING.pop()
 
 
 def odd_names() -> list[str]:

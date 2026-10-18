@@ -151,7 +151,12 @@ def register() -> None:
     register_odd("urban", urban_odd)
 ```
 
-The entry points are loaded the first time a name is looked up. One that
-fails to load is logged and skipped. An application that advertises a group
+The entry points are loaded the first time a name is looked up (or
+unregistered). One that fails to load is logged and skipped, and nothing it
+registered before failing is kept. An entry point never replaces a name that
+is registered already -- in code, or by an entry point loaded before it --
+while `register_odd` in code replaces whatever is registered. A name with
+surrounding whitespace, or ending in `.yaml` / `.yml`, cannot be registered:
+it would not be read back as a name. An application that advertises a group
 of its own adds it with `add_entry_point_group("my_app.odds")`; its entry
 points follow the same convention.
