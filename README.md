@@ -62,6 +62,12 @@
   failed *in* it, per scenario and environment (`CoverageReport.cell_flakiness`,
   [docs/flaky.md](docs/flaky.md#flakiness-per-odd-cell)).
 
+- **Write an ODD in Python** instead of YAML (`OddDefinition`, `OddAttribute`,
+  `OddModule`), register it by name (`register_odd`, the `openodd.odds` entry point
+  group), and let users pick one by a string -- a bundled or registered name, a `.yaml`
+  file or `package.module:function` (`resolve_odd`;
+  [docs/python_odd.md](docs/python_odd.md)).
+
 What measures the attributes -- a simulator, a recorded log -- is the application's
 *backend*: a subclass of `openodd.Backend` naming its probes, how a run sets an
 attribute (`knob`), and where the ego is (`position`, `geolocation`). Everything

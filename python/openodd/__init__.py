@@ -12,6 +12,12 @@ it, and version it by the files it was read from::
     odd.revision          # the digest of the files it was read from
     odd.archive()         # those files, as a deterministic .tar.gz
 
+An ODD can be written in Python too, registered by name, and picked by a
+string (:mod:`.registry`)::
+
+    openodd.register_odd("urban", urban_odd)   # urban_odd() returns an OddDefinition
+    odd = openodd.resolve_odd("urban")         # or "urban.yaml", "pkg.mod:fn", "default"
+
 What measures the attributes -- a simulator, a recorded log -- is the
 application's :class:`Backend`.
 """
@@ -80,6 +86,18 @@ from .model import (
     module_holds,
     read_probe,
 )
+from . import registry
+from .registry import (
+    DEFAULT_ODD,
+    ENTRY_POINT_GROUP,
+    add_entry_point_group,
+    odd_builder,
+    odd_names,
+    register_odd,
+    registered_odds,
+    resolve_odd,
+    unregister_odd,
+)
 
 try:
     __version__: str = _metadata.version("openodd-py")
@@ -87,6 +105,16 @@ except _metadata.PackageNotFoundError:  # a source tree, not installed
     __version__ = "0+unknown"
 
 __all__ = [
+    "DEFAULT_ODD",
+    "ENTRY_POINT_GROUP",
+    "add_entry_point_group",
+    "odd_builder",
+    "odd_names",
+    "register_odd",
+    "registered_odds",
+    "registry",
+    "resolve_odd",
+    "unregister_odd",
     "Finding",
     "ReportAnalysis",
     "TestReport",
