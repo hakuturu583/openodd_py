@@ -736,8 +736,8 @@ fn edge_lines(doc: &Document, e: &Edge) -> (String, Vec<String>) {
     let lines = doc
         .lines_naming(&e.from, &e.to)
         .into_iter()
-        .filter(|(inc, _)| *inc == include)
-        .map(|(_, l)| l)
+        .filter(|l| l.include == include)
+        .map(|l| l.text)
         .collect();
     let what = if include {
         "include: must hold"
@@ -967,7 +967,7 @@ struct Branch {
     kind: NodeKind,
     /// In its parent's include section (`Some(true)`), exclude section, or neither.
     include: Option<bool>,
-    /// What being there means, by the section's operator: "must hold", "one of", ...
+    /// What being there means, by its group's operator: "must hold", "one of", ...
     side: &'static str,
     lines: Vec<String>,
     active: bool,
@@ -979,32 +979,25 @@ fn branch(r: &Report, d: &Document, name: &str, stack: &mut Vec<String>) -> Vec<
     let Some(m) = r.modules.iter().find(|m| m.name == name) else {
         return vec![];
     };
-    if stack.len() >= 4 || stack.iter().any(|s| s == name) {
+    // The reader refuses a cycle; this only keeps a bad document finite.
+    if stack.iter().any(|s| s == name) {
         return vec![];
     }
     stack.push(name.to_string());
-    let lines_of = |target: &str, include: bool| -> Vec<String> {
-        d.lines_naming(name, target)
+    // The lines naming a target in one section, and the badge the first
+    // gives it: its own group's operator, and whether it negates.
+    let lines_of = |target: &str, include: bool| -> (&'static str, Vec<String>) {
+        let lines: Vec<crate::doc::Line> = d
+            .lines_naming(name, target)
             .into_iter()
-            .filter(|(inc, _)| *inc == include)
-            .map(|(_, l)| l)
-            .collect()
-    };
-    let side = |include: bool| {
-        let all = if include { &m.include } else { &m.exclude }
-            .as_ref()
-            .is_none_or(|(all, _)| *all);
-        match (include, all) {
-            (true, true) => "must hold",
-            (true, false) => "one of",
-            (false, true) => "outside if all",
-            (false, false) => "outside if",
-        }
+            .filter(|l| l.include == include)
+            .collect();
+        let badge = lines.first().map_or("", |l| l.badge());
+        (badge, lines.into_iter().map(|l| l.text).collect())
     };
     let mut out = vec![];
     for l in &m.links {
-        let lines = lines_of(&l.target, l.include);
-        let side = side(l.include);
+        let (side, lines) = lines_of(&l.target, l.include);
         let child = if !l.module {
             Branch {
                 name: l.target.clone(),
@@ -1135,6 +1128,15 @@ fn branch_view(b: Branch) -> AnyView {
     } else {
         b.name.clone()
     };
+    // A module's or label's plain "x holds" says nothing its row does not;
+    // anything else ("x does not hold", a nested group) is shown.
+    let plain = format!("{} holds", b.name);
+    let lines: Vec<String> = b
+        .lines
+        .iter()
+        .filter(|l| is_attr || **l != plain)
+        .cloned()
+        .collect();
     view! {
         <li class=format!("sbranch {side}")>
             <div class=format!("srow {kind_class}") class:inactive=!b.active>
@@ -1147,8 +1149,8 @@ fn branch_view(b: Branch) -> AnyView {
                 </button>
                 {move || truth().map(|c| view! { <span class=c></span> })}
             </div>
-            {(!b.lines.is_empty() && is_attr).then(|| view! {
-                <div class="slines">{b.lines.iter().map(|l| view! { <div class="mono">{l.clone()}</div> }).collect_view()}</div>
+            {(!lines.is_empty()).then(|| view! {
+                <div class="slines">{lines.into_iter().map(|l| view! { <div class="mono">{l}</div> }).collect_view()}</div>
             })}
             {(!b.children.is_empty()).then(|| view! {
                 <ul class="stree">{b.children.into_iter().map(branch_view).collect_view()}</ul>
@@ -1451,5 +1453,38 @@ mod tests {
         let bad = &weather.children[0];
         assert_eq!(bad.name, "bad_weather");
         assert!(bad.children.iter().all(|b| b.side == "one of"));
+        // The nested OR group of an AND section: one of them, not both.
+        let junction = town
+            .children
+            .iter()
+            .find(|b| b.name == "scenery.junction")
+            .unwrap();
+        assert_eq!(junction.side, "one of");
+    }
+
+    #[test]
+    fn the_structure_tree_follows_long_chains_and_negations() {
+        // r -> m1 -> ... -> m6 -> a, with m1 required not to hold.
+        let mut text = String::from("TAXONOMY:\n  a: [x, y]\nMODULES:\n");
+        for i in 1..6 {
+            text += &format!("  m{i}:\n    INCLUDE_AND: {{m{}: true}}\n", i + 1);
+        }
+        text += "  m6:\n    INCLUDE_AND: {a: x}\nODD:\n  r:\n    INCLUDE_AND: {m1: false}\n";
+        let r = crate::check::check(&crate::check::Files {
+            entry: "odd.yaml".into(),
+            text: text.clone(),
+            library: vec![],
+        })
+        .unwrap();
+        let d = Document::from_yaml(&text).unwrap();
+        let rows = branch(&r, &d, "r", &mut vec![]);
+        assert_eq!(rows[0].side, "must not hold");
+        assert_eq!(rows[0].lines, ["m1 does not hold"]);
+        let mut b = &rows[0];
+        for _ in 0..5 {
+            b = &b.children[0];
+        }
+        assert_eq!(b.name, "m6");
+        assert_eq!(b.children[0].name, "a");
     }
 }
