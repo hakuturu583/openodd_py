@@ -9,7 +9,7 @@ repository = "https://github.com/hakuturu583/openodd_py"
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/openodd-coverage-view", "crates/openodd-wasm"]
+members = [".", "crates/openodd-coverage-view", "crates/openodd-wasm", "crates/openodd-editor"]
 
 [lib]
 name = "openodd"
@@ -55,3 +55,10 @@ getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# The browser builds (crates/openodd-editor, crates/openodd-wasm): small over fast.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1

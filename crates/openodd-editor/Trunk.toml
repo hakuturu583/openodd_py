@@ -1,0 +1,6 @@
+[build]
+target = "index.html"
+dist = "dist"
+# Relative, so the page works from any path (GitHub Pages serves it under the
+# repository's name).
+public_url = "./"

@@ -35,7 +35,7 @@ use regex::Regex;
 
 use crate::error::{Error, Result};
 use crate::items::{Buckets, Criteria};
-use crate::model::{Attribute, Condition, Module, Odd, Predicate, Probe, Section};
+use crate::model::{Attribute, ConceptKind, Condition, Module, Odd, Predicate, Probe, Section};
 use crate::sources::{self, GitSource};
 use crate::transmission::{Origin, Transmission};
 use crate::units::{normalize_unit, Conversion, Units};
@@ -503,15 +503,22 @@ const PRIMITIVES: [&str; 4] = ["integer", "long", "float", "double"];
 const UNKNOWN: [&str; 4] = ["unknown", "none", "null", "undefined"];
 const NUMBER: &str = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?";
 
-static IDENTIFIER: LazyLock<Regex> =
+// The grammar of names and expressions, public so that tools editing OpenODD
+// text (crates/openodd-editor) read it as this reader does.
+
+/// A concept's or module's id.
+pub static IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_.\-]*$").unwrap());
-static RANGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+/// `[low .. high] unit` (or `[low, high]`).
+pub static RANGE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\[\s*(?P<low>[^\],]+?)\s*(?:\.\.|,)\s*(?P<high>[^\]]+?)\s*\]\s*(?P<unit>\S+)?$")
         .unwrap()
 });
-static BOUND_RE: LazyLock<Regex> =
+/// `<op> rest`: a bound (`<= 60 km/h`, `>= heavy`).
+pub static BOUND_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?P<op><=|>=|<|>)\s*(?P<rest>.+)$").unwrap());
-static QUANTITY_RE: LazyLock<Regex> =
+/// A number and its unit (`60 km/h`, `60km/h`, `2`).
+pub static QUANTITY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(&format!(r"^(?P<value>{NUMBER})\s*(?P<unit>\S+)?$")).unwrap());
 
 #[derive(Debug, Clone, PartialEq)]
@@ -526,6 +533,8 @@ enum Kind {
 struct Concept {
     path: Vec<String>,
     kind: Kind,
+    /// A number's primitive (`integer`, `float`, ...).
+    primitive: String,
     unit_type: String,
     literals: Vec<String>,
     /// literal -> the expressions defining it (a derived categorical)
@@ -541,6 +550,7 @@ impl Concept {
         Concept {
             path,
             kind,
+            primitive: String::new(),
             unit_type: String::new(),
             literals: vec![],
             definitions: vec![],
@@ -643,6 +653,7 @@ fn flatten(
             let head = tokens.first().copied().unwrap_or("");
             if PRIMITIVES.contains(&head) {
                 let mut c = Concept::new(prefix.to_vec(), Kind::Number);
+                c.primitive = head.to_string();
                 c.unit_type = tokens[1..].join(" ");
                 out.insert(path, c);
             } else if head == "boolean" && tokens.len() == 1 {
@@ -867,6 +878,7 @@ impl<'r> Reader<'r> {
                     let c = self.concepts.get_mut(&key).expect("still there");
                     c.kind = t.kind.clone();
                     c.literals = t.literals.clone();
+                    c.primitive = t.primitive.clone();
                     c.unit_type = t.unit_type.clone();
                     c.ordered = ordered;
                 }
@@ -1237,6 +1249,15 @@ impl<'r> Reader<'r> {
         let text = binding.get("text").map(NodeExt::py_str).unwrap_or_default();
         let mut attribute = Attribute::new(name.clone(), probe, unit, text, criteria)
             .map_err(|e| Error::open_odd(format!("binding {name}: {e}")))?;
+        attribute.concept = match concept.kind {
+            Kind::Number => ConceptKind::Number {
+                primitive: concept.primitive.clone(),
+                unit_type: concept.unit_type.clone(),
+            },
+            Kind::Boolean => ConceptKind::Boolean,
+            Kind::Categorical if !concept.definitions.is_empty() => ConceptKind::Derived,
+            Kind::Categorical | Kind::Reference => ConceptKind::Categorical,
+        };
         if let Some(b) = buckets {
             attribute
                 .set_buckets(b)
@@ -1681,6 +1702,12 @@ impl<'r> Reader<'r> {
     fn build(mut self) -> Result<Odd> {
         self.build_attributes()?;
         let mut modules = self.build_modules()?;
+        // Numbers read in the unit their conditions write, nothing measuring them.
+        for a in &mut self.attributes {
+            if let Some(u) = self.assumed_units.get(&a.name) {
+                a.written_unit = u.clone();
+            }
+        }
         self.mark_situations(&mut modules)?;
         self.threshold_buckets(&modules)?;
         let tails: BTreeSet<String> = self
@@ -2281,6 +2308,43 @@ ODD:
         );
         let err = load_binding(&binding, &Units1).unwrap_err();
         assert!(err.to_string().contains("unknown probe 'nope'"), "{err}");
+    }
+
+    #[test]
+    fn attributes_say_what_their_concept_is_and_the_unit_written() {
+        let text = "TAXONOMY:\n  n: integer count\n  v: float velocity\n  b: boolean\n  c: [x, y]\n  rate: float precipitation_rate\n  level:\n    dry: {rate: \"< 0.1 mm/h\"}\n    wet: {rate: \">= 0.1 mm/h\"}\nMODULES:\n  m:\n    INCLUDE_AND: {v: \"<= 60 km/h\", n: \"< 3\"}\n";
+        let odd = load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe)
+            .unwrap()
+            .odd;
+        let a = |n: &str| odd.attribute(n).unwrap().clone();
+        assert_eq!(
+            a("n").concept,
+            ConceptKind::Number {
+                primitive: "integer".into(),
+                unit_type: "count".into()
+            }
+        );
+        assert_eq!(a("b").concept, ConceptKind::Boolean);
+        assert_eq!(a("c").concept, ConceptKind::Categorical);
+        // Derived even though nothing it reads is measured.
+        assert!(!a("level").derived());
+        assert_eq!(a("level").concept, ConceptKind::Derived);
+        assert_eq!(a("v").written_unit, "km/h");
+        assert_eq!(a("rate").written_unit, "mm/h");
+        assert_eq!(a("n").written_unit, "");
+        // A reference to a number takes its primitive too.
+        let text =
+            "TAXONOMY:\n  types:\n    lanes: integer count\n  road:\n    lane_count: lanes\n";
+        let odd = load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe)
+            .unwrap()
+            .odd;
+        assert_eq!(
+            odd.attribute("road.lane_count").unwrap().concept,
+            ConceptKind::Number {
+                primitive: "integer".into(),
+                unit_type: "count".into()
+            }
+        );
     }
 
     #[test]

@@ -1,0 +1,48 @@
+# An urban shuttle's ODD: slow roads in town, by day or with street lights,
+# and no heavy weather.
+TAXONOMY:
+  scenery:
+    road_type: [local, collector, arterial, expressway]
+    lane_count: integer count
+    junction: boolean
+    speed_limit: float velocity
+  environment:
+    illumination: [day, twilight, night]
+    rainfall_rate: float precipitation_rate
+    rainfall:
+      dry: {rainfall_rate: "< 0.1 mm/h"}
+      light: {rainfall_rate: "[0.1 .. 2.5] mm/h"}
+      heavy: {rainfall_rate: "> 2.5 mm/h"}
+    fog: [none, light, dense]
+  dynamic:
+    ego_speed: float velocity
+    pedestrian_nearby: boolean
+MODULES:
+  town_roads:
+    TITLE: Roads in town
+    INCLUDE_AND:
+      road_type: [local, collector]
+      lane_count: "<= 2"
+      speed_limit: "<= 50 km/h"
+      OR:
+        junction: false
+        ego_speed: "< 20 km/h"
+  bad_weather:
+    LABEL: weather
+    INCLUDE_OR:
+      rainfall: ">= heavy"
+      fog: dense
+  dark:
+    INCLUDE_AND:
+      illumination: night
+ODD:
+  urban_shuttle:
+    TITLE: Urban shuttle
+    DESCRIPTION: Slow roads in town, without heavy weather
+    METADATA: {version: "1.0.0"}
+    INCLUDE_AND:
+      town_roads: true
+      ego_speed: "[0 .. 40] km/h"
+    EXCLUDE_OR:
+      weather: true
+      dark: true

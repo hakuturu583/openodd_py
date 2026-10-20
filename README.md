@@ -46,6 +46,17 @@
   page computes the matrix and the case plot -- the flaky model's background included --
   from coverage JSON on the client, with live axis pickers; no Python, no server
   ([docs/wasm.md](docs/wasm.md), demo in [examples/wasm-viewer](examples/wasm-viewer)).
+- **Edit an ODD in the browser, visually**: `crates/openodd-editor` draws the ODD
+  as it is edited, with this library's reader compiled to WebAssembly:
+  - a graph of roots, modules and the attributes they test;
+  - a map of any two attributes;
+  - each attribute's domain, allowed or excluded;
+  - number lines whose condition ends you drag;
+  - a test drive judging values live.
+
+  It is written in Rust and Leptos, with no server
+  ([docs/editor.md](docs/editor.md), demo at
+  [hakuturu583.github.io/openodd_py](https://hakuturu583.github.io/openodd_py/)).
 - **Comparing two sets on one ODD**: the same views with two sets of runs laid over one
   another -- a baseline and, say, the next version of the software -- each cell and each
   case split in two and outlined by how its failure rate moved, behind the cases the
