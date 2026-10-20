@@ -56,7 +56,7 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from .backend import Backend, default_backend
 from .cells import OddCells
@@ -523,7 +523,7 @@ class CoverageCollector:
         self._passed: Optional[bool] = None
         self._failed_at: Optional[float] = None
         self._environment: Optional[str] = None
-        self._weight: Optional[float] = None
+        self._weight: Optional[Union[float, str]] = None
 
     def record_case(self, case: Any, space: Optional[Any] = None) -> None:
         """Record the case this run ran: an :class:`~.sampler.OddSample`.
@@ -571,8 +571,9 @@ class CoverageCollector:
             weight: The run's importance-sampling likelihood ratio (NADE's
                 weight, say), for the report's naturalistic failure rate
                 (:attr:`~.report.CoverageReport.weighted_outcomes`).
-                ``None`` for a run not importance sampled. Ignored, with a
-                warning, if not a finite number of at least 0.
+                ``None`` for a run not importance sampled. If not a finite
+                number of at least 0, the run is left out of the weighted
+                outcomes, with a warning.
 
         Each call replaces what an earlier one recorded, the time, the
         environment and the weight included.
@@ -598,7 +599,13 @@ class CoverageCollector:
             if math.isfinite(w) and w >= 0.0:
                 self._weight = w
             else:
-                logger.warning("coverage: weight=%r is not a likelihood ratio; ignored", weight)
+                # Written as a string, so the merge leaves the run out of the
+                # weighted estimate instead of counting it with weight 1.
+                self._weight = str(weight)
+                logger.warning(
+                    "coverage: weight=%r is not a likelihood ratio; the run is left out of the weighted outcomes",
+                    weight,
+                )
 
     def _outcome(self) -> Optional[dict[str, Any]]:
         """The coverage file's ``outcome``: only what was recorded."""

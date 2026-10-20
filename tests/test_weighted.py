@@ -31,7 +31,11 @@ def test_the_collector_writes_a_weight_only_when_given(caplog: pytest.LogCapture
     with caplog.at_level(logging.WARNING):
         for bad in (-1.0, float("nan"), float("inf"), True, "0.5"):
             collector.record_outcome(False, weight=bad)  # type: ignore[arg-type]
-            assert collector.to_dict("s")["outcome"] == {"passed": False}
+            assert collector.to_dict("s")["outcome"] == {"passed": False, "weight": str(bad)}
+            # The merge leaves the run out rather than weighting it 1.
+            bad_run = json.loads(json.dumps(collector.to_dict("s")))
+            (o,) = merge_coverage([bad_run, doc(True, 0.5)]).weighted_outcomes
+            assert (o.runs, o.runs_failed) == (1, 0)
     assert "is not a likelihood ratio" in caplog.text
 
 

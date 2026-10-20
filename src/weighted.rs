@@ -13,6 +13,8 @@
 //!   the sample variance of `w_i f_i`, clipped to `[0, 1]`;
 //! * `relative_half_width = z s / (√n failure_rate)` is how far it has
 //!   converged (NADE runs until it falls below a threshold, 0.3 in TeraSim);
+//!   a single run has no variance estimate, so its interval is `[0, 1]` and
+//!   its relative half width unknown;
 //! * `self_normalised_rate = Σ w_i f_i / Σ w_i`, the other common estimate,
 //!   biased but of lower variance when the weights vary a lot;
 //! * `effective_runs = (Σ w_i)² / Σ w_i²` (Kish's), how many unweighted runs
@@ -21,8 +23,8 @@
 //! Runs are grouped by scenario and environment (`outcome.environment`), as
 //! the per-cell outcomes are. A group is reported only when one of its runs
 //! recorded a weight; its runs without one count with weight 1. Runs without
-//! an outcome, or with a weight that is not a finite non-negative number, are
-//! left out.
+//! an outcome, or with a weight that is not a finite non-negative number (the
+//! collector writes an invalid one as a string), are left out.
 
 use indexmap::IndexMap;
 use serde_json::{json, Value as Json};
@@ -42,10 +44,11 @@ pub struct WeightedOutcome {
     pub weight_sum: f64,
     /// The unbiased estimate of the naturalistic failure rate.
     pub failure_rate: f64,
-    /// Its 95% normal interval, clipped to `[0, 1]`.
+    /// Its 95% normal interval, clipped to `[0, 1]`; `[0, 1]` for one run.
     pub ci_low: f64,
     pub ci_high: f64,
-    /// The interval's half width over the rate; `None` while no run failed.
+    /// The interval's half width over the rate; `None` while no run failed
+    /// or there is only one run.
     pub relative_half_width: Option<f64>,
     /// `Σ w_i f_i / Σ w_i`; `None` when the weights sum to 0.
     pub self_normalised_rate: Option<f64>,
@@ -141,23 +144,28 @@ fn estimate(
     z: f64,
 ) -> WeightedOutcome {
     let n = runs.len() as f64;
+    // Second moments are taken of the weights over their largest: a weight
+    // is a product over a run and can be small enough for its square to
+    // underflow (Kish's ratio does not change with the scale; the variance
+    // scales back by its square).
+    let scale = runs.iter().map(|r| r.weight).fold(0.0, f64::max);
+    let unit = if scale > 0.0 { scale } else { 1.0 };
     let terms: Vec<f64> = runs
         .iter()
-        .map(|r| if r.failed { r.weight } else { 0.0 })
+        .map(|r| if r.failed { r.weight / unit } else { 0.0 })
         .collect();
     let weight_sum: f64 = runs.iter().map(|r| r.weight).sum();
-    let squares: f64 = runs.iter().map(|r| r.weight * r.weight).sum();
-    let failure_rate = terms.iter().sum::<f64>() / n;
-    let variance = if runs.len() > 1 {
-        terms
-            .iter()
-            .map(|t| (t - failure_rate).powi(2))
-            .sum::<f64>()
-            / (n - 1.0)
+    let squares: f64 = runs.iter().map(|r| (r.weight / unit).powi(2)).sum();
+    let mean = terms.iter().sum::<f64>() / n;
+    let failure_rate = mean * unit;
+    // One run says nothing of the variance: its interval stays [0, 1] and
+    // its relative half width unknown.
+    let half = if runs.len() > 1 {
+        let variance = terms.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        Some(z * (variance / n).sqrt() * unit)
     } else {
-        0.0
+        None
     };
-    let half = z * (variance / n).sqrt();
     WeightedOutcome {
         scenario,
         environment,
@@ -165,12 +173,14 @@ fn estimate(
         runs_failed: runs.iter().filter(|r| r.failed).count() as u64,
         weight_sum,
         failure_rate,
-        ci_low: (failure_rate - half).clamp(0.0, 1.0),
-        ci_high: (failure_rate + half).clamp(0.0, 1.0),
-        relative_half_width: (failure_rate > 0.0).then(|| half / failure_rate),
-        self_normalised_rate: (weight_sum > 0.0).then(|| terms.iter().sum::<f64>() / weight_sum),
+        ci_low: half.map_or(0.0, |h| (failure_rate - h).clamp(0.0, 1.0)),
+        ci_high: half.map_or(1.0, |h| (failure_rate + h).clamp(0.0, 1.0)),
+        relative_half_width: half
+            .filter(|_| failure_rate > 0.0)
+            .map(|h| h / failure_rate),
+        self_normalised_rate: (weight_sum > 0.0).then(|| mean * unit * n / weight_sum),
         effective_runs: if squares > 0.0 {
-            weight_sum * weight_sum / squares
+            (weight_sum / unit).powi(2) / squares
         } else {
             0.0
         },
@@ -273,6 +283,27 @@ mod tests {
             .collect();
         assert_eq!(keys, vec![("a", Some("x")), ("a", Some("y"))]);
         assert_eq!(groups[0].relative_half_width, None); // nothing failed
+    }
+
+    #[test]
+    fn one_run_has_no_interval() {
+        let o = &weighted_outcomes(&[doc("a", json!({"passed": false, "weight": 0.5}))])[0];
+        assert_eq!(
+            (o.ci_low, o.ci_high, o.relative_half_width),
+            (0.0, 1.0, None)
+        );
+    }
+
+    #[test]
+    fn tiny_weights_do_not_underflow() {
+        let docs = [
+            doc("a", json!({"passed": false, "weight": 1e-200})),
+            doc("a", json!({"passed": true, "weight": 1e-200})),
+        ];
+        let o = &weighted_outcomes(&docs)[0];
+        assert!((o.effective_runs - 2.0).abs() < 1e-9);
+        assert!(o.ci_high > o.failure_rate);
+        assert!((o.relative_half_width.unwrap() - Z95 * (0.5f64 / 2.0).sqrt() / 0.5).abs() < 1e-9);
     }
 
     #[test]
