@@ -1,4 +1,5 @@
-//! The forms: the document, a concept, a module, and the lines of a section.
+//! The forms: the document, a concept, a module, and the lines of a section,
+//! each drawn with what it does to the ODD.
 //!
 //! Every form reads and writes the one document signal. Lists are keyed by
 //! their rows' ids and re-rendered only when rows come or go (a `Memo` of the
@@ -8,11 +9,14 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use web_sys::HtmlInputElement;
 
-use crate::app::{add_concept, ctx, event_target, kind_icon, Sel};
+use crate::app::{add_concept, ctx, event_target, AttributeCard, Sel};
+use crate::check::{Attribute, Report, State};
 use crate::doc::{
     fresh_id, move_in, Cond, CondValue, CondsAt, Definition, Document, KeyKind, Kind, KindTag,
     Section, ValueTag, OPERATORS, PRIMITIVES, UNIT_TYPES,
 };
+use crate::icons::{concept_icon, kind_icon, Icon};
+use crate::viz::{fmt_num, Domain, Legend, NumberLine};
 
 /// A change to part of the document.
 type Edit<T> = Box<dyn FnOnce(&mut T)>;
@@ -35,6 +39,17 @@ fn key_options(d: &Document) -> Vec<(String, &'static str)> {
     out.extend(d.modules.iter().map(|m| (m.name.clone(), "module")));
     out.extend(d.labels().into_iter().map(|l| (l, "label")));
     out
+}
+
+/// The attribute a key of a section names (by its dotted name or its own).
+fn attribute_for(r: &Report, key: &str) -> Option<Attribute> {
+    r.attribute(key)
+        .or_else(|| {
+            r.attributes
+                .iter()
+                .find(|a| a.name.rsplit('.').next() == Some(key))
+        })
+        .cloned()
 }
 
 /// Rename references in every section when a concept or module is renamed.
@@ -73,7 +88,7 @@ fn rename_keys(d: &mut Document, renames: &[(String, String)]) {
 // ---------------------------------------------------------------------------
 
 #[component]
-pub fn Overview() -> impl IntoView {
+pub fn Settings() -> impl IntoView {
     let ctx = ctx();
     let add_library = move |ev: leptos::ev::Event| {
         let input: HtmlInputElement = event_target(&ev);
@@ -90,11 +105,11 @@ pub fn Overview() -> impl IntoView {
     let imports = Memo::new(move |_| ctx.doc.with(|d| d.imports.len()));
     view! {
         <div class="card">
-            <h2>"Document"</h2>
+            <div class="card-title"><Icon name="doc"/>"Document"</div>
             <p class="hint">
                 "An ASAM OpenODD 1.0 document: the concepts of the "
-                <b>"TAXONOMY"</b>", the "<b>"MODULES"</b>" that bound them, and the "<b>"ODD"</b>
-                " modules that are its roots. Pick an item on the left to edit it; the YAML and openodd's check of it are on the right."
+                <b>"taxonomy"</b>", the "<b>"modules"</b>" that bound them, and the "<b>"ODD"</b>
+                " modules that are its roots."
             </p>
             <label class="field">
                 <span>"File name"</span>
@@ -105,8 +120,8 @@ pub fn Overview() -> impl IntoView {
             </label>
         </div>
         <div class="card">
-            <h3>"IMPORT"</h3>
-            <p class="hint">"Other OpenODD files this one reads. Add them below so the check can read them too."</p>
+            <div class="card-title"><Icon name="link"/>"IMPORT"</div>
+            <p class="hint">"Other OpenODD files this one reads. Load them below so the check reads them too."</p>
             <ul class="list">
                 {move || (0..imports.get()).map(|i| view! {
                     <li class="line">
@@ -122,14 +137,14 @@ pub fn Overview() -> impl IntoView {
                             let have = ctx.library.with(|l| l.iter().any(|(n, _)| *n == name));
                             view! { <span class=if have { "tag ok" } else { "tag bad" }>{if have { "loaded" } else { "not loaded" }}</span> }
                         }}
-                        <button class="mini danger" title="Remove" on:click=move |_| ctx.doc.update(|d| { if i < d.imports.len() { d.imports.remove(i); } })>"✕"</button>
+                        <button class="mini danger" title="Remove" on:click=move |_| ctx.doc.update(|d| { if i < d.imports.len() { d.imports.remove(i); } })><Icon name="x"/></button>
                     </li>
                 }).collect_view()}
             </ul>
             <div class="actions">
-                <button class="button" on:click=move |_| ctx.doc.update(|d| d.imports.push("taxonomy.yaml".into()))>"+ import"</button>
+                <button class="button" on:click=move |_| ctx.doc.update(|d| d.imports.push("taxonomy.yaml".into()))><Icon name="plus"/>"import"</button>
                 <label class="button">
-                    "Load imported files…"
+                    <Icon name="upload"/>"Load imported files…"
                     <input type="file" multiple accept=".yaml,.yml" class="hidden" on:change=add_library/>
                 </label>
             </div>
@@ -141,10 +156,11 @@ pub fn Overview() -> impl IntoView {
                             let n = name.clone();
                             view! {
                                 <li class="line">
+                                    <Icon name="doc"/>
                                     <span class="mono">{name.clone()}</span>
                                     <span class="hint">{format!("{} lines", text.lines().count())}</span>
                                     <button class="mini" title="Edit this file instead" on:click=move |_| { ctx.open(&name, &text); }>"open"</button>
-                                    <button class="mini danger" title="Remove" on:click=move |_| ctx.library.update(|l| l.retain(|(x, _)| *x != n))>"✕"</button>
+                                    <button class="mini danger" title="Remove" on:click=move |_| ctx.library.update(|l| l.retain(|(x, _)| *x != n))><Icon name="x"/></button>
                                 </li>
                             }
                         }).collect_view()}
@@ -153,7 +169,7 @@ pub fn Overview() -> impl IntoView {
             }}
         </div>
         <div class="card">
-            <h3>"Other sections"</h3>
+            <div class="card-title"><Icon name="code"/>"Other sections"</div>
             <p class="hint">"conversion (units the document adds), COD, OD: kept as YAML."</p>
             <textarea
                 class="code"
@@ -199,54 +215,67 @@ pub fn ConceptEditor(id: u64) -> impl IntoView {
             rename_keys(d, &[(old_path, new_path), (old, new)]);
         });
     };
-    let set_kind = move |ev: leptos::ev::Event| {
-        if let Some(t) = KindTag::from_label(&event_target_value(&ev)) {
-            ctx.doc.update(|d| {
-                if let Some(c) = d.concept_mut(id) {
-                    c.kind = c.kind.convert(t);
-                }
-            });
-        }
-    };
     let remove = move |_| {
         let parent = ctx.doc.with(|d| d.parent_of(id)).flatten();
         ctx.doc.update(|d| d.remove_concept(id));
-        ctx.sel
-            .set(parent.map(Sel::Concept).unwrap_or(Sel::Overview));
+        ctx.sel.set(parent.map(Sel::Concept).unwrap_or(Sel::Map));
     };
+    let is_attribute = Memo::new(move |_| {
+        let p = path.get();
+        ctx.report
+            .with(|r| r.as_ref().is_ok_and(|r| r.attribute(&p).is_some()))
+    });
     move || {
         if !exists.get() {
             return view! { <div class="card"><p class="hint">"This concept is gone."</p></div> }
                 .into_any();
         }
+        let icon = move || {
+            let t = tag.get().unwrap_or(KindTag::Other);
+            view! { <Icon name=concept_icon(&name(), t)/> }
+        };
         view! {
-            <div class="card">
-                <div class="card-head">
-                    <h2>
-                        <span class="icon">{move || tag.get().map(kind_icon)}</span>
-                        " "{move || path.get()}
-                    </h2>
-                    <div class="actions">
-                        <button class="mini" title="Move up" on:click=move |_| ctx.doc.update(|d| d.move_concept(id, -1))>"↑"</button>
-                        <button class="mini" title="Move down" on:click=move |_| ctx.doc.update(|d| d.move_concept(id, 1))>"↓"</button>
-                        <button class="mini danger" on:click=remove>"Delete"</button>
-                    </div>
+            <div class="editor-head">
+                <span class="big-icon">{icon}</span>
+                <div class="head-text">
+                    <div class="crumbs">{move || {
+                        let p = path.get();
+                        let parts: Vec<String> = p.split('.').map(str::to_string).collect();
+                        let n = parts.len();
+                        parts.into_iter().enumerate().map(|(i, part)| view! {
+                            <span class:last=i + 1 == n>{part}</span>
+                            {(i + 1 < n).then(|| view! { <span class="sep">"›"</span> })}
+                        }).collect_view()
+                    }}</div>
+                    <div class="kind-line">{move || tag.get().map(|t| t.label())}</div>
                 </div>
+                <div class="actions">
+                    <button class="mini" title="Move up" on:click=move |_| ctx.doc.update(|d| d.move_concept(id, -1))><Icon name="up"/></button>
+                    <button class="mini" title="Move down" on:click=move |_| ctx.doc.update(|d| d.move_concept(id, 1))><Icon name="down"/></button>
+                    <button class="mini danger" title="Delete" on:click=remove><Icon name="trash"/></button>
+                </div>
+            </div>
+            {move || is_attribute.get().then(|| view! {
+                <div class="card preview">
+                    <div class="card-title"><Icon name="map"/>"In the ODD"<span class="hint">"what the modules leave of it · drag or click to test"</span></div>
+                    <Legend/>
+                    <AttributeCard name=path.get()/>
+                </div>
+            })}
+            <div class="card">
                 <div class="grid2">
                     <label class="field">
                         <span>"Name"</span>
                         <input prop:value=name on:change=rename/>
                     </label>
-                    <label class="field">
+                    <div class="field">
                         <span>"Kind"</span>
-                        <select on:change=set_kind prop:value=move || tag.get().map(|t| t.label()).unwrap_or_default()>
-                            {KindTag::ALL.into_iter().map(|t| view! { <option value=t.label()>{t.label()}</option> }).collect_view()}
-                        </select>
-                    </label>
+                        <KindPicker id=id tag=tag/>
+                    </div>
                 </div>
                 {move || match tag.get() {
                     Some(KindTag::Number) => view! { <NumberForm id=id/> }.into_any(),
-                    Some(KindTag::Categorical) => view! { <LiteralsForm id=id/> }.into_any(),
+                    Some(KindTag::Categorical) => view! { <LiteralsForm id=id path=path/> }.into_any(),
                     Some(KindTag::Derived) => view! { <DerivedForm id=id/> }.into_any(),
                     Some(KindTag::Group) => view! { <GroupForm id=id/> }.into_any(),
                     Some(KindTag::Reference) => view! { <ReferenceForm id=id/> }.into_any(),
@@ -257,6 +286,26 @@ pub fn ConceptEditor(id: u64) -> impl IntoView {
             </div>
         }
         .into_any()
+    }
+}
+
+/// The kinds, as a row of icon buttons.
+#[component]
+fn KindPicker(id: u64, tag: Memo<Option<KindTag>>) -> impl IntoView {
+    let ctx = ctx();
+    view! {
+        <div class="kind-picker">
+            {KindTag::ALL.into_iter().map(|t| view! {
+                <button
+                    class:active=move || tag.get() == Some(t)
+                    title=t.label()
+                    on:click=move |_| ctx.doc.update(|d| if let Some(c) = d.concept_mut(id) { c.kind = c.kind.convert(t) })
+                >
+                    <Icon name=kind_icon(t)/>
+                    <span>{t.label().split(' ').next().unwrap_or_default()}</span>
+                </button>
+            }).collect_view()}
+        </div>
     }
 }
 
@@ -289,18 +338,17 @@ fn NumberForm(id: u64) -> impl IntoView {
     };
     view! {
         <div class="grid2">
-            <label class="field">
+            <div class="field">
                 <span>"Primitive"</span>
-                <select
-                    prop:value=move || read(true)
-                    on:change=move |ev| {
-                        let v = event_target_value(&ev);
-                        edit_kind(id, |k| if let Kind::Number { primitive, .. } = k { *primitive = v });
-                    }
-                >
-                    {PRIMITIVES.into_iter().map(|p| view! { <option value=p>{p}</option> }).collect_view()}
-                </select>
-            </label>
+                <div class="segmented">
+                    {PRIMITIVES.into_iter().map(|p| view! {
+                        <button
+                            class:active=move || read(true) == p
+                            on:click=move |_| edit_kind(id, |k| if let Kind::Number { primitive, .. } = k { *primitive = p.into() })
+                        >{p}</button>
+                    }).collect_view()}
+                </div>
+            </div>
             <label class="field">
                 <span>"Unit type"</span>
                 <input
@@ -317,12 +365,12 @@ fn NumberForm(id: u64) -> impl IntoView {
                 </datalist>
             </label>
         </div>
-        <p class="hint">"Conditions on it name a unit of this type (e.g. "<code>"<= 60 km/h"</code>"); openodd converts between units."</p>
+        <p class="hint">"Conditions on it name a unit of this type (e.g. "<code>"<= 60 km/h"</code>"); openodd converts between units. Its buckets are cut where the modules draw lines."</p>
     }
 }
 
 #[component]
-fn LiteralsForm(id: u64) -> impl IntoView {
+fn LiteralsForm(id: u64, path: Memo<String>) -> impl IntoView {
     let ctx = ctx();
     let count = Memo::new(move |_| {
         ctx.doc.with(|d| match d.concept(id).map(|c| &c.kind) {
@@ -337,13 +385,21 @@ fn LiteralsForm(id: u64) -> impl IntoView {
             }
         })
     };
+    let state_of = move |i: usize| {
+        let p = path.get();
+        ctx.report.with(|r| {
+            r.as_ref()
+                .ok()
+                .and_then(|r| r.attribute(&p).and_then(|a| a.states.get(i).copied()))
+        })
+    };
     view! {
         <h3>"Literals"</h3>
-        <p class="hint">"In order: a comparison like "<code>">= heavy"</code>" reads this order."</p>
-        <ul class="list">
+        <p class="hint">"In order: a comparison like "<code>">= heavy"</code>" reads this order. The dot shows where the ODD stands on each."</p>
+        <ul class="list literals">
             {move || (0..count.get()).map(|i| view! {
                 <li class="line">
-                    <span class="index">{i + 1}</span>
+                    <span class=move || format!("state-dot {}", state_of(i).map(State::class).unwrap_or(""))></span>
                     <input
                         prop:value=move || ctx.doc.with(|d| match d.concept(id).map(|c| &c.kind) {
                             Some(Kind::Categorical(l)) => l.get(i).cloned().unwrap_or_default(),
@@ -354,9 +410,9 @@ fn LiteralsForm(id: u64) -> impl IntoView {
                             edit(Box::new(move |l| if let Some(x) = l.get_mut(i) { *x = v }));
                         }
                     />
-                    <button class="mini" title="Move up" on:click=move |_| edit(Box::new(move |l| if i > 0 { l.swap(i, i - 1) }))>"↑"</button>
-                    <button class="mini" title="Move down" on:click=move |_| edit(Box::new(move |l| if i + 1 < l.len() { l.swap(i, i + 1) }))>"↓"</button>
-                    <button class="mini danger" title="Remove" on:click=move |_| edit(Box::new(move |l| { if i < l.len() { l.remove(i); } }))>"✕"</button>
+                    <button class="mini" title="Move up" on:click=move |_| edit(Box::new(move |l| if i > 0 { l.swap(i, i - 1) }))><Icon name="up"/></button>
+                    <button class="mini" title="Move down" on:click=move |_| edit(Box::new(move |l| if i + 1 < l.len() { l.swap(i, i + 1) }))><Icon name="down"/></button>
+                    <button class="mini danger" title="Remove" on:click=move |_| edit(Box::new(move |l| { if i < l.len() { l.remove(i); } }))><Icon name="x"/></button>
                 </li>
             }).collect_view()}
         </ul>
@@ -364,7 +420,7 @@ fn LiteralsForm(id: u64) -> impl IntoView {
             <button class="button" on:click=move |_| edit(Box::new(|l| {
                 let taken = l.clone();
                 l.push(crate::app::unique("value", &taken));
-            }))>"+ literal"</button>
+            }))><Icon name="plus"/>"literal"</button>
         </div>
     }
 }
@@ -387,10 +443,11 @@ fn DerivedForm(id: u64) -> impl IntoView {
     };
     view! {
         <h3>"Literals and their definitions"</h3>
-        <p class="hint">"The first literal whose conditions all hold is the value, e.g. "<code>"light: {rainfall_rate: \"[0.1 .. 2.5] mm/h\"}"</code>"."</p>
+        <p class="hint">"The first literal whose conditions all hold is the value."</p>
         <For each=move || ids.get() key=|x| *x let:lit>
             <div class="definition">
                 <div class="line">
+                    <Icon name="func"/>
                     <input
                         class="literal"
                         prop:value=move || ctx.doc.with(|d| match d.concept(id).map(|c| &c.kind) {
@@ -402,9 +459,10 @@ fn DerivedForm(id: u64) -> impl IntoView {
                             edit(Box::new(move |defs| if let Some(x) = defs.iter_mut().find(|x| x.id == lit) { x.literal = v }));
                         }
                     />
-                    <button class="mini" title="Move up" on:click=move |_| edit(Box::new(move |defs| move_in(defs, |x| x.id == lit, -1)))>"↑"</button>
-                    <button class="mini" title="Move down" on:click=move |_| edit(Box::new(move |defs| move_in(defs, |x| x.id == lit, 1)))>"↓"</button>
-                    <button class="mini danger" title="Remove" on:click=move |_| edit(Box::new(move |defs| defs.retain(|x| x.id != lit)))>"✕"</button>
+                    <span class="hint">"when"</span>
+                    <button class="mini" title="Move up" on:click=move |_| edit(Box::new(move |defs| move_in(defs, |x| x.id == lit, -1)))><Icon name="up"/></button>
+                    <button class="mini" title="Move down" on:click=move |_| edit(Box::new(move |defs| move_in(defs, |x| x.id == lit, 1)))><Icon name="down"/></button>
+                    <button class="mini danger" title="Remove" on:click=move |_| edit(Box::new(move |defs| defs.retain(|x| x.id != lit)))><Icon name="x"/></button>
                 </div>
                 <CondList at=CondsAt::Definition { concept: id, literal: lit }/>
             </div>
@@ -413,7 +471,7 @@ fn DerivedForm(id: u64) -> impl IntoView {
             <button class="button" on:click=move |_| edit(Box::new(|defs| {
                 let taken: Vec<String> = defs.iter().map(|d| d.literal.clone()).collect();
                 defs.push(Definition { id: fresh_id(), literal: crate::app::unique("value", &taken), conditions: vec![] });
-            }))>"+ literal"</button>
+            }))><Icon name="plus"/>"literal"</button>
         </div>
     }
 }
@@ -432,18 +490,21 @@ fn GroupForm(id: u64) -> impl IntoView {
     });
     view! {
         <h3>"Concepts in this group"</h3>
-        <ul class="list">
-            {move || children.get().into_iter().map(|(cid, name, tag)| view! {
-                <li class="line link" on:click=move |_| ctx.sel.set(Sel::Concept(cid))>
-                    <span class="icon">{kind_icon(tag)}</span>
-                    <span>{name}</span>
-                    <span class="hint">{tag.label()}</span>
-                </li>
+        <div class="child-grid">
+            {move || children.get().into_iter().map(|(cid, name, tag)| {
+                let icon = concept_icon(&name, tag);
+                view! {
+                    <button class="child" on:click=move |_| ctx.sel.set(Sel::Concept(cid))>
+                        <Icon name=icon/>
+                        <span>{name}</span>
+                        <span class="hint">{tag.label()}</span>
+                    </button>
+                }
             }).collect_view()}
-        </ul>
+        </div>
         <div class="actions">
-            <button class="button" on:click=move |_| add_concept(Some(id), KindTag::Categorical)>"+ concept"</button>
-            <button class="button" on:click=move |_| add_concept(Some(id), KindTag::Group)>"+ group"</button>
+            <button class="button" on:click=move |_| add_concept(Some(id), KindTag::Categorical)><Icon name="plus"/>"concept"</button>
+            <button class="button" on:click=move |_| add_concept(Some(id), KindTag::Group)><Icon name="folder"/>"group"</button>
         </div>
     }
 }
@@ -534,13 +595,19 @@ pub fn ModuleEditor(id: u64) -> impl IntoView {
         });
     };
     let root = Memo::new(move |_| ctx.doc.with(|d| d.module(id).is_some_and(|m| m.root)));
+    let active = Memo::new(move |_| ctx.doc.with(|d| d.module(id).is_some_and(|m| m.active)));
     let meta_count = Memo::new(move |_| {
         ctx.doc
             .with(|d| d.module(id).map_or(0, |m| m.metadata.len()))
     });
     let remove = move |_| {
         ctx.doc.update(|d| d.modules.retain(|m| m.id != id));
-        ctx.sel.set(Sel::Overview);
+        ctx.sel.set(Sel::Map);
+    };
+    let truth = move || {
+        let name = read(|m| m.name.clone());
+        ctx.evaluation
+            .with(|e| e.as_ref().and_then(|e| e.truth(&name).map(str::to_string)))
     };
     move || {
         if !exists.get() {
@@ -548,33 +615,39 @@ pub fn ModuleEditor(id: u64) -> impl IntoView {
                 .into_any();
         }
         view! {
-            <div class="card">
-                <div class="card-head">
-                    <h2>{move || if root.get() { "◆ " } else { "◇ " }}{move || read(|m| m.name.clone())}</h2>
-                    <div class="actions">
-                        <button class="mini" title="Move up" on:click=move |_| ctx.doc.update(|d| move_in(&mut d.modules, |m| m.id == id, -1))>"↑"</button>
-                        <button class="mini" title="Move down" on:click=move |_| ctx.doc.update(|d| move_in(&mut d.modules, |m| m.id == id, 1))>"↓"</button>
-                        <button class="mini danger" on:click=remove>"Delete"</button>
+            <div class="editor-head">
+                <span class="big-icon" class:root=root><Icon name=if root.get() { "target" } else { "module" }/></span>
+                <div class="head-text">
+                    <div class="crumbs"><span class="last">{move || read(|m| m.name.clone())}</span></div>
+                    <div class="kind-line">
+                        {move || if root.get() { "ODD root" } else { "module" }}
+                        {move || (!read(|m| m.title.clone()).is_empty()).then(|| format!(" · {}", read(|m| m.title.clone())))}
                     </div>
                 </div>
+                {move || truth().map(|t| view! { <span class=format!("truth big {t}")>{format!("now: {t}")}</span> })}
+                <div class="actions">
+                    <button class="mini" title="Move up" on:click=move |_| ctx.doc.update(|d| move_in(&mut d.modules, |m| m.id == id, -1))><Icon name="up"/></button>
+                    <button class="mini" title="Move down" on:click=move |_| ctx.doc.update(|d| move_in(&mut d.modules, |m| m.id == id, 1))><Icon name="down"/></button>
+                    <button class="mini danger" title="Delete" on:click=remove><Icon name="trash"/></button>
+                </div>
+            </div>
+            <Accepts id=id/>
+            <SectionForm id=id include=true/>
+            <SectionForm id=id include=false/>
+            <div class="card">
+                <div class="card-title"><Icon name="tag"/>"About this module"</div>
                 <div class="grid2">
                     <label class="field">
                         <span>"Id"</span>
                         <input prop:value=move || read(|m| m.name.clone()) on:change=rename/>
                     </label>
-                    <label class="field">
-                        <span>"Section"</span>
-                        <select
-                            prop:value=move || if root.get() { "ODD" } else { "MODULES" }
-                            on:change=move |ev| {
-                                let r = event_target_value(&ev) == "ODD";
-                                edit(Box::new(move |m| m.root = r));
-                            }
-                        >
-                            <option value="ODD">"ODD (a root)"</option>
-                            <option value="MODULES">"MODULES"</option>
-                        </select>
-                    </label>
+                    <div class="field">
+                        <span>"Role"</span>
+                        <div class="segmented">
+                            <button class:active=move || root.get() on:click=move |_| edit(Box::new(|m| m.root = true))><Icon name="target"/>"ODD root"</button>
+                            <button class:active=move || !root.get() on:click=move |_| edit(Box::new(|m| m.root = false))><Icon name="module"/>"module"</button>
+                        </div>
+                    </div>
                     <label class="field">
                         <span>"Title"</span>
                         <input
@@ -598,18 +671,12 @@ pub fn ModuleEditor(id: u64) -> impl IntoView {
                         on:input=move |ev| { let v = event_target_value(&ev); edit(Box::new(move |m| m.description = v)); }
                     ></textarea>
                 </label>
-                <label class="check">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || ctx.doc.with(|d| d.module(id).is_some_and(|m| m.active))
-                        on:change=move |ev| {
-                            let on = event_target::<HtmlInputElement>(&ev).checked();
-                            edit(Box::new(move |m| m.active = on));
-                        }
-                    />
-                    " Active (an inactive module is left out of the ODD)"
-                </label>
-                <h3>"METADATA"</h3>
+                <div class="switch-line">
+                    <Switch on=Signal::derive(move || active.get()) set=Callback::new(move |b: bool| edit(Box::new(move |m| m.active = b)))/>
+                    <span>"Active"</span>
+                    <span class="hint">"an inactive module is left out of the ODD"</span>
+                </div>
+                <h3>"Metadata"</h3>
                 <ul class="list">
                     {move || (0..meta_count.get()).map(|i| {
                         let get = move |key: bool| ctx.doc.with(|d| d.module(id).and_then(|m| m.metadata.get(i)).map(|(k, v)| if key { k.clone() } else { v.clone() }).unwrap_or_default());
@@ -619,26 +686,129 @@ pub fn ModuleEditor(id: u64) -> impl IntoView {
                                     on:input=move |ev| { let v = event_target_value(&ev); edit(Box::new(move |m| if let Some(e) = m.metadata.get_mut(i) { e.0 = v })); }/>
                                 <input placeholder="value" prop:value=move || get(false)
                                     on:input=move |ev| { let v = event_target_value(&ev); edit(Box::new(move |m| if let Some(e) = m.metadata.get_mut(i) { e.1 = v })); }/>
-                                <button class="mini danger" title="Remove" on:click=move |_| edit(Box::new(move |m| { if i < m.metadata.len() { m.metadata.remove(i); } }))>"✕"</button>
+                                <button class="mini danger" title="Remove" on:click=move |_| edit(Box::new(move |m| { if i < m.metadata.len() { m.metadata.remove(i); } }))><Icon name="x"/></button>
                             </li>
                         }
                     }).collect_view()}
                 </ul>
                 <div class="actions">
-                    <button class="button" on:click=move |_| edit(Box::new(|m| m.metadata.push((if m.metadata.is_empty() { "version".into() } else { String::new() }, String::new()))))>"+ metadata"</button>
+                    <button class="button" on:click=move |_| edit(Box::new(|m| m.metadata.push((if m.metadata.is_empty() { "version".into() } else { String::new() }, String::new()))))><Icon name="plus"/>"metadata"</button>
                 </div>
             </div>
-            <SectionForm id=id include=true/>
-            <SectionForm id=id include=false/>
         }
         .into_any()
+    }
+}
+
+/// What the module accepts of each attribute it tests, and the modules it reads.
+#[component]
+fn Accepts(id: u64) -> impl IntoView {
+    let ctx = ctx();
+    let name = Memo::new(move |_| {
+        ctx.doc
+            .with(|d| d.module(id).map(|m| m.name.clone()).unwrap_or_default())
+    });
+    let info = Memo::new(move |_| {
+        let n = name.get();
+        ctx.report.with(|r| {
+            let r = r.as_ref().ok()?;
+            let m = r.modules.iter().find(|m| m.name == n)?;
+            let attrs: Vec<String> = {
+                let mut v: Vec<String> = vec![];
+                for l in m.links.iter().filter(|l| !l.module) {
+                    if !v.contains(&l.target) {
+                        v.push(l.target.clone());
+                    }
+                }
+                v
+            };
+            let reads: Vec<(String, bool)> = m
+                .links
+                .iter()
+                .filter(|l| l.module)
+                .map(|l| (l.target.clone(), l.include))
+                .collect();
+            let used_by: Vec<String> = r
+                .modules
+                .iter()
+                .filter(|o| {
+                    o.links
+                        .iter()
+                        .any(|l| l.module && (l.target == n || m.labels.contains(&l.target)))
+                })
+                .map(|o| o.name.clone())
+                .collect();
+            Some((attrs, reads, used_by))
+        })
+    });
+    move || {
+        let Some((attrs, reads, used_by)) = info.get() else {
+            return view! {
+                <div class="card preview"><p class="hint">"What this module accepts appears once openodd reads the document."</p></div>
+            }
+            .into_any();
+        };
+        view! {
+            <div class="card preview">
+                <div class="card-title"><Icon name="map"/>"What this module accepts"<span class="hint">"of each attribute it tests, the others aside"</span></div>
+                <Legend/>
+                {(!used_by.is_empty() || !reads.is_empty()).then(|| view! {
+                    <div class="flow">
+                        {used_by.into_iter().map(|u| {
+                            let u2 = u.clone();
+                            view! { <button class="pill" on:click=move |_| ctx.select_module(&u2)><Icon name="module"/>{u}</button> }
+                        }).collect_view()}
+                        <span class="flow-arrow">"→"</span>
+                        <span class="pill this"><Icon name="module"/>{name.get()}</span>
+                        {(!reads.is_empty()).then(|| view! { <span class="flow-arrow">"→"</span> })}
+                        {reads.into_iter().map(|(t, inc)| {
+                            let t2 = t.clone();
+                            view! { <button class=if inc { "pill include" } else { "pill exclude" } on:click=move |_| ctx.select_module(&t2)><Icon name=if inc { "check" } else { "ban" }/>{t}</button> }
+                        }).collect_view()}
+                    </div>
+                })}
+                {attrs.into_iter().map(|a| {
+                    let a2 = a.clone();
+                    let attr = Signal::derive(move || ctx.report.get().ok().and_then(|r| r.attribute(&a2).cloned()));
+                    let module = Signal::derive(move || name.get());
+                    let short = a.rsplit('.').next().unwrap_or(&a).to_string();
+                    let a4 = a.clone();
+                    let icon = concept_icon(&short, KindTag::Number);
+                    view! {
+                        <div class="accept-row">
+                            <button class="accept-name" on:click=move |_| ctx.select_attribute(&a4)>
+                                <Icon name=icon/>{short}
+                            </button>
+                            <div class="accept-viz"><Domain attr=attr module=module/></div>
+                        </div>
+                    }
+                }).collect_view()}
+            </div>
+        }
+        .into_any()
+    }
+}
+
+/// A toggle switch.
+#[component]
+fn Switch(#[prop(into)] on: Signal<bool>, set: Callback<bool>) -> impl IntoView {
+    view! {
+        <button
+            class="switch"
+            class:on=move || on.get()
+            role="switch"
+            aria-checked=move || on.get().to_string()
+            on:click=move |_| set.run(!on.get_untracked())
+        >
+            <span class="knob"></span>
+        </button>
     }
 }
 
 #[component]
 fn SectionForm(id: u64, include: bool) -> impl IntoView {
     let ctx = ctx();
-    let word = if include { "INCLUDE" } else { "EXCLUDE" };
+    let word = if include { "Include" } else { "Exclude" };
     let state = Memo::new(move |_| {
         ctx.doc.with(|d| {
             d.module(id)
@@ -662,9 +832,19 @@ fn SectionForm(id: u64, include: bool) -> impl IntoView {
     view! {
         <div class=if include { "card section include" } else { "card section exclude" }>
             <div class="card-head">
-                <h3>{word}</h3>
+                <div class="card-title">
+                    <Icon name=if include { "check" } else { "ban" }/>
+                    {word}
+                    <span class="hint">{move || match (include, state.get()) {
+                        (_, None) => "no section".to_string(),
+                        (true, Some(true)) => "inside when ALL of these hold".into(),
+                        (true, Some(false)) => "inside when ANY of these holds".into(),
+                        (false, Some(true)) => "outside when ALL of these hold".into(),
+                        (false, Some(false)) => "outside when ANY of these holds".into(),
+                    }}</span>
+                </div>
                 <div class="segmented">
-                    {[(None, "none"), (Some(true), "AND · all"), (Some(false), "OR · any")].into_iter().map(|(v, label)| view! {
+                    {[(None, "off"), (Some(true), "all (AND)"), (Some(false), "any (OR)")].into_iter().map(|(v, label)| view! {
                         <button
                             class:active=move || state.get() == v
                             on:click=move |_| edit(Box::new(move |s| match v {
@@ -681,16 +861,13 @@ fn SectionForm(id: u64, include: bool) -> impl IntoView {
             {move || state.get().map(|all| {
                 let (op, other) = if all { ("AND", "OR") } else { ("OR", "AND") };
                 view! {
-                    <p class="hint">{if include {
-                        if all { "Inside when all of these hold." } else { "Inside when any of these holds." }
-                    } else if all { "Outside when all of these hold." } else { "Outside when any of these holds." }}</p>
                     <CondList at=CondsAt::Section { module: id, include, nested: false }/>
                     {move || if has_nested.get() {
                         view! {
                             <div class="nested">
                                 <div class="nested-head">
                                     <span class="op">{other}</span>
-                                    <span class="hint">{format!("one nested {other} line inside the {op} section")}</span>
+                                    <span class="hint">{format!("a nested {} group inside the {op} section: {}", other, if other == "OR" { "any of these" } else { "all of these" })}</span>
                                 </div>
                                 <CondList at=CondsAt::Section { module: id, include, nested: true }/>
                             </div>
@@ -701,7 +878,7 @@ fn SectionForm(id: u64, include: bool) -> impl IntoView {
                                 ctx.doc.update(|d| if let Some(s) = d.module_mut(id).and_then(|m| m.section_mut(include).as_mut()) {
                                     s.nested.push(Cond { id: fresh_id(), key: String::new(), value: CondValue::Literals(vec![]) });
                                 });
-                            }>{format!("+ nested {other} group")}</button>
+                            }><Icon name="plus"/>{format!("nested {other} group")}</button>
                         }.into_any()
                     }}
                 }
@@ -747,7 +924,7 @@ pub fn CondList(at: CondsAt) -> impl IntoView {
                 <CondRow at=at id=cid list=l2.clone()/>
             </For>
             {move || ids.with(Vec::is_empty).then(|| view! { <p class="hint empty">"No conditions."</p> })}
-            <button class="button subtle" on:click=add>"+ condition"</button>
+            <button class="button subtle" on:click=add><Icon name="plus"/>"condition"</button>
         </div>
     }
 }
@@ -800,6 +977,47 @@ fn literals_of(d: &Document, key: &KeyKind) -> Vec<String> {
     }
 }
 
+fn key_icon(key: &str, kind: &KeyKind) -> &'static str {
+    match kind {
+        KeyKind::Module => "module",
+        KeyKind::Label => "tag",
+        KeyKind::Concept(k) => concept_icon(key.rsplit('.').next().unwrap_or(key), k.tag()),
+        KeyKind::Unknown => "warn",
+    }
+}
+
+/// A number and its unit, as a condition writes them (`60 km/h`).
+fn split_quantity(text: &str) -> Option<(f64, String)> {
+    let mut parts = text.split_whitespace();
+    let n = parts.next()?.parse::<f64>().ok()?;
+    let unit = parts.next().unwrap_or("").to_string();
+    parts.next().is_none().then_some((n, unit))
+}
+
+/// The interval a numeric condition allows.
+fn interval_of(v: &CondValue, unit_ok: impl Fn(&str) -> bool) -> Option<(f64, f64)> {
+    match v {
+        CondValue::Compare { op, operand } => {
+            let (n, u) = split_quantity(operand)?;
+            if !unit_ok(&u) {
+                return None;
+            }
+            Some(if op.starts_with('<') {
+                (f64::NEG_INFINITY, n)
+            } else {
+                (n, f64::INFINITY)
+            })
+        }
+        CondValue::Range { low, high, unit } => {
+            if !unit_ok(unit) {
+                return None;
+            }
+            Some((low.trim().parse().ok()?, high.trim().parse().ok()?))
+        }
+        _ => None,
+    }
+}
+
 #[component]
 fn CondRow(at: CondsAt, id: u64, list: String) -> impl IntoView {
     let ctx = ctx();
@@ -813,6 +1031,11 @@ fn CondRow(at: CondsAt, id: u64, list: String) -> impl IntoView {
     let tag = Memo::new(move |_| cond().map(|c| c.value.tag()));
     let key_kind = Memo::new(move |_| ctx.doc.with(|d| d.key_kind(&key.get())));
     let literals = Memo::new(move |_| ctx.doc.with(|d| literals_of(d, &key_kind.get())));
+    let attr = Memo::new(move |_| {
+        let k = key.get();
+        ctx.report
+            .with(|r| r.as_ref().ok().and_then(|r| attribute_for(r, &k)))
+    });
     let set_key = move |ev: leptos::ev::Event| {
         let k = event_target_value(&ev);
         let kind = ctx.doc.with(|d| d.key_kind(&k));
@@ -852,38 +1075,84 @@ fn CondRow(at: CondsAt, id: u64, list: String) -> impl IntoView {
             }
         })
     };
-    let warn = move || match key_kind.get() {
-        KeyKind::Unknown if !key.get().is_empty() => Some(
-            view! { <span class="tag bad" title="No concept, module or label has this name">"?"</span> },
-        ),
-        _ => None,
+    let icon = move || {
+        let k = key.get();
+        let kind = key_kind.get();
+        let name = key_icon(&k, &kind);
+        let bad = matches!(kind, KeyKind::Unknown) && !k.is_empty();
+        view! {
+            <span class="key-icon" class:bad=bad title=if bad { "No concept, module or label has this name" } else { "" }>
+                <Icon name=if k.is_empty() { "dots" } else { name }/>
+            </span>
+        }
     };
+    // A number line under a numeric condition, its ends draggable.
+    let unit_ok = move |u: &str| {
+        let au = attr.with(|a| a.as_ref().map(|a| a.unit.clone()).unwrap_or_default());
+        u.is_empty() || au.is_empty() || u == au
+    };
+    let interval = Signal::derive(move || cond().and_then(|c| interval_of(&c.value, unit_ok)));
+    let handles =
+        Signal::derive(move || interval.get().map(|(a, b)| vec![a, b]).unwrap_or_default());
+    let drag = Callback::new(move |(i, v): (usize, f64)| {
+        let text = fmt_num(v);
+        edit_cond(at, id, move |c| match &mut c.value {
+            CondValue::Compare { operand, .. } => {
+                let unit = split_quantity(operand).map(|(_, u)| u).unwrap_or_default();
+                *operand = if unit.is_empty() {
+                    text
+                } else {
+                    format!("{text} {unit}")
+                };
+            }
+            CondValue::Range { low, high, .. } => {
+                if i == 0 {
+                    *low = text;
+                } else {
+                    *high = text;
+                }
+            }
+            _ => {}
+        })
+    });
+    let line_attr = Signal::derive(move || attr.get());
+    // Its own memo, so the line is not rebuilt (and a drag not dropped) as it moves.
+    let show_line = Memo::new(move |_| {
+        interval.get().is_some() && attr.with(|a| a.as_ref().is_some_and(|a| a.is_number()))
+    });
     view! {
-        <div class="cond">
-            <div class="key-cell">
-                <input
-                    class="key"
-                    placeholder="concept / module / label"
-                    list=list
-                    prop:value=move || key.get()
-                    on:change=set_key
-                />
-                {warn}
+        <div class="cond-block">
+            <div class="cond">
+                <div class="key-cell">
+                    {icon}
+                    <input
+                        class="key"
+                        placeholder="concept / module / label"
+                        list=list
+                        prop:value=move || key.get()
+                        on:change=set_key
+                    />
+                </div>
+                <select class="value-form" prop:value=move || tag.get().map(|t| t.label()).unwrap_or_default() on:change=set_tag>
+                    {ValueTag::ALL.into_iter().map(|t| view! { <option value=t.label()>{t.label()}</option> }).collect_view()}
+                </select>
+                <div class="value">
+                    {move || match tag.get() {
+                        Some(ValueTag::Bool) => view! { <BoolValue at=at id=id/> }.into_any(),
+                        Some(ValueTag::Literals) => view! { <LiteralsValue at=at id=id literals=literals attr=attr/> }.into_any(),
+                        Some(ValueTag::Compare) => view! { <CompareValue at=at id=id literals=literals/> }.into_any(),
+                        Some(ValueTag::Range) => view! { <RangeValue at=at id=id/> }.into_any(),
+                        Some(ValueTag::Raw) => view! { <RawValue at=at id=id/> }.into_any(),
+                        None => ().into_any(),
+                    }}
+                </div>
+                <button class="mini danger" title="Remove" on:click=remove><Icon name="x"/></button>
             </div>
-            <select class="value-form" prop:value=move || tag.get().map(|t| t.label()).unwrap_or_default() on:change=set_tag>
-                {ValueTag::ALL.into_iter().map(|t| view! { <option value=t.label()>{t.label()}</option> }).collect_view()}
-            </select>
-            <div class="value">
-                {move || match tag.get() {
-                    Some(ValueTag::Bool) => view! { <BoolValue at=at id=id/> }.into_any(),
-                    Some(ValueTag::Literals) => view! { <LiteralsValue at=at id=id literals=literals/> }.into_any(),
-                    Some(ValueTag::Compare) => view! { <CompareValue at=at id=id literals=literals/> }.into_any(),
-                    Some(ValueTag::Range) => view! { <RangeValue at=at id=id/> }.into_any(),
-                    Some(ValueTag::Raw) => view! { <RawValue at=at id=id/> }.into_any(),
-                    None => ().into_any(),
-                }}
-            </div>
-            <button class="mini danger" title="Remove" on:click=remove>"✕"</button>
+            {move || show_line.get().then(|| view! {
+                <div class="cond-line">
+                    <NumberLine attr=line_attr interval=interval handles=handles on_drag=drag/>
+                </div>
+            })}
         </div>
     }
 }
@@ -898,22 +1167,22 @@ fn read_value(at: CondsAt, id: u64) -> Option<CondValue> {
 
 #[component]
 fn BoolValue(at: CondsAt, id: u64) -> impl IntoView {
+    let on = Signal::derive(move || !matches!(read_value(at, id), Some(CondValue::Bool(false))));
     view! {
-        <select
-            prop:value=move || match read_value(at, id) { Some(CondValue::Bool(false)) => "false", _ => "true" }
-            on:change=move |ev| {
-                let b = event_target_value(&ev) == "true";
-                edit_cond(at, id, move |c| c.value = CondValue::Bool(b));
-            }
-        >
-            <option value="true">"true"</option>
-            <option value="false">"false"</option>
-        </select>
+        <div class="switch-line">
+            <Switch on=on set=Callback::new(move |b: bool| edit_cond(at, id, move |c| c.value = CondValue::Bool(b)))/>
+            <span class="mono">{move || if on.get() { "true" } else { "false" }}</span>
+        </div>
     }
 }
 
 #[component]
-fn LiteralsValue(at: CondsAt, id: u64, literals: Memo<Vec<String>>) -> impl IntoView {
+fn LiteralsValue(
+    at: CondsAt,
+    id: u64,
+    literals: Memo<Vec<String>>,
+    attr: Memo<Option<Attribute>>,
+) -> impl IntoView {
     let chosen = move || match read_value(at, id) {
         Some(CondValue::Literals(l)) => l,
         _ => vec![],
@@ -927,6 +1196,16 @@ fn LiteralsValue(at: CondsAt, id: u64, literals: Memo<Vec<String>>) -> impl Into
                     l.push(lit);
                 }
             }
+        })
+    };
+    let state_of = move |lit: &str| {
+        attr.with(|a| {
+            a.as_ref().and_then(|a| {
+                a.values
+                    .iter()
+                    .position(|v| v == lit)
+                    .and_then(|i| a.states.get(i).copied())
+            })
         })
     };
     move || {
@@ -949,12 +1228,16 @@ fn LiteralsValue(at: CondsAt, id: u64, literals: Memo<Vec<String>>) -> impl Into
                     {lits.into_iter().map(|lit| {
                         let l2 = lit.clone();
                         let l3 = lit.clone();
+                        let l4 = lit.clone();
                         view! {
                             <button
                                 class="chip"
                                 class:on=move || chosen().contains(&l2)
                                 on:click=move |_| toggle(l3.clone())
-                            >{lit}</button>
+                            >
+                                <span class=move || format!("state-dot {}", state_of(&l4).map(State::class).unwrap_or(""))></span>
+                                {lit}
+                            </button>
                         }
                     }).collect_view()}
                     <button
@@ -979,16 +1262,14 @@ fn CompareValue(at: CondsAt, id: u64, literals: Memo<Vec<String>>) -> impl IntoV
     let list_id = format!("dl-lit-{id}");
     view! {
         <div class="inline">
-            <select
-                class="op"
-                prop:value=move || parts().0
-                on:change=move |ev| {
-                    let v = event_target_value(&ev);
-                    edit_cond(at, id, move |c| if let CondValue::Compare { op, .. } = &mut c.value { *op = v });
-                }
-            >
-                {OPERATORS.into_iter().map(|o| view! { <option value=o>{o}</option> }).collect_view()}
-            </select>
+            <div class="ops">
+                {OPERATORS.into_iter().map(|o| view! {
+                    <button
+                        class:active=move || parts().0 == o
+                        on:click=move |_| edit_cond(at, id, move |c| if let CondValue::Compare { op, .. } = &mut c.value { *op = o.into() })
+                    >{o}</button>
+                }).collect_view()}
+            </div>
             <input
                 placeholder="60 km/h, or a literal"
                 list=list_id.clone()

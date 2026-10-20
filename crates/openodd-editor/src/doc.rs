@@ -37,6 +37,8 @@ pub const UNIT_TYPES: [&str; 14] = [
     "bandwidth",
     "percentage",
 ];
+static EMPTY: Vec<Concept> = Vec::new();
+
 pub const OPERATORS: [&str; 4] = ["<", "<=", ">", ">="];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -858,6 +860,21 @@ impl Document {
             None
         }
         find(&self.taxonomy, id)
+    }
+
+    /// The id of the concept a dotted name names.
+    pub fn concept_id(&self, path: &str) -> Option<u64> {
+        let mut list = &self.taxonomy;
+        let mut found = None;
+        for part in path.split('.') {
+            let c = list.iter().find(|c| c.name == part)?;
+            found = Some(c.id);
+            list = match &c.kind {
+                Kind::Group(children) => children,
+                _ => &EMPTY,
+            };
+        }
+        found
     }
 
     /// The dotted name of a concept.

@@ -8,45 +8,68 @@ The document is edited as forms, and checked as it is edited by openodd's own
 reader -- the core crate, built without its `native` feature -- so what the
 editor accepts is what the Python package reads.
 
+## Seeing the ODD while editing it
+
+Every view is drawn from openodd's own verdict. A value is **allowed** (green)
+when some values of the other attributes put it inside the ODD, and
+**excluded** (red) when nothing can. Numbers are sampled along their line, so
+the colour changes exactly where a condition cuts (`<= 2`, `[0 .. 40] km/h`).
+
+- **ODD map** (the home view):
+  - counts of attributes, restricted attributes and modules, and the share of
+    the domain excluded;
+  - the **structure graph**: roots → modules and labels → attributes, include
+    arrows blue, exclude orange, labels dashed. Hover to trace a node, click to
+    edit it;
+  - the **ODD over two attributes**: any pair as a grid of allowed / excluded
+    cells. Click a cell to test it;
+  - an **attribute card** per attribute, grouped by the taxonomy's top level,
+    with its domain coloured and the modules that test it.
+- **A concept** shows where the ODD stands on it above its form; a
+  categorical's literals carry the same colour.
+- **A module** shows what it accepts of each attribute it tests, the others
+  aside, and which modules read it and which it reads. Each numeric condition
+  has a number line under it: **drag its ends** to change the value.
+  Booleans, modules and labels are switches; a categorical's literals are
+  chips.
+- **Test drive** (the panel): set the values a run would measure. Drag a
+  marker on a line, click a literal, or click a cell of the map. The verdict
+  shows inside, outside, or inside only if the unknowns allow. It also shows
+  each module's verdict, which colours the graph and the outline, and the
+  derived categoricals' values. *Fill a point inside* picks an allowed value
+  of each attribute.
+
+Icons follow what a concept's name says it is (a road, the rain, a pedestrian,
+a speed), else its kind.
+
 ## What it edits
 
-- **TAXONOMY** as a tree: groups (records and containers), numbers
-  (`<primitive> <unit type>`), booleans, categoricals (ordered literals),
-  derived categoricals (literals defined by expressions on other concepts),
-  references to another type's id, and anything else as YAML.
+- **TAXONOMY** as a tree:
+  - groups (records and containers);
+  - numbers (`<primitive> <unit type>`);
+  - booleans;
+  - categoricals (ordered literals);
+  - derived categoricals (literals defined by expressions on other concepts);
+  - references to another type's id;
+  - anything else, as YAML.
 - **MODULES** and **ODD** (the roots): `TITLE`, `DESCRIPTION`, `ACTIVE`,
-  `LABEL(S)`, `METADATA`, one `INCLUDE_AND`/`INCLUDE_OR` and one
-  `EXCLUDE_AND`/`EXCLUDE_OR` section, each with its one nested section of the
-  other operator.
-- **Conditions** by their form: true / false (a boolean, a module or a label),
-  one of a categorical's literals (chips), a comparison (`<= 60 km/h`,
-  `>= heavy`), a range (`[0 .. 40] km/h`), or any YAML value. The key offers
-  every concept (by its dotted name or its own), module and label; one that
-  names none is marked.
+  `LABEL(S)`, `METADATA`, one include and one exclude section (all / any),
+  each with its one nested section of the other operator.
 - **IMPORT**, and `conversion` / `COD` / `OD` kept as YAML.
 
 Renaming a concept or a module renames the conditions that name it. Comments
 are not kept: YAML readers drop them.
 
-## The panel
+The **YAML** tab shows what the document writes. Edit it there and *Apply* to
+read it back. **Details** shows openodd's reading: the revision
+([versioning.md](versioning.md)), the version, the roots, the modules'
+normalised conditions and every bucket. To bucket every attribute, the check
+measures each concept in the unit its conditions are first written in, as a
+binding file would.
 
-- **YAML**: what the document writes. Edit it there and *Apply* to read it
-  back into the forms.
-- **Check**: what openodd makes of it, or why it cannot read it -- the name,
-  the revision (the digest of the transmission, [versioning.md](versioning.md)),
-  the declared version, the roots, every attribute's buckets with those outside
-  the ODD in red, and every module's conditions as the reader normalised them.
-  To bucket every attribute, the check measures each concept in the unit its
-  conditions are first written in, as a binding file would.
-- **Evaluate**: values a run would measure (empty: OpenODD's missing value),
-  judged against the ODD -- inside, outside or inside only because values are
-  missing, each module's verdict, and the derived categoricals' values.
-
-The files a document `IMPORT`s can be loaded on the *Document* page; the check
-reads them as a transmission, by name, as the Python package does.
-
-The draft is kept in the browser's local storage between visits. *Download
-YAML* saves the file.
+The files a document `IMPORT`s can be loaded under *Document & imports*. The
+check reads them as a transmission, by name, as the Python package does. The
+draft is kept in the browser's local storage. *Download YAML* saves the file.
 
 ## Building
 
@@ -59,11 +82,12 @@ trunk build --release --cargo-profile wasm-release   # into dist/
 ```
 
 The `wasm-release` profile (in the workspace `Cargo.toml`) optimises for size:
-the page is about 1.6 MB of WebAssembly, 650 KB gzipped.
+the page is under 2 MB of WebAssembly, about 770 KB gzipped.
 
-The model -- reading YAML into the forms' document and writing it back
-(`doc.rs`), and the check and the evaluator (`check.rs`) -- is plain Rust, tested
-natively with `cargo test -p openodd-editor`.
+The model is plain Rust, tested natively with `cargo test -p openodd-editor`:
+`doc.rs` reads YAML into the editor's document and writes it back, and
+`check.rs` holds the check, the per-bucket, per-module and sampled verdicts,
+and the evaluator. The drawing is in `viz.rs` and the icons in `icons.rs`.
 
 ## The demo site
 

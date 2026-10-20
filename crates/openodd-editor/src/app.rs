@@ -1,32 +1,36 @@
-//! The editor's shell: the toolbar, the outline of the document, the form of
-//! what is selected, and the panel with the YAML, the check and an evaluator.
+//! The editor's shell: the toolbar, the outline of the document, the map or
+//! the form of what is selected, and the panel to test values, read the YAML
+//! and see what openodd made of it.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 
-use crate::check::{self, Files, Report};
+use crate::check::{self, Evaluation, Report, State};
 use crate::doc::{Concept, Document, Kind, KindTag, Module};
-use crate::forms::{ConceptEditor, ModuleEditor, Overview};
+use crate::forms::{ConceptEditor, ModuleEditor, Settings};
+use crate::icons::{concept_icon, Icon};
 use crate::io;
+use crate::viz::{Domain, Legend, ModuleGraph, OddMap, StateBar};
 
 pub const URBAN: &str = include_str!("../examples/urban.yaml");
 pub const DEFAULT: &str = include_str!("../../../python/openodd/odds/default/default.yaml");
 
-/// What the form shows.
+/// What the middle shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sel {
-    Overview,
+    Map,
+    Settings,
     Concept(u64),
     Module(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
+    Test,
     Yaml,
-    Check,
-    Evaluate,
+    Details,
 }
 
 /// The editor's state, shared by every component.
@@ -40,6 +44,9 @@ pub struct Ctx {
     /// The document as YAML, or why it cannot be written.
     pub yaml: Memo<Result<String, String>>,
     pub report: Memo<Result<Report, String>>,
+    /// The values being tested (attribute -> text), drawn on every view.
+    pub probe: RwSignal<Vec<(String, String)>>,
+    pub evaluation: Memo<Option<Evaluation>>,
     /// A message for the toolbar (what was opened, why it was not).
     pub notice: RwSignal<Option<(bool, String)>>,
 }
@@ -49,22 +56,14 @@ pub fn ctx() -> Ctx {
 }
 
 impl Ctx {
-    pub fn files(&self) -> Option<Files> {
-        let text = self.yaml.get().ok()?;
-        Some(Files {
-            entry: self.name.get(),
-            text,
-            library: self.library.get(),
-        })
-    }
-
     /// Replace the document with one read from `text`.
     pub fn open(&self, name: &str, text: &str) -> bool {
         match Document::from_yaml(text) {
             Ok(doc) => {
                 self.doc.set(doc);
                 self.name.set(name.to_string());
-                self.sel.set(Sel::Overview);
+                self.sel.set(Sel::Map);
+                self.probe.set(vec![]);
                 self.notice.set(Some((true, format!("Opened {name}"))));
                 true
             }
@@ -72,6 +71,45 @@ impl Ctx {
                 self.notice.set(Some((false, format!("{name}: {e}"))));
                 false
             }
+        }
+    }
+
+    pub fn report_ok(&self) -> Option<Report> {
+        self.report.get().ok()
+    }
+
+    pub fn probe_value(&self, name: &str) -> Option<String> {
+        self.probe.with(|p| {
+            p.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .filter(|v| !v.is_empty())
+        })
+    }
+
+    pub fn set_probe(&self, name: &str, value: String) {
+        self.probe.update(|p| {
+            if let Some(e) = p.iter_mut().find(|(n, _)| n == name) {
+                e.1 = value;
+            } else {
+                p.push((name.to_string(), value));
+            }
+        })
+    }
+
+    /// Select the concept a dotted name names.
+    pub fn select_attribute(&self, name: &str) {
+        if let Some(id) = self.doc.with(|d| d.concept_id(name)) {
+            self.sel.set(Sel::Concept(id));
+        }
+    }
+
+    pub fn select_module(&self, name: &str) {
+        if let Some(id) = self
+            .doc
+            .with(|d| d.modules.iter().find(|m| m.name == name).map(|m| m.id))
+        {
+            self.sel.set(Sel::Module(id));
         }
     }
 }
@@ -88,19 +126,29 @@ pub fn App() -> impl IntoView {
     let yaml = Memo::new(move |_| doc.with(Document::to_yaml));
     let report = Memo::new(move |_| {
         let text = yaml.get()?;
-        check::check(&Files {
+        check::check(&check::Files {
             entry: name.get(),
             text,
             library: library.get(),
         })
     });
+    let probe = RwSignal::new(Vec::<(String, String)>::new());
+    let evaluation = Memo::new(move |_| {
+        let r = report.get().ok()?;
+        let p = probe.get();
+        p.iter()
+            .any(|(_, v)| !v.is_empty())
+            .then(|| check::evaluate(&r, &p))
+    });
     let ctx = Ctx {
         doc,
         name,
         library,
-        sel: RwSignal::new(Sel::Overview),
+        sel: RwSignal::new(Sel::Map),
         yaml,
         report,
+        probe,
+        evaluation,
         notice: RwSignal::new(None),
     };
     provide_context(ctx);
@@ -119,9 +167,10 @@ pub fn App() -> impl IntoView {
                 <aside class="outline">
                     <Outline/>
                 </aside>
-                <section class="form">
+                <section class="center">
                     {move || match ctx.sel.get() {
-                        Sel::Overview => view! { <Overview/> }.into_any(),
+                        Sel::Map => view! { <MapView/> }.into_any(),
+                        Sel::Settings => view! { <Settings/> }.into_any(),
                         Sel::Concept(id) => view! { <ConceptEditor id=id/> }.into_any(),
                         Sel::Module(id) => view! { <ModuleEditor id=id/> }.into_any(),
                     }}
@@ -157,7 +206,8 @@ fn Toolbar() -> impl IntoView {
             "empty" => {
                 ctx.doc.set(Document::empty());
                 ctx.name.set("odd.yaml".into());
-                ctx.sel.set(Sel::Overview);
+                ctx.probe.set(vec![]);
+                ctx.sel.set(Sel::Map);
             }
             _ => {}
         }
@@ -169,40 +219,43 @@ fn Toolbar() -> impl IntoView {
         Err(e) => ctx.notice.set(Some((false, e))),
     };
     let status = move || match ctx.report.get() {
-        Ok(r) => view! {
+        Ok(_) => view! {
             <span class="badge ok" title="openodd reads this ODD">
-                "✓ valid · " {r.attributes.len()} " attributes · " {r.modules.len()} " modules"
+                <Icon name="check"/>"valid"
             </span>
         }
         .into_any(),
         Err(e) => {
             let title = e.clone();
-            view! { <span class="badge bad" title=title>"✗ " {e}</span> }.into_any()
+            view! { <span class="badge bad" title=title><Icon name="warn"/>{e}</span> }.into_any()
         }
     };
     view! {
         <header class="toolbar">
             <div class="brand">
-                <span class="logo">"◇"</span>
-                <span>"OpenODD Editor"</span>
+                <span class="logo"><Icon name="map"/></span>
+                <span>"OpenODD Studio"</span>
             </div>
-            <input
-                class="filename"
-                aria-label="File name"
-                prop:value=move || ctx.name.get()
-                on:change=move |ev| ctx.name.set(event_target_value(&ev))
-            />
+            <div class="file">
+                <Icon name="doc"/>
+                <input
+                    class="filename"
+                    aria-label="File name"
+                    prop:value=move || ctx.name.get()
+                    on:change=move |ev| ctx.name.set(event_target_value(&ev))
+                />
+            </div>
             <label class="button">
-                "Open…"
+                <Icon name="upload"/>"Open"
                 <input type="file" accept=".yaml,.yml" class="hidden" on:change=open/>
             </label>
             <select class="button" on:change=example aria-label="Examples">
-                <option value="" selected>"New / example…"</option>
-                <option value="empty">"Empty document"</option>
+                <option value="" selected>"Examples…"</option>
                 <option value="urban">"Urban shuttle (modules)"</option>
                 <option value="default">"openodd default (taxonomy)"</option>
+                <option value="empty">"Empty document"</option>
             </select>
-            <button class="button primary" on:click=save>"Download YAML"</button>
+            <button class="button primary" on:click=save><Icon name="download"/>"Download YAML"</button>
             <div class="status">{status}</div>
             <a class="source" href="https://github.com/hakuturu583/openodd_py" target="_blank" rel="noopener">
                 "GitHub"
@@ -231,39 +284,26 @@ struct Row {
     id: u64,
     depth: usize,
     name: String,
+    path: String,
     tag: KindTag,
-    summary: String,
 }
 
-fn rows(cs: &[Concept], depth: usize, out: &mut Vec<Row>) {
+fn rows(cs: &[Concept], depth: usize, prefix: &str, out: &mut Vec<Row>) {
     for c in cs {
-        let summary = match &c.kind {
-            Kind::Number {
-                primitive,
-                unit_type,
-            } => format!("{primitive} {unit_type}"),
-            Kind::Categorical(l) => format!("[{}]", l.join(", ")),
-            Kind::Derived(d) => format!(
-                "{{{}}}",
-                d.iter()
-                    .map(|d| d.literal.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Kind::Reference(r) => format!("→ {r}"),
-            Kind::Boolean => "boolean".into(),
-            Kind::Group(_) => String::new(),
-            Kind::Other(t) => t.clone(),
+        let path = if prefix.is_empty() {
+            c.name.clone()
+        } else {
+            format!("{prefix}.{}", c.name)
         };
         out.push(Row {
             id: c.id,
             depth,
             name: c.name.clone(),
+            path: path.clone(),
             tag: c.kind.tag(),
-            summary,
         });
         if let Kind::Group(children) = &c.kind {
-            rows(children, depth + 1, out);
+            rows(children, depth + 1, &path, out);
         }
     }
 }
@@ -317,12 +357,19 @@ pub fn add_module(root: bool) {
     ctx.sel.set(Sel::Module(id));
 }
 
+/// How much of an attribute the ODD leaves out: a ring for the outline.
+fn restriction(r: &Report, path: &str) -> Option<(usize, usize)> {
+    let a = r.attribute(path)?;
+    let out = a.states.iter().filter(|s| **s == State::Outside).count();
+    Some((out, a.states.len()))
+}
+
 #[component]
 fn Outline() -> impl IntoView {
     let ctx = ctx();
     let concepts = Memo::new(move |_| {
         let mut out = vec![];
-        ctx.doc.with(|d| rows(&d.taxonomy, 0, &mut out));
+        ctx.doc.with(|d| rows(&d.taxonomy, 0, "", &mut out));
         out
     });
     let modules = Memo::new(move |_| {
@@ -341,6 +388,13 @@ fn Outline() -> impl IntoView {
                 .into_iter()
                 .filter(|(_, _, r, _)| *r == root)
                 .map(|(id, name, _, active)| {
+                    let n2 = name.clone();
+                    let truth = move || {
+                        ctx.evaluation.with(|e| {
+                            e.as_ref()
+                                .and_then(|e| e.truth(&n2).map(|t| format!("truth-dot {t}")))
+                        })
+                    };
                     view! {
                         <li
                             class="row"
@@ -348,9 +402,9 @@ fn Outline() -> impl IntoView {
                             class:inactive=!active
                             on:click=move |_| ctx.sel.set(Sel::Module(id))
                         >
-                            <span class="icon">{if root { "◆" } else { "◇" }}</span>
+                            <span class="icon"><Icon name=if root { "target" } else { "module" }/></span>
                             <span class="name">{name}</span>
-                            {(!active).then(|| view! { <span class="tag">"inactive"</span> })}
+                            {move || truth().map(|c| view! { <span class=c></span> })}
                         </li>
                     }
                 })
@@ -360,44 +414,47 @@ fn Outline() -> impl IntoView {
     view! {
         <nav>
             <ul class="tree">
-                <li
-                    class="row"
-                    class:selected=move || selected(Sel::Overview)
-                    on:click=move |_| ctx.sel.set(Sel::Overview)
-                >
-                    <span class="icon">"▤"</span>
-                    <span class="name">"Document"</span>
+                <li class="row big" class:selected=move || selected(Sel::Map) on:click=move |_| ctx.sel.set(Sel::Map)>
+                    <span class="icon"><Icon name="map"/></span>
+                    <span class="name">"ODD map"</span>
+                </li>
+                <li class="row big" class:selected=move || selected(Sel::Settings) on:click=move |_| ctx.sel.set(Sel::Settings)>
+                    <span class="icon"><Icon name="doc"/></span>
+                    <span class="name">"Document & imports"</span>
                 </li>
             </ul>
             <div class="heading">
-                <span>"TAXONOMY"</span>
+                <span>"Taxonomy"</span>
                 <button class="mini" title="Add a concept" on:click=move |_| add_concept(None, KindTag::Categorical)>
-                    "+ concept"
+                    <Icon name="plus"/>"concept"
                 </button>
                 <button class="mini" title="Add a group" on:click=move |_| add_concept(None, KindTag::Group)>
-                    "+ group"
+                    <Icon name="folder"/>
                 </button>
             </div>
             <ul class="tree">
                 {move || {
+                    let report = ctx.report_ok();
                     concepts
                         .get()
                         .into_iter()
                         .map(|r| {
                             let id = r.id;
                             let group = r.tag == KindTag::Group;
+                            let ring = report.as_ref().and_then(|rep| restriction(rep, &r.path));
                             view! {
                                 <li
                                     class="row"
+                                    class:group=group
                                     class:selected=move || selected(Sel::Concept(id))
                                     style=format!("padding-left: {}px", 10 + r.depth * 16)
                                     on:click=move |_| ctx.sel.set(Sel::Concept(id))
                                 >
                                     <span class=format!("icon kind-{}", r.tag.label().replace(' ', "-"))>
-                                        {kind_icon(r.tag)}
+                                        <Icon name=concept_icon(&r.name, r.tag)/>
                                     </span>
                                     <span class="name">{r.name}</span>
-                                    <span class="summary">{r.summary}</span>
+                                    {ring.map(|(out, n)| view! { <Ring out=out total=n/> })}
                                     {group.then(|| view! {
                                         <button
                                             class="mini add"
@@ -407,7 +464,7 @@ fn Outline() -> impl IntoView {
                                                 add_concept(Some(id), KindTag::Categorical);
                                             }
                                         >
-                                            "+"
+                                            <Icon name="plus"/>
                                         </button>
                                     })}
                                 </li>
@@ -420,53 +477,391 @@ fn Outline() -> impl IntoView {
                 })}
             </ul>
             <div class="heading">
-                <span>"ODD"</span>
-                <button class="mini" title="Add a root module" on:click=move |_| add_module(true)>"+ root"</button>
+                <span>"ODD roots"</span>
+                <button class="mini" title="Add a root module" on:click=move |_| add_module(true)><Icon name="plus"/>"root"</button>
             </div>
             <ul class="tree">{module_list(true)}</ul>
             <div class="heading">
-                <span>"MODULES"</span>
-                <button class="mini" title="Add a module" on:click=move |_| add_module(false)>"+ module"</button>
+                <span>"Modules"</span>
+                <button class="mini" title="Add a module" on:click=move |_| add_module(false)><Icon name="plus"/>"module"</button>
             </div>
             <ul class="tree">{module_list(false)}</ul>
         </nav>
     }
 }
 
-pub fn kind_icon(tag: KindTag) -> &'static str {
-    match tag {
-        KindTag::Group => "▸",
-        KindTag::Number => "#",
-        KindTag::Boolean => "◐",
-        KindTag::Categorical => "≡",
-        KindTag::Derived => "ƒ",
-        KindTag::Reference => "→",
-        KindTag::Other => "…",
+/// A small ring: how many of an attribute's buckets the ODD restricts.
+#[component]
+fn Ring(out: usize, total: usize) -> impl IntoView {
+    let frac = if total == 0 {
+        0.0
+    } else {
+        out as f64 / total as f64
+    };
+    let c = 2.0 * std::f64::consts::PI * 6.0;
+    view! {
+        <svg class="ring" viewBox="0 0 16 16" width="16" height="16">
+            <title>{format!("{out} of {total} buckets restricted")}</title>
+            <circle class="ring-bg" cx="8" cy="8" r="6"/>
+            <circle
+                class="ring-fg"
+                cx="8"
+                cy="8"
+                r="6"
+                stroke-dasharray=format!("{} {}", c * frac, c)
+                transform="rotate(-90 8 8)"
+            />
+        </svg>
     }
 }
 
+// ---------------------------------------------------------------------------
+// The map
+// ---------------------------------------------------------------------------
+
+#[component]
+fn MapView() -> impl IntoView {
+    let ctx = ctx();
+    let report = Signal::derive(move || ctx.report.get().ok());
+    let evaluation = Signal::derive(move || ctx.evaluation.get());
+    let selected = Signal::derive(|| None::<String>);
+    let stats = move || {
+        report.with(|r| {
+            let r = r.as_ref()?;
+            let mut counts = [0usize; 2];
+            for a in &r.attributes {
+                for s in &a.states {
+                    counts[match s {
+                        State::Inside => 0,
+                        State::Outside => 1,
+                    }] += 1;
+                }
+            }
+            let restricted = r
+                .attributes
+                .iter()
+                .filter(|a| a.states.contains(&State::Outside))
+                .count();
+            Some((
+                r.attributes.len(),
+                restricted,
+                r.modules.len(),
+                r.roots.len(),
+                counts,
+                r.version.clone(),
+            ))
+        })
+    };
+    view! {
+        <div class="map-view">
+            {move || match ctx.report.get() {
+                Err(e) => view! {
+                    <div class="card error-card">
+                        <div class="card-title"><Icon name="warn"/>"openodd cannot read this ODD"</div>
+                        <p class="mono">{e}</p>
+                        <p class="hint">"The map comes back once the document reads. The outline and forms still edit it."</p>
+                    </div>
+                }.into_any(),
+                Ok(_) => ().into_any(),
+            }}
+            {move || stats().map(|(attrs, restricted, modules, roots, counts, version)| {
+                let total = counts.iter().sum::<usize>().max(1);
+                view! {
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-icon"><Icon name="list"/></div>
+                            <div><div class="stat-n">{attrs}</div><div class="stat-l">"attributes"</div></div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-icon warn"><Icon name="ban"/></div>
+                            <div><div class="stat-n">{restricted}</div><div class="stat-l">"attributes restricted"</div></div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-icon"><Icon name="module"/></div>
+                            <div><div class="stat-n">{modules}</div><div class="stat-l">{format!("modules · {roots} root{}", if roots == 1 { "" } else { "s" })}</div></div>
+                        </div>
+                        <div class="stat wide">
+                            <div class="stat-l">{format!("buckets: {} allowed · {} excluded", counts[0], counts[1])}</div>
+                            <StateBar counts=counts/>
+                            <div class="stat-l">{format!("{}% of the domain excluded", counts[1] * 100 / total)}{version.map(|v| format!(" · version {v}"))}</div>
+                        </div>
+                    </div>
+                }
+            })}
+            <div class="card">
+                <div class="card-title"><Icon name="graph"/>"Structure"<span class="hint">"roots → modules → attributes · hover to trace, click to edit"</span></div>
+                <div class="graph-legend">
+                    <span><i class="ln include"></i>"include"</span>
+                    <span><i class="ln exclude"></i>"exclude"</span>
+                    <span><i class="ln carries"></i>"label"</span>
+                    <span class="hint">"With test values set, nodes show each module's verdict."</span>
+                </div>
+                <ModuleGraph
+                    report=report
+                    evaluation=evaluation
+                    selected=selected
+                    on_select=Callback::new(move |(id, attr): (String, bool)| {
+                        if attr { ctx.select_attribute(&id) } else { ctx.select_module(&id) }
+                    })
+                />
+            </div>
+            <div class="card">
+                <div class="card-title"><Icon name="grid"/>"ODD map"<span class="hint">"two attributes at once · click a cell to test it"</span></div>
+                <Legend/>
+                <OddMap report=report/>
+            </div>
+            <div class="card">
+                <div class="card-title"><Icon name="list"/>"Attributes"<span class="hint">"click a value or drag on a line to test it"</span></div>
+                <Legend/>
+                <AttributeCards/>
+            </div>
+        </div>
+    }
+}
+
+/// Every attribute, grouped by the taxonomy's top level, with its domain.
+#[component]
+fn AttributeCards() -> impl IntoView {
+    let ctx = ctx();
+    let groups = Memo::new(move |_| {
+        let Some(r) = ctx.report.get().ok() else {
+            return vec![];
+        };
+        let mut out: Vec<(String, Vec<String>)> = vec![];
+        for a in &r.attributes {
+            let (group, _) = a.name.split_once('.').unwrap_or(("", &a.name));
+            match out.iter_mut().find(|(g, _)| g == group) {
+                Some((_, v)) => v.push(a.name.clone()),
+                None => out.push((group.to_string(), vec![a.name.clone()])),
+            }
+        }
+        out
+    });
+    move || {
+        groups
+            .get()
+            .into_iter()
+            .map(|(group, names)| {
+                view! {
+                    <div class="attr-group">
+                        {(!group.is_empty()).then(|| view! {
+                            <div class="group-title"><Icon name=concept_icon(&group, KindTag::Group)/>{group.clone()}</div>
+                        })}
+                        <div class="attr-grid">
+                            {names.into_iter().map(|n| view! { <AttributeCard name=n/> }).collect_view()}
+                        </div>
+                    </div>
+                }
+            })
+            .collect_view()
+    }
+}
+
+/// One attribute: its icon, its domain coloured by state, and the modules testing it.
+#[component]
+pub fn AttributeCard(name: String) -> impl IntoView {
+    let ctx = ctx();
+    let n = name.clone();
+    let attr = Signal::derive(move || ctx.report.get().ok().and_then(|r| r.attribute(&n).cloned()));
+    let n2 = name.clone();
+    let testers = Memo::new(move |_| {
+        ctx.report
+            .get()
+            .ok()
+            .map(|r| {
+                r.modules
+                    .iter()
+                    .filter(|m| m.links.iter().any(|l| !l.module && l.target == n2))
+                    .map(|m| m.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    let short = name.rsplit('.').next().unwrap_or(&name).to_string();
+    let n3 = name.clone();
+    let tag = move || match attr.with(|a| a.as_ref().map(|a| a.kind.clone())).as_deref() {
+        Some("number") => KindTag::Number,
+        Some("boolean") => KindTag::Boolean,
+        Some("derived") => KindTag::Derived,
+        _ => KindTag::Categorical,
+    };
+    let icon_name = short.clone();
+    view! {
+        <div class="attr-card">
+            <div class="attr-head" on:click=move |_| ctx.select_attribute(&n3)>
+                <span class="attr-icon">{move || view! { <Icon name=concept_icon(&icon_name, tag())/> }}</span>
+                <span class="attr-name">{short.clone()}</span>
+                <span class="tag">{move || attr.with(|a| a.as_ref().map(|a| if a.unit.is_empty() { a.kind.clone() } else { format!("{} · {}", a.kind, a.unit) }).unwrap_or_default())}</span>
+            </div>
+            <Domain attr=attr compact=true/>
+            <div class="testers">
+                {move || {
+                    let t = testers.get();
+                    if t.is_empty() {
+                        view! { <span class="hint">"not tested by any module"</span> }.into_any()
+                    } else {
+                        t.into_iter().map(|m| {
+                            let m2 = m.clone();
+                            view! { <button class="pill" on:click=move |_| ctx.select_module(&m2)><Icon name="module"/>{m}</button> }
+                        }).collect_view().into_any()
+                    }
+                }}
+            </div>
+        </div>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The panel
+// ---------------------------------------------------------------------------
+
 #[component]
 fn Panel() -> impl IntoView {
-    let tab = RwSignal::new(Tab::Yaml);
-    let button = move |t: Tab, label: &'static str| {
+    let tab = RwSignal::new(Tab::Test);
+    let button = move |t: Tab, label: &'static str, icon: &'static str| {
         view! {
             <button class="tab" class:active=move || tab.get() == t on:click=move |_| tab.set(t)>
-                {label}
+                <Icon name=icon/>{label}
             </button>
         }
     };
     view! {
         <div class="tabs">
-            {button(Tab::Yaml, "YAML")}
-            {button(Tab::Check, "Check")}
-            {button(Tab::Evaluate, "Evaluate")}
+            {button(Tab::Test, "Test drive", "flask")}
+            {button(Tab::Yaml, "YAML", "code")}
+            {button(Tab::Details, "Details", "doc")}
         </div>
         <div class="tab-body">
             {move || match tab.get() {
+                Tab::Test => view! { <TestTab/> }.into_any(),
                 Tab::Yaml => view! { <YamlTab/> }.into_any(),
-                Tab::Check => view! { <CheckTab/> }.into_any(),
-                Tab::Evaluate => view! { <EvaluateTab/> }.into_any(),
+                Tab::Details => view! { <DetailsTab/> }.into_any(),
             }}
+        </div>
+    }
+}
+
+/// Values a run would measure, set by hand, judged as they change.
+#[component]
+fn TestTab() -> impl IntoView {
+    let ctx = ctx();
+    let attributes = Memo::new(move |_| {
+        ctx.report
+            .get()
+            .map(|r| {
+                r.attributes
+                    .into_iter()
+                    .filter(|a| !a.derived)
+                    .map(|a| a.name)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    let fill = move |_| {
+        // A point that may be inside: each attribute's first allowed bucket.
+        if let Ok(r) = ctx.report.get() {
+            let mut p = vec![];
+            for a in r.attributes.iter().filter(|a| !a.derived) {
+                let i = a.states.iter().position(|s| *s == State::Inside);
+                if let Some(i) = i {
+                    p.push((a.name.clone(), crate::viz::representative(a, i)));
+                }
+            }
+            ctx.probe.set(p);
+        }
+    };
+    view! {
+        <div class="test">
+            {move || {
+                match ctx.evaluation.get() {
+                    None => view! {
+                        <div class="verdict idle">
+                            <Icon name="flask"/>
+                            <div>
+                                <div class="v-title">"Test a situation"</div>
+                                <div class="hint">"Set values below, drag a marker on any line, or click a cell of the map."</div>
+                            </div>
+                        </div>
+                    }.into_any(),
+                    Some(e) => {
+                        let (class, icon, title) = if !e.inside {
+                            ("verdict outside", "ban", "Outside the ODD")
+                        } else if e.assumed {
+                            ("verdict depends", "warn", "Inside, if the unknowns allow")
+                        } else {
+                            ("verdict inside", "check", "Inside the ODD")
+                        };
+                        let derived = e.derived.clone();
+                        view! {
+                            <div class=class>
+                                <Icon name=icon/>
+                                <div>
+                                    <div class="v-title">{title}</div>
+                                    <div class="truths">
+                                        {e.modules.into_iter().map(|(m, t)| {
+                                            let m2 = m.clone();
+                                            view! { <button class=format!("truth {t}") on:click=move |_| ctx.select_module(&m2)>{m}</button> }
+                                        }).collect_view()}
+                                    </div>
+                                    {(!derived.is_empty()).then(|| view! {
+                                        <div class="truths">
+                                            {derived.into_iter().map(|(n, v)| view! { <span class="truth derived"><Icon name="func"/>{format!("{} = {v}", n.rsplit('.').next().unwrap_or(&n))}</span> }).collect_view()}
+                                        </div>
+                                    })}
+                                </div>
+                            </div>
+                        }.into_any()
+                    }
+                }
+            }}
+            <div class="actions">
+                <button class="button" on:click=fill><Icon name="sparkle"/>"Fill a point inside"</button>
+                <button class="button" on:click=move |_| ctx.probe.set(vec![])><Icon name="x"/>"Clear"</button>
+            </div>
+            <For each=move || attributes.get() key=|n| n.clone() let:name>
+                <TestRow name=name/>
+            </For>
+        </div>
+    }
+}
+
+#[component]
+fn TestRow(name: String) -> impl IntoView {
+    let ctx = ctx();
+    let n = name.clone();
+    let attr = Signal::derive(move || ctx.report.get().ok().and_then(|r| r.attribute(&n).cloned()));
+    let short = name.rsplit('.').next().unwrap_or(&name).to_string();
+    let n2 = name.clone();
+    let n3 = name.clone();
+    let number = move || attr.with(|a| a.as_ref().is_some_and(|a| a.is_number()));
+    let icon_name = short.clone();
+    view! {
+        <div class="test-row">
+            <div class="test-head">
+                <Icon name=concept_icon(&icon_name, KindTag::Number)/>
+                <span class="mono">{short}</span>
+                {move || number().then(|| {
+                    let n4 = n2.clone();
+                    let n5 = n2.clone();
+                    let unit = attr.with(|a| a.as_ref().map(|a| a.unit.clone()).unwrap_or_default());
+                    view! {
+                        <input
+                            class="num"
+                            type="number"
+                            step="any"
+                            placeholder="unknown"
+                            prop:value=move || ctx.probe_value(&n4).unwrap_or_default()
+                            on:input=move |ev| ctx.set_probe(&n5, event_target_value(&ev))
+                        />
+                        <span class="unit">{unit}</span>
+                    }
+                })}
+                {move || ctx.probe_value(&n3).map(|_| {
+                    let n6 = n3.clone();
+                    view! { <button class="mini" title="Unknown" on:click=move |_| ctx.set_probe(&n6, String::new())><Icon name="x"/></button> }
+                })}
+            </div>
+            <Domain attr=attr compact=true/>
         </div>
     }
 }
@@ -487,7 +882,7 @@ fn YamlTab() -> impl IntoView {
             match Document::from_yaml(&t) {
                 Ok(doc) => {
                     ctx.doc.set(doc);
-                    ctx.sel.set(Sel::Overview);
+                    ctx.sel.set(Sel::Map);
                     draft.set(None);
                     error.set(None);
                 }
@@ -499,9 +894,9 @@ fn YamlTab() -> impl IntoView {
         <div class="yaml">
             <div class="hint">
                 {move || if draft.with(Option::is_some) {
-                    "Edited: apply to read it back into the forms."
+                    "Edited: apply to read it back into the editor."
                 } else {
-                    "Written from the forms. Type here to edit the YAML directly (comments are not kept)."
+                    "Written by the editor. Type here to edit the YAML directly (comments are not kept)."
                 }}
             </div>
             <textarea
@@ -523,9 +918,9 @@ fn YamlTab() -> impl IntoView {
     }
 }
 
-/// What openodd's reader makes of the document.
+/// What openodd's reader makes of the document, in its words.
 #[component]
-fn CheckTab() -> impl IntoView {
+fn DetailsTab() -> impl IntoView {
     let ctx = ctx();
     move || match ctx.report.get() {
         Err(e) => view! {
@@ -545,29 +940,7 @@ fn CheckTab() -> impl IntoView {
                         <dt>"Version"</dt><dd>{r.version.clone().unwrap_or("—".into())}</dd>
                         <dt>"Roots"</dt><dd>{if r.roots.is_empty() { "— (no ODD section: every module)".to_string() } else { r.roots.join(", ") }}</dd>
                     </dl>
-                    <h3>"Attributes"</h3>
-                    <p class="hint">"Each attribute's buckets, as openodd covers them; those outside the ODD in red."</p>
-                    <table class="attrs">
-                        <thead><tr><th>"Attribute"</th><th>"Kind"</th><th>"Buckets"</th></tr></thead>
-                        <tbody>
-                            {r.attributes.iter().map(|a| {
-                                let outside = a.outside.clone();
-                                view! {
-                                    <tr>
-                                        <td class="mono">{a.name.clone()}{(!a.unit.is_empty()).then(|| view! { <span class="unit">{format!(" [{}]", a.unit)}</span> })}</td>
-                                        <td>{a.kind.clone()}</td>
-                                        <td class="buckets">
-                                            {a.buckets.iter().map(|b| {
-                                                let out = outside.contains(b);
-                                                view! { <span class="bucket" class:outside=out>{b.clone()}</span> }
-                                            }).collect_view()}
-                                        </td>
-                                    </tr>
-                                }
-                            }).collect_view()}
-                        </tbody>
-                    </table>
-                    <h3>"Modules"</h3>
+                    <h3>"Modules, as openodd reads them"</h3>
                     {r.modules.iter().map(|m| {
                         let sec = |label: &'static str, s: &Option<(bool, Vec<String>)>| s.clone().map(|(all, cs)| view! {
                             <div class="section">
@@ -578,7 +951,8 @@ fn CheckTab() -> impl IntoView {
                         view! {
                             <div class="module-card" class:inactive=!m.active>
                                 <div class="title">
-                                    <span>{if m.root { "◆ " } else { "◇ " }}{m.name.clone()}</span>
+                                    <Icon name=if m.root { "target" } else { "module" }/>
+                                    <span>{m.name.clone()}</span>
                                     {(!m.labels.is_empty()).then(|| view! { <span class="tag">{m.labels.join(", ")}</span> })}
                                     {(!m.active).then(|| view! { <span class="tag">"inactive"</span> })}
                                 </div>
@@ -587,118 +961,25 @@ fn CheckTab() -> impl IntoView {
                             </div>
                         }
                     }).collect_view()}
+                    <h3>"Buckets"</h3>
+                    <table class="attrs">
+                        <tbody>
+                            {r.attributes.iter().map(|a| view! {
+                                <tr>
+                                    <td class="mono">{a.name.clone()}</td>
+                                    <td class="buckets">
+                                        {a.buckets.iter().zip(&a.states).map(|(b, s)| view! {
+                                            <span class=format!("bucket {}", s.class())>{b.clone()}</span>
+                                        }).collect_view()}
+                                    </td>
+                                </tr>
+                            }).collect_view()}
+                        </tbody>
+                    </table>
                 </div>
             }
             .into_any()
         }
-    }
-}
-
-/// Judge values against the ODD, as a run would be.
-#[component]
-fn EvaluateTab() -> impl IntoView {
-    let ctx = ctx();
-    let inputs = RwSignal::new(Vec::<(String, String)>::new());
-    let set = move |name: String, value: String| {
-        inputs.update(|v| {
-            if let Some(e) = v.iter_mut().find(|(n, _)| *n == name) {
-                e.1 = value;
-            } else {
-                v.push((name, value));
-            }
-        })
-    };
-    let get = move |name: &str| {
-        inputs.with(|v| {
-            v.iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, x)| x.clone())
-                .unwrap_or_default()
-        })
-    };
-    let result = Memo::new(move |_| {
-        let files = ctx
-            .files()
-            .ok_or_else(|| "the document cannot be written".to_string())?;
-        check::evaluate(&files, &inputs.get())
-    });
-    let attributes = Memo::new(move |_| {
-        ctx.report
-            .get()
-            .map(|r| {
-                r.attributes
-                    .into_iter()
-                    .filter(|a| !a.derived)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    });
-    view! {
-        <div class="evaluate">
-            <p class="hint">"Enter what a run measures; leave a value empty for unknown (OpenODD's missing value)."</p>
-            <div class="verdict">
-                {move || match result.get() {
-                    Err(e) => view! { <div class="error">{e}</div> }.into_any(),
-                    Ok(e) => view! {
-                        <div class=if e.inside { "big-verdict inside" } else { "big-verdict outside" }>
-                            {if e.inside { if e.assumed { "Inside (assumed: values missing)" } else { "Inside the ODD" } } else { "Outside the ODD" }}
-                        </div>
-                        <div class="truths">
-                            {e.modules.into_iter().map(|(m, t)| view! {
-                                <span class=format!("truth {t}")>{m}": "{t.clone()}</span>
-                            }).collect_view()}
-                        </div>
-                        {(!e.derived.is_empty()).then(|| view! {
-                            <div class="truths">
-                                {e.derived.into_iter().map(|(n, v)| view! { <span class="truth derived">{n}" = "{v}</span> }).collect_view()}
-                            </div>
-                        })}
-                    }.into_any(),
-                }}
-            </div>
-            <table class="inputs">
-                <tbody>
-                    <For each=move || attributes.get() key=|a| (a.name.clone(), a.values.clone()) let:a>
-                        {
-                            let name = a.name.clone();
-                            let n2 = name.clone();
-                            let control = if a.values.is_empty() {
-                                view! {
-                                    <input
-                                        type="number"
-                                        step="any"
-                                        placeholder=if a.unit.is_empty() { "unknown".to_string() } else { a.unit.clone() }
-                                        prop:value=move || get(&n2)
-                                        on:input=move |ev| set(name.clone(), event_target_value(&ev))
-                                    />
-                                }.into_any()
-                            } else {
-                                let values: Vec<String> = a.values.iter().map(|v| match v.as_str() {
-                                    "True" => "true".to_string(),
-                                    "False" => "false".to_string(),
-                                    other => other.to_string(),
-                                }).collect();
-                                view! {
-                                    <select
-                                        prop:value=move || get(&n2)
-                                        on:change=move |ev| set(name.clone(), event_target_value(&ev))
-                                    >
-                                        <option value="">"(unknown)"</option>
-                                        {values.into_iter().map(|v| view! { <option value=v.clone()>{v.clone()}</option> }).collect_view()}
-                                    </select>
-                                }.into_any()
-                            };
-                            view! {
-                                <tr>
-                                    <td class="mono">{a.name.clone()}</td>
-                                    <td>{control}</td>
-                                </tr>
-                            }
-                        }
-                    </For>
-                </tbody>
-            </table>
-        </div>
     }
 }
 

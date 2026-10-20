@@ -5,7 +5,7 @@
 use openodd::loader::AnyProbe;
 
 use crate::doc::{Cond, CondValue, Document, Kind};
-use openodd::model::Truth;
+use openodd::model::{Odd, Truth};
 use openodd::{load_transmission, Loaded, Transmission, Value, Values};
 
 /// The editor's file and the files it imports, by name.
@@ -16,16 +16,54 @@ pub struct Files {
     pub library: Vec<(String, String)>,
 }
 
+/// Where a bucket (or a cell of two) lies, the other attributes aside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum State {
+    /// Some values of the others put it inside the ODD.
+    Inside,
+    /// Outside the ODD whatever the others are.
+    Outside,
+}
+
+impl State {
+    pub fn class(self) -> &'static str {
+        match self {
+            State::Inside => "inside",
+            State::Outside => "outside",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Attribute {
     pub name: String,
     pub kind: String,
     pub unit: String,
     pub buckets: Vec<String>,
+    /// Each bucket's state, in order.
+    pub states: Vec<State>,
     pub outside: Vec<String>,
+    /// Bucket edges of a number, ascending (empty for a categorical).
+    pub edges: Vec<f64>,
     /// The values a categorical takes (empty for a number).
     pub values: Vec<String>,
     pub derived: bool,
+    /// A number of an integer primitive (`integer`, `long`).
+    pub integer: bool,
+}
+
+impl Attribute {
+    pub fn is_number(&self) -> bool {
+        self.kind == "number"
+    }
+}
+
+/// A module's arrow to what it tests: another module or label, or an attribute.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    pub target: String,
+    pub include: bool,
+    pub module: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +74,17 @@ pub struct Module {
     pub labels: Vec<String>,
     pub include: Option<(bool, Vec<String>)>,
     pub exclude: Option<(bool, Vec<String>)>,
+    pub links: Vec<Link>,
+}
+
+/// The ODD read, shared: equal only to itself, so a new read is a change.
+#[derive(Clone, Debug)]
+pub struct Shared(pub std::sync::Arc<Odd>);
+
+impl PartialEq for Shared {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +95,22 @@ pub struct Report {
     pub roots: Vec<String>,
     pub attributes: Vec<Attribute>,
     pub modules: Vec<Module>,
+    pub odd: Shared,
+}
+
+impl Report {
+    pub fn attribute(&self, name: &str) -> Option<&Attribute> {
+        self.attributes.iter().find(|a| a.name == name)
+    }
+
+    /// The modules carrying `label`.
+    pub fn labelled(&self, label: &str) -> Vec<&str> {
+        self.modules
+            .iter()
+            .filter(|m| m.labels.iter().any(|l| l == label))
+            .map(|m| m.name.as_str())
+            .collect()
+    }
 }
 
 /// A backend that measures everything, a probe's unit being its name: the
@@ -97,7 +162,7 @@ pub fn load(files: &Files) -> Result<Loaded, String> {
     } else {
         &files.entry
     };
-    let (units, derived) = hints(files);
+    let (units, derived, _) = hints(files);
     let mut probes = serde_norway::Mapping::new();
     for a in plain
         .odd
@@ -131,9 +196,10 @@ pub fn load(files: &Files) -> Result<Loaded, String> {
 /// What the files say of their concepts: the unit each one's numbers are
 /// first written in (key as written -> unit), and the derived categoricals,
 /// which are not measured but worked out.
-fn hints(files: &Files) -> (Vec<(String, String)>, Vec<String>) {
+fn hints(files: &Files) -> (Vec<(String, String)>, Vec<String>, Vec<String>) {
     let mut out: Vec<(String, String)> = vec![];
     let mut derived = vec![];
+    let mut integers = vec![];
     let texts = std::iter::once(&files.text).chain(files.library.iter().map(|(_, t)| t));
     for text in texts {
         let Ok(doc) = Document::from_yaml(text) else {
@@ -162,6 +228,12 @@ fn hints(files: &Files) -> (Vec<(String, String)>, Vec<String>) {
                 .filter(|(_, k)| matches!(k, Kind::Derived(_)))
                 .map(|(n, _)| n),
         );
+        integers.extend(
+            doc.leaves()
+                .into_iter()
+                .filter(|(_, k)| matches!(k, Kind::Number { primitive, .. } if primitive == "integer" || primitive == "long"))
+                .map(|(n, _)| n),
+        );
         for c in lists.into_iter().flatten() {
             let unit = match &c.value {
                 CondValue::Range { unit, .. } => unit.clone(),
@@ -178,12 +250,13 @@ fn hints(files: &Files) -> (Vec<(String, String)>, Vec<String>) {
             }
         }
     }
-    (out, derived)
+    (out, derived, integers)
 }
 
 pub fn check(files: &Files) -> Result<Report, String> {
     let loaded = load(files)?;
     let odd = &loaded.odd;
+    let (_, _, integers) = hints(files);
     let attributes = odd
         .attributes
         .iter()
@@ -203,14 +276,20 @@ pub fn check(files: &Files) -> Result<Report, String> {
             } else {
                 "categorical"
             };
+            let buckets = item.map(|i| i.labels.clone()).unwrap_or_default();
             Attribute {
                 name: a.name.clone(),
                 kind: kind.into(),
                 unit: a.unit.clone(),
-                buckets: item.map(|i| i.labels.clone()).unwrap_or_default(),
+                states: (0..buckets.len())
+                    .map(|i| state(odd, &[(&a.name, i)]))
+                    .collect(),
+                buckets,
                 outside: odd.outside_buckets(&a.name),
+                edges: item.map(|i| i.edges.clone()).unwrap_or_default(),
                 values,
                 derived: a.derived(),
+                integer: integers.contains(&a.name),
             }
         })
         .collect();
@@ -229,6 +308,34 @@ pub fn check(files: &Files) -> Result<Report, String> {
                     )
                 })
             };
+            let mut links: Vec<Link> = vec![];
+            for (include, s) in [(true, &m.include), (false, &m.exclude)] {
+                let Some(s) = s else { continue };
+                let mut refs = std::collections::BTreeSet::new();
+                let mut attrs = vec![];
+                for c in &s.conditions {
+                    c.references(&mut refs);
+                    c.attributes(&mut attrs);
+                }
+                let mut push = |target: String, module: bool| {
+                    if !links
+                        .iter()
+                        .any(|l| l.target == target && l.include == include)
+                    {
+                        links.push(Link {
+                            target,
+                            include,
+                            module,
+                        });
+                    }
+                };
+                for r in refs {
+                    push(r, true);
+                }
+                for a in attrs {
+                    push(a, false);
+                }
+            }
             Module {
                 name: m.name.clone(),
                 root: odd.roots.contains(&m.name),
@@ -236,6 +343,7 @@ pub fn check(files: &Files) -> Result<Report, String> {
                 labels: m.labels.clone(),
                 include: section(&m.include),
                 exclude: section(&m.exclude),
+                links,
             }
         })
         .collect();
@@ -246,7 +354,94 @@ pub fn check(files: &Files) -> Result<Report, String> {
         roots: odd.roots.clone(),
         attributes,
         modules,
+        odd: Shared(std::sync::Arc::new(loaded.odd)),
     })
+}
+
+/// Where the ODD stands with these attributes in these buckets: outside when
+/// it is outside whatever the others are.
+fn state(odd: &Odd, at: &[(&str, usize)]) -> State {
+    let mut open: Values = odd
+        .attributes
+        .iter()
+        .map(|b| (b.name.clone(), Value::Open))
+        .collect();
+    for (name, i) in at {
+        open.insert(name.to_string(), Value::Bucket(*i));
+    }
+    odd.complete_open(&mut open);
+    if odd.evaluate(&open).inside {
+        State::Inside
+    } else {
+        State::Outside
+    }
+}
+
+/// What one module makes of each bucket of an attribute, the others aside:
+/// outside when the module cannot hold there.
+pub fn module_states(report: &Report, module: &str, attribute: &str) -> Vec<State> {
+    let odd = &report.odd.0;
+    let Some(a) = report.attribute(attribute) else {
+        return vec![];
+    };
+    (0..a.buckets.len())
+        .map(|i| {
+            let mut open: Values = odd
+                .attributes
+                .iter()
+                .map(|b| (b.name.clone(), Value::Open))
+                .collect();
+            open.insert(attribute.to_string(), Value::Bucket(i));
+            odd.complete_open(&mut open);
+            match odd.evaluate(&open).modules.get(module) {
+                Some(Truth::False) => State::Outside,
+                _ => State::Inside,
+            }
+        })
+        .collect()
+}
+
+/// Where the ODD (or one module) stands at each of these values of a numeric
+/// attribute, the others aside: what a number line draws.
+pub fn profile(report: &Report, attribute: &str, module: Option<&str>, xs: &[f64]) -> Vec<State> {
+    let odd = &report.odd.0;
+    let open: Values = odd
+        .attributes
+        .iter()
+        .map(|b| (b.name.clone(), Value::Open))
+        .collect();
+    xs.iter()
+        .map(|x| {
+            let mut values = open.clone();
+            values.insert(attribute.to_string(), Value::Float(*x));
+            odd.complete_open(&mut values);
+            let v = odd.evaluate(&values);
+            let inside = match module {
+                None => v.inside,
+                Some(m) => v.modules.get(m) != Some(&Truth::False),
+            };
+            if inside {
+                State::Inside
+            } else {
+                State::Outside
+            }
+        })
+        .collect()
+}
+
+/// The states of every pair of buckets of two attributes: `rows[i][j]` for
+/// `y`'s bucket `i` and `x`'s bucket `j`.
+pub fn matrix(report: &Report, x: &str, y: &str) -> Vec<Vec<State>> {
+    let (Some(ax), Some(ay)) = (report.attribute(x), report.attribute(y)) else {
+        return vec![];
+    };
+    (0..ay.buckets.len())
+        .map(|i| {
+            (0..ax.buckets.len())
+                .map(|j| state(&report.odd.0, &[(x, j), (y, i)]))
+                .collect()
+        })
+        .collect()
 }
 
 fn value_text(v: &Value) -> String {
@@ -262,18 +457,36 @@ fn value_text(v: &Value) -> String {
     }
 }
 
+fn truth_text(t: &Truth) -> &'static str {
+    match t {
+        Truth::True => "true",
+        Truth::False => "false",
+        Truth::Unknown => "unknown",
+        Truth::Inactive => "inactive",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Evaluation {
     pub inside: bool,
     pub assumed: bool,
-    /// Every module's verdict, and the attributes derived from the values.
+    /// Every module's and label's verdict, and the attributes derived from the values.
     pub modules: Vec<(String, String)>,
     pub derived: Vec<(String, String)>,
 }
 
+impl Evaluation {
+    pub fn truth(&self, name: &str) -> Option<&str> {
+        self.modules
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, t)| t.as_str())
+    }
+}
+
 /// Judge values (attribute -> text; empty: unknown) against the ODD.
-pub fn evaluate(files: &Files, inputs: &[(String, String)]) -> Result<Evaluation, String> {
-    let odd = load(files)?.odd;
+pub fn evaluate(report: &Report, inputs: &[(String, String)]) -> Evaluation {
+    let odd = &report.odd.0;
     let mut values = Values::new();
     for (name, text) in inputs {
         let text = text.trim();
@@ -314,24 +527,16 @@ pub fn evaluate(files: &Files, inputs: &[(String, String)]) -> Result<Evaluation
             )
         })
         .collect();
-    Ok(Evaluation {
+    Evaluation {
         inside: verdict.inside,
         assumed: verdict.assumed,
         modules: verdict
             .modules
             .iter()
-            .map(|(name, t)| {
-                let t = match t {
-                    Truth::True => "true",
-                    Truth::False => "false",
-                    Truth::Unknown => "unknown",
-                    Truth::Inactive => "inactive",
-                };
-                (name.clone(), t.to_string())
-            })
+            .map(|(name, t)| (name.clone(), truth_text(t).to_string()))
             .collect(),
         derived,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -365,6 +570,38 @@ mod tests {
             .find(|a| a.name == "environment.rainfall")
             .unwrap();
         assert!(rain.derived);
+        assert_eq!(fog.states, [State::Inside, State::Inside, State::Outside]);
+        let speed = r.attribute("dynamic.ego_speed").unwrap();
+        assert_eq!(speed.states[0], State::Outside);
+        let root = r
+            .modules
+            .iter()
+            .find(|m| m.name == "urban_shuttle")
+            .unwrap();
+        assert!(root
+            .links
+            .iter()
+            .any(|l| l.target == "weather" && !l.include && l.module));
+        assert!(root
+            .links
+            .iter()
+            .any(|l| l.target == "dynamic.ego_speed" && l.include && !l.module));
+        let m = matrix(&r, "environment.fog", "dynamic.ego_speed");
+        assert_eq!(m.len(), speed.buckets.len());
+        assert_eq!(m[1][2], State::Outside);
+        assert_eq!(m[1][0], State::Inside);
+        assert!(r.attribute("scenery.lane_count").unwrap().integer);
+        let lanes = profile(
+            &r,
+            "scenery.lane_count",
+            Some("town_roads"),
+            &[1.0, 2.0, 3.0],
+        );
+        assert_eq!(lanes, [State::Inside, State::Inside, State::Outside]);
+        let speed = profile(&r, "dynamic.ego_speed", None, &[-1.0, 10.0, 50.0]);
+        assert_eq!(speed, [State::Outside, State::Inside, State::Outside]);
+        let dark = module_states(&r, "dark", "environment.illumination");
+        assert_eq!(dark, [State::Outside, State::Outside, State::Inside]);
     }
 
     #[test]
@@ -400,12 +637,13 @@ mod tests {
             ("environment.fog".into(), "none".into()),
             ("dynamic.ego_speed".into(), "30".into()),
         ];
-        let e = evaluate(&f, &inputs).unwrap();
+        let r = check(&f).unwrap();
+        let e = evaluate(&r, &inputs);
         assert!(e.inside, "{e:?}");
         assert!(e
             .derived
             .contains(&("environment.rainfall".into(), "dry".into())));
         inputs[6].1 = "dense".into();
-        assert!(!evaluate(&f, &inputs).unwrap().inside);
+        assert!(!evaluate(&r, &inputs).inside);
     }
 }
