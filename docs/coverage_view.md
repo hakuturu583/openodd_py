@@ -75,7 +75,8 @@ they went. When no run the matrix selects recorded an outcome
 - nothing about failures: no failure rate, flaky or failing cells, or badge.
 
 One run with an outcome is enough for the usual view; the runs without one
-are then counted as *covered, no outcome*. The ramp's hue is `--oo-heat`.
+are then counted as *covered, no outcome*. The ramp's hue is `--oo-heat`. The
+[comparison](compare.md) of two sets does not have this mode yet.
 
 ## Embedding
 

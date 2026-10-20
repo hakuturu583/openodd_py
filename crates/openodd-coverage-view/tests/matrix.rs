@@ -506,14 +506,21 @@ fn without_outcomes_the_cells_show_the_time_spent() {
     assert!(html.contains("class=\"oo-info\""));
     // speed x rain: slow and dry has 4 runs, 4 s (the most); fast and dry 2.
     assert!(
-        html.contains("class=\"oo-cell oo-unknown oo-heat oo-heat-5\""),
+        html.contains("class=\"oo-cell oo-unknown oo-heat-5\""),
         "{html}"
     );
     assert!(html.contains("<span class=\"oo-rate\">4.0 s</span><span class=\"oo-n\">4 runs</span>"));
     // Fast in heavy rain: 1 run of 1 s, below `min_runs`, so outlined as thin.
-    assert!(html.contains("oo-heat oo-heat-3 oo-thin"), "{html}");
+    assert!(html.contains("oo-heat-3 oo-thin"), "{html}");
     assert!(html.contains("class=\"oo-cell oo-unsampled\""));
     assert!(html.contains("class=\"oo-cell oo-outside\""));
+    // A selection with no run is not one without outcomes.
+    let none = Query {
+        scenario: Some("other".into()),
+        ..Query::default()
+    };
+    let empty = html::fragment(&data, &data.matrix(&none), &Options::default());
+    assert!(!empty.contains("oo-info"));
 }
 
 #[test]

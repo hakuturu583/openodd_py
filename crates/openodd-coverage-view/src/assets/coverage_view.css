@@ -75,7 +75,8 @@
 .oo-cov .oo-s { font-size: 11.5px; color: var(--oo-ink-2); min-height: 1em; }
 .oo-cov .oo-stat-flaky .oo-v { color: var(--oo-flaky-ink); }
 .oo-cov .oo-stat-fail .oo-v { color: var(--oo-fail); }
-.oo-cov .oo-warn { margin: 12px 0 0; padding: 8px 12px; border-radius: 10px; font-size: 12.5px; color: var(--oo-ink);
+.oo-cov .oo-warn, .oo-cov .oo-info { margin: 12px 0 0; padding: 8px 12px; border-radius: 10px; font-size: 12.5px; }
+.oo-cov .oo-warn { color: var(--oo-ink);
   background: var(--oo-flaky-fill); border: 1px solid color-mix(in oklab, var(--oo-flaky) 50%, transparent); }
 
 /* Share of cells per state, and the legend */
@@ -184,7 +185,7 @@
 .oo-cov .oo-ramp { display: inline-flex; gap: 2px; }
 .oo-cov .oo-ramp .oo-sw { width: 12px; border-radius: 3px; }
 .oo-cov .oo-ramp-k { color: var(--oo-ink-3); }
-.oo-cov .oo-info { margin: 12px 0 0; padding: 8px 12px; border-radius: 10px; font-size: 12.5px; color: var(--oo-ink-2);
+.oo-cov .oo-info { color: var(--oo-ink-2);
   background: color-mix(in oklab, var(--oo-heat) 7%, var(--oo-surface));
   border: 1px solid color-mix(in oklab, var(--oo-heat) 22%, transparent); }
 /* Too few runs to judge: faded, with a dashed outline in its colour. */

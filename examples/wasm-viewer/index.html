@@ -104,8 +104,8 @@
     const coverageAttrs = JSON.parse(viewer.attributes());
     const wanted = [hash.get("x"), hash.get("y"), ...caseAttrs].filter(Boolean);
     const shared = [...new Set(wanted)].filter((a) => coverageAttrs.includes(a));
-    // Runs measured on recorded logs carry no drawn case: then there is no
-    // case plot or scenario realisation to show, only the coverage matrix.
+    // No case with an outcome to place (runs measured on recorded logs, say):
+    // no case plot or scenario realisation to show, only the coverage matrix.
     const driftEl = document.getElementById("drift");
     const drawn = viewer.cases > 0;
     casesEl.hidden = driftEl.hidden = !drawn;
@@ -163,13 +163,13 @@
     drop.classList.remove("over");
     readFiles([...e.dataTransfer.files]);
   });
-  async function loadSample(url = hash.get("data") || "./sample.json") {
+  async function loadSample(url = hash.get("data") || "./sample.json", name = url === "./sample.json" ? "sample" : url) {
     const docs = await (await fetch(url)).json();
-    show(docs, url.startsWith("./sample") ? url.slice(2, -5).replace("_", " ") : url);
+    show(docs, name);
   }
   document.getElementById("sample").addEventListener("click", () => loadSample("./sample.json"));
   // The same runs without cases or outcomes, as measured on recorded logs.
-  document.getElementById("sample-log").addEventListener("click", () => loadSample("./sample_log.json"));
+  document.getElementById("sample-log").addEventListener("click", () => loadSample("./sample_log.json", "sample log"));
   await loadSample();
 
   // The comparison: two sets of runs on the same ODD. #compare=URL loads
