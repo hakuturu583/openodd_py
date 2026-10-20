@@ -10,10 +10,10 @@ use leptos::task::spawn_local;
 use web_sys::HtmlInputElement;
 
 use crate::app::{add_concept, ctx, event_target, AttributeCard, Sel};
-use crate::check::{Attribute, Report, State};
+use crate::check::{Attribute, State};
 use crate::doc::{
-    fresh_id, move_in, Cond, CondValue, CondsAt, Definition, Document, KeyKind, Kind, KindTag,
-    Section, ValueTag, OPERATORS, PRIMITIVES, UNIT_TYPES,
+    fresh_id, move_in, tail, Cond, CondValue, CondsAt, Definition, Document, KeyKind, Kind,
+    KindTag, Section, ValueTag, OPERATORS, PRIMITIVES, UNIT_TYPES,
 };
 use crate::icons::{concept_icon, kind_icon, Icon};
 use crate::viz::{fmt_num, Domain, Legend, NumberLine};
@@ -39,17 +39,6 @@ fn key_options(d: &Document) -> Vec<(String, &'static str)> {
     out.extend(d.modules.iter().map(|m| (m.name.clone(), "module")));
     out.extend(d.labels().into_iter().map(|l| (l, "label")));
     out
-}
-
-/// The attribute a key of a section names (by its dotted name or its own).
-fn attribute_for(r: &Report, key: &str) -> Option<Attribute> {
-    r.attribute(key)
-        .or_else(|| {
-            r.attributes
-                .iter()
-                .find(|a| a.name.rsplit('.').next() == Some(key))
-        })
-        .cloned()
 }
 
 /// Rename references in every section when a concept or module is renamed.
@@ -517,7 +506,7 @@ fn ReferenceForm(id: u64) -> impl IntoView {
             d.leaves()
                 .into_iter()
                 .filter(|(_, k)| matches!(k.tag(), KindTag::Categorical | KindTag::Derived))
-                .map(|(n, _)| n.rsplit('.').next().unwrap_or(&n).to_string())
+                .map(|(n, _)| tail(&n).to_string())
                 .collect::<Vec<_>>()
         })
     });
@@ -768,10 +757,9 @@ fn Accepts(id: u64) -> impl IntoView {
                     </div>
                 })}
                 {attrs.into_iter().map(|a| {
-                    let a2 = a.clone();
-                    let attr = Signal::derive(move || ctx.report.get().ok().and_then(|r| r.attribute(&a2).cloned()));
+                    let attr = ctx.attribute(a.clone());
                     let module = Signal::derive(move || name.get());
-                    let short = a.rsplit('.').next().unwrap_or(&a).to_string();
+                    let short = tail(&a).to_string();
                     let a4 = a.clone();
                     let icon = concept_icon(&short, KindTag::Number);
                     view! {
@@ -981,17 +969,16 @@ fn key_icon(key: &str, kind: &KeyKind) -> &'static str {
     match kind {
         KeyKind::Module => "module",
         KeyKind::Label => "tag",
-        KeyKind::Concept(k) => concept_icon(key.rsplit('.').next().unwrap_or(key), k.tag()),
+        KeyKind::Concept(k) => concept_icon(tail(key), k.tag()),
         KeyKind::Unknown => "warn",
     }
 }
 
-/// A number and its unit, as a condition writes them (`60 km/h`).
+/// A number and its unit, as a condition writes them (`60 km/h`, `60km/h`).
 fn split_quantity(text: &str) -> Option<(f64, String)> {
-    let mut parts = text.split_whitespace();
-    let n = parts.next()?.parse::<f64>().ok()?;
-    let unit = parts.next().unwrap_or("").to_string();
-    parts.next().is_none().then_some((n, unit))
+    let c = openodd::loader::QUANTITY_RE.captures(text.trim())?;
+    let n = openodd::value::parse_float(&c["value"])?;
+    Some((n, c.name("unit").map_or("", |u| u.as_str()).to_string()))
 }
 
 /// The interval a numeric condition allows.
@@ -1021,20 +1008,21 @@ fn interval_of(v: &CondValue, unit_ok: impl Fn(&str) -> bool) -> Option<(f64, f6
 #[component]
 fn CondRow(at: CondsAt, id: u64, list: String) -> impl IntoView {
     let ctx = ctx();
-    let cond = move || {
+    let cond = Memo::new(move |_| {
         ctx.doc.with(|d| {
             d.conds(at)
                 .and_then(|cs| cs.iter().find(|c| c.id == id).cloned())
         })
-    };
-    let key = Memo::new(move |_| cond().map(|c| c.key).unwrap_or_default());
-    let tag = Memo::new(move |_| cond().map(|c| c.value.tag()));
+    });
+    let key =
+        Memo::new(move |_| cond.with(|c| c.as_ref().map(|c| c.key.clone()).unwrap_or_default()));
+    let tag = Memo::new(move |_| cond.with(|c| c.as_ref().map(|c| c.value.tag())));
     let key_kind = Memo::new(move |_| ctx.doc.with(|d| d.key_kind(&key.get())));
     let literals = Memo::new(move |_| ctx.doc.with(|d| literals_of(d, &key_kind.get())));
     let attr = Memo::new(move |_| {
         let k = key.get();
         ctx.report
-            .with(|r| r.as_ref().ok().and_then(|r| attribute_for(r, &k)))
+            .with(|r| r.as_ref().ok().and_then(|r| r.attribute(&k).cloned()))
     });
     let set_key = move |ev: leptos::ev::Event| {
         let k = event_target_value(&ev);
@@ -1087,11 +1075,13 @@ fn CondRow(at: CondsAt, id: u64, list: String) -> impl IntoView {
         }
     };
     // A number line under a numeric condition, its ends draggable.
-    let unit_ok = move |u: &str| {
+    // (Only in the attribute's own unit: the line is drawn in it.)
+    let interval = Memo::new(move |_| {
         let au = attr.with(|a| a.as_ref().map(|a| a.unit.clone()).unwrap_or_default());
-        u.is_empty() || au.is_empty() || u == au
-    };
-    let interval = Signal::derive(move || cond().and_then(|c| interval_of(&c.value, unit_ok)));
+        let unit_ok =
+            |u: &str| u.is_empty() || au.is_empty() || openodd::units::normalize_unit(u) == au;
+        cond.with(|c| c.as_ref().and_then(|c| interval_of(&c.value, unit_ok)))
+    });
     let handles =
         Signal::derive(move || interval.get().map(|(a, b)| vec![a, b]).unwrap_or_default());
     let drag = Callback::new(move |(i, v): (usize, f64)| {
@@ -1150,7 +1140,7 @@ fn CondRow(at: CondsAt, id: u64, list: String) -> impl IntoView {
             </div>
             {move || show_line.get().then(|| view! {
                 <div class="cond-line">
-                    <NumberLine attr=line_attr interval=interval handles=handles on_drag=drag/>
+                    <NumberLine attr=line_attr interval=Signal::from(interval) handles=Some(handles) on_drag=Some(drag)/>
                 </div>
             })}
         </div>

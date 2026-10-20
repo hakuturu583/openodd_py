@@ -7,9 +7,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::LazyLock;
 
-use regex::Regex;
+use openodd::loader::{BOUND_RE, IDENTIFIER, RANGE_RE};
 use serde_norway::{Mapping, Value};
 
 /// A fresh id: what the UI keys rows by, so a row keeps its inputs as others
@@ -37,8 +36,6 @@ pub const UNIT_TYPES: [&str; 14] = [
     "bandwidth",
     "percentage",
 ];
-static EMPTY: Vec<Concept> = Vec::new();
-
 pub const OPERATORS: [&str; 4] = ["<", "<=", ">", ">="];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -110,13 +107,14 @@ impl KindTag {
             KindTag::Other => "other (YAML)",
         }
     }
-
-    pub fn from_label(label: &str) -> Option<KindTag> {
-        KindTag::ALL.into_iter().find(|t| t.label() == label)
-    }
 }
 
 impl Kind {
+    /// A new concept of this kind.
+    pub fn new(tag: KindTag) -> Kind {
+        Kind::Group(vec![]).convert(tag)
+    }
+
     pub fn tag(&self) -> KindTag {
         match self {
             Kind::Group(_) => KindTag::Group,
@@ -136,9 +134,9 @@ impl Kind {
             return self.clone();
         }
         let literals: Vec<String> = match self {
-            Kind::Categorical(l) => l.clone(),
-            Kind::Derived(d) => d.iter().map(|d| d.literal.clone()).collect(),
-            _ => vec![],
+            Kind::Categorical(l) if !l.is_empty() => l.clone(),
+            Kind::Derived(d) if !d.is_empty() => d.iter().map(|d| d.literal.clone()).collect(),
+            _ => vec!["a".into(), "b".into()],
         };
         match tag {
             KindTag::Group => Kind::Group(vec![]),
@@ -147,24 +145,16 @@ impl Kind {
                 unit_type: String::new(),
             },
             KindTag::Boolean => Kind::Boolean,
-            KindTag::Categorical => Kind::Categorical(if literals.is_empty() {
-                vec!["a".into(), "b".into()]
-            } else {
-                literals
-            }),
+            KindTag::Categorical => Kind::Categorical(literals),
             KindTag::Derived => Kind::Derived(
-                if literals.is_empty() {
-                    vec!["a".into(), "b".into()]
-                } else {
-                    literals
-                }
-                .into_iter()
-                .map(|literal| Definition {
-                    id: fresh_id(),
-                    literal,
-                    conditions: vec![],
-                })
-                .collect(),
+                literals
+                    .into_iter()
+                    .map(|literal| Definition {
+                        id: fresh_id(),
+                        literal,
+                        conditions: vec![],
+                    })
+                    .collect(),
             ),
             KindTag::Reference => Kind::Reference(String::new()),
             KindTag::Other => Kind::Other(String::new()),
@@ -360,15 +350,6 @@ const MODULE_KEYS: [&str; 10] = [
     "EXCLUDE_OR",
 ];
 
-static RANGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\[\s*(?P<low>[^\],]+?)\s*(?:\.\.|,)\s*(?P<high>[^\]]+?)\s*\]\s*(?P<unit>\S+)?$")
-        .unwrap()
-});
-static BOUND_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(?P<op><=|>=|<|>)\s*(?P<rest>.+)$").unwrap());
-static WORD_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_.\-]*$").unwrap());
-
 /// A scalar as text (`60`, `true`, `heavy`).
 pub fn text_of(v: &Value) -> String {
     match v {
@@ -442,7 +423,8 @@ fn count_keys(v: &Value, out: &mut HashMap<String, usize>) {
     }
 }
 
-fn tail(key: &str) -> &str {
+/// A dotted name's last part: a concept's own name.
+pub fn tail(key: &str) -> &str {
     key.rsplit('.').next().unwrap_or(key)
 }
 
@@ -498,7 +480,7 @@ fn read_concept(name: String, v: &Value, ids: &HashMap<String, usize>) -> Concep
                 }
             } else if head == "boolean" && tokens.len() == 1 {
                 Kind::Boolean
-            } else if tokens.len() == 1 && WORD_RE.is_match(head) {
+            } else if tokens.len() == 1 && IDENTIFIER.is_match(head) {
                 Kind::Reference(head.into())
             } else {
                 Kind::Other(s.clone())
@@ -533,7 +515,7 @@ pub fn read_value(v: &Value) -> CondValue {
                     op: c["op"].to_string(),
                     operand: c["rest"].trim().to_string(),
                 }
-            } else if WORD_RE.is_match(s) {
+            } else if IDENTIFIER.is_match(s) {
                 CondValue::Literals(vec![s.to_string()])
             } else {
                 CondValue::Raw(inline(v))
@@ -845,33 +827,41 @@ impl Document {
         find(&mut self.taxonomy, id)
     }
 
-    pub fn concept(&self, id: u64) -> Option<&Concept> {
-        fn find(cs: &[Concept], id: u64) -> Option<&Concept> {
+    /// A concept and the groups it is in, outermost first.
+    fn chain(&self, id: u64) -> Option<Vec<&Concept>> {
+        fn walk<'a>(cs: &'a [Concept], id: u64, out: &mut Vec<&'a Concept>) -> bool {
             for c in cs {
+                out.push(c);
                 if c.id == id {
-                    return Some(c);
+                    return true;
                 }
                 if let Kind::Group(children) = &c.kind {
-                    if let Some(found) = find(children, id) {
-                        return Some(found);
+                    if walk(children, id, out) {
+                        return true;
                     }
                 }
+                out.pop();
             }
-            None
+            false
         }
-        find(&self.taxonomy, id)
+        let mut out = vec![];
+        walk(&self.taxonomy, id, &mut out).then_some(out)
+    }
+
+    pub fn concept(&self, id: u64) -> Option<&Concept> {
+        self.chain(id)?.last().copied()
     }
 
     /// The id of the concept a dotted name names.
     pub fn concept_id(&self, path: &str) -> Option<u64> {
-        let mut list = &self.taxonomy;
+        let mut list: &[Concept] = &self.taxonomy;
         let mut found = None;
         for part in path.split('.') {
             let c = list.iter().find(|c| c.name == part)?;
             found = Some(c.id);
             list = match &c.kind {
                 Kind::Group(children) => children,
-                _ => &EMPTY,
+                _ => &[],
             };
         }
         found
@@ -879,23 +869,8 @@ impl Document {
 
     /// The dotted name of a concept.
     pub fn concept_path(&self, id: u64) -> Option<String> {
-        fn find(cs: &[Concept], id: u64, prefix: &mut Vec<String>) -> bool {
-            for c in cs {
-                prefix.push(c.name.clone());
-                if c.id == id {
-                    return true;
-                }
-                if let Kind::Group(children) = &c.kind {
-                    if find(children, id, prefix) {
-                        return true;
-                    }
-                }
-                prefix.pop();
-            }
-            false
-        }
-        let mut path = vec![];
-        find(&self.taxonomy, id, &mut path).then(|| path.join("."))
+        let names: Vec<&str> = self.chain(id)?.iter().map(|c| c.name.as_str()).collect();
+        Some(names.join("."))
     }
 
     /// The list a concept is in (the taxonomy, or its group's), for adding,
@@ -912,20 +887,8 @@ impl Document {
 
     /// The group a concept is in (`Some(None)`: the taxonomy).
     pub fn parent_of(&self, id: u64) -> Option<Option<u64>> {
-        fn find(cs: &[Concept], id: u64, parent: Option<u64>) -> Option<Option<u64>> {
-            for c in cs {
-                if c.id == id {
-                    return Some(parent);
-                }
-                if let Kind::Group(children) = &c.kind {
-                    if let Some(p) = find(children, id, Some(c.id)) {
-                        return Some(p);
-                    }
-                }
-            }
-            None
-        }
-        find(&self.taxonomy, id, None)
+        let chain = self.chain(id)?;
+        Some(chain.len().checked_sub(2).map(|i| chain[i].id))
     }
 
     pub fn remove_concept(&mut self, id: u64) {
@@ -1199,7 +1162,7 @@ impl Document {
         let Some(m) = self.modules.iter().find(|m| m.name == module) else {
             return vec![];
         };
-        let names = |key: &str| key == target || target.rsplit('.').next() == Some(key);
+        let names = |key: &str| key == target || tail(target) == key;
         let mut out = vec![];
         for (include, s) in [(true, &m.include), (false, &m.exclude)] {
             let Some(s) = s else { continue };

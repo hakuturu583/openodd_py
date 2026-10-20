@@ -446,6 +446,24 @@ pub enum Probe {
     Derived(Vec<(String, Condition)>),
 }
 
+/// What the taxonomy declares a concept to be.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ConceptKind {
+    /// `<primitive> <unit type>`.
+    Number {
+        primitive: String,
+        unit_type: String,
+    },
+    Boolean,
+    /// A list of literals, or the id of a categorical.
+    Categorical,
+    /// Literals defined by expressions on other concepts (measured or not).
+    Derived,
+    /// Not declared by a taxonomy (an attribute written in Python).
+    #[default]
+    Other,
+}
+
 /// A measurable taxonomy concept.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
@@ -456,6 +474,11 @@ pub struct Attribute {
     pub criteria: Criteria,
     /// Its cover item (`odd.<name>`), when it has buckets.
     pub item: Option<CoverItem>,
+    /// What the taxonomy declares it to be.
+    pub concept: ConceptKind,
+    /// The unit its numbers are read in when no probe's unit is known: the
+    /// first a condition on it writes (`""`: none).
+    pub written_unit: String,
 }
 
 impl Attribute {
@@ -478,6 +501,8 @@ impl Attribute {
             probe,
             criteria,
             item: None,
+            concept: ConceptKind::Other,
+            written_unit: String::new(),
         })
     }
 

@@ -104,10 +104,10 @@ fn body(name: &str) -> &'static str {
 }
 
 #[component]
-pub fn Icon(name: &'static str, #[prop(optional)] class: &'static str) -> impl IntoView {
+pub fn Icon(name: &'static str) -> impl IntoView {
     view! {
         <svg
-            class=format!("icon-svg {class}")
+            class="icon-svg"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"

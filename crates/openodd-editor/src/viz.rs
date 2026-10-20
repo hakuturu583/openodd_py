@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::check::{Attribute, Evaluation, Report, State};
-use crate::doc::{Document, KindTag, Rule, RuleKind};
+use crate::check::{Attribute, Report, State};
+use crate::doc::{tail, Document, KindTag, Rule, RuleKind};
 use crate::icons::{concept_icon, Icon};
+use openodd::value::parse_float;
 
 // ---------------------------------------------------------------------------
 // Numbers
@@ -26,8 +27,9 @@ pub struct Scale {
 }
 
 impl Scale {
-    /// Around the finite edges of an attribute and any other values to show.
-    pub fn around(edges: &[f64], extra: &[f64]) -> Scale {
+    /// Around the finite edges of an attribute and any other values to show;
+    /// `integer` snaps values to whole numbers.
+    pub fn around(edges: &[f64], extra: &[f64], integer: bool) -> Scale {
         let finite: Vec<f64> = edges
             .iter()
             .chain(extra)
@@ -55,12 +57,8 @@ impl Scale {
         Scale {
             lo,
             hi: max + pad,
-            integer: false,
+            integer,
         }
-    }
-
-    pub fn integral(self, integer: bool) -> Scale {
-        Scale { integer, ..self }
     }
 
     pub fn x(&self, v: f64, width: f64) -> f64 {
@@ -127,17 +125,17 @@ const W: f64 = 600.0;
 pub fn NumberLine(
     #[prop(into)] attr: Signal<Option<Attribute>>,
     /// The module whose verdict to draw instead of the ODD's.
-    #[prop(optional)]
+    #[prop(default = None)]
     module: Option<Signal<String>>,
     /// A condition's interval, its ends possibly infinite.
     #[prop(optional)]
     interval: Option<Signal<Option<(f64, f64)>>>,
     /// Draggable values (a condition's finite ends, a test value).
-    #[prop(optional)]
+    #[prop(default = None)]
     handles: Option<Signal<Vec<f64>>>,
-    #[prop(optional)] on_drag: Option<Callback<(usize, f64)>>,
+    #[prop(default = None)] on_drag: Option<Callback<(usize, f64)>>,
     /// A click on the line, at a value.
-    #[prop(optional)]
+    #[prop(default = None)]
     on_pick: Option<Callback<f64>>,
     #[prop(optional)] marker: Option<Signal<Option<f64>>>,
     #[prop(optional)] compact: bool,
@@ -153,7 +151,11 @@ pub fn NumberLine(
         if let Some(s) = frozen.get() {
             return s;
         }
-        let edges = attr.with(|a| a.as_ref().map(|a| a.edges.clone()).unwrap_or_default());
+        let (edges, integer) = attr.with(|a| {
+            a.as_ref()
+                .map(|a| (a.edges.clone(), a.integer))
+                .unwrap_or_default()
+        });
         let mut extra = vec![];
         if let Some(i) = interval {
             if let Some((a, b)) = i.get() {
@@ -166,8 +168,7 @@ pub fn NumberLine(
         if let Some(h) = handles {
             extra.extend(h.get());
         }
-        let integer = attr.with(|a| a.as_ref().is_some_and(|a| a.integer));
-        Scale::around(&edges, &extra).integral(integer)
+        Scale::around(&edges, &extra, integer)
     });
     let to_value = move |client_x: f64| -> Option<f64> {
         let el = svg_ref.get()?;
@@ -209,55 +210,18 @@ pub fn NumberLine(
         dragging.set(None);
         frozen.set(None);
     };
-    // Where the ODD (or the module) stands along the line: openodd's
-    // verdict at sampled values, the edges and either side of them included,
-    // drawn as runs.
+    // Where the ODD (or the module) stands along the line.
     let ctx = crate::app::ctx();
     let runs = Memo::new(move |_| {
         let s = scale.get();
-        let Some(a) = attr.get() else {
-            return vec![];
-        };
-        let Ok(report) = ctx.report.get() else {
-            return vec![];
-        };
-        let n = 160;
-        let mut xs: Vec<f64> = (0..=n)
-            .map(|i| s.lo + (s.hi - s.lo) * i as f64 / n as f64)
-            .collect();
-        let eps = (s.hi - s.lo) * 1e-6;
-        for e in a.edges.iter().filter(|e| e.is_finite()) {
-            xs.extend([e - eps, *e, e + eps]);
-        }
-        if a.integer {
-            xs = xs.into_iter().map(f64::round).collect();
-        }
-        xs.retain(|x| *x >= s.lo && *x <= s.hi);
-        xs.sort_by(f64::total_cmp);
-        xs.dedup();
         let m = module.map(|m| m.get());
-        let states = crate::check::profile(&report, &a.name, m.as_deref(), &xs);
-        // Runs of one state, split halfway between unlike neighbours (at the
-        // value itself for an integer).
-        let mut out: Vec<(f64, f64, State)> = vec![];
-        for (i, (x, st)) in xs.iter().zip(&states).enumerate() {
-            let start = if i == 0 {
-                s.lo
-            } else if a.integer {
-                x - 0.5
-            } else {
-                (xs[i - 1] + x) / 2.0
-            };
-            match out.last_mut() {
-                Some(last) if last.2 == *st => {}
-                Some(last) => {
-                    last.1 = start;
-                    out.push((start, s.hi, *st));
-                }
-                None => out.push((s.lo, s.hi, *st)),
-            }
-        }
-        out
+        attr.with(|a| {
+            let Some(a) = a else { return vec![] };
+            ctx.report.with(|r| match r {
+                Ok(r) => crate::check::runs(r, &a.name, m.as_deref(), s.lo, s.hi),
+                Err(_) => vec![],
+            })
+        })
     });
     let segments = move || {
         let s = scale.get();
@@ -383,37 +347,31 @@ pub fn NumberLine(
 #[component]
 pub fn CategoryStrip(
     #[prop(into)] attr: Signal<Option<Attribute>>,
-    #[prop(optional)] states: Option<Signal<Vec<State>>>,
+    #[prop(default = None)] states: Option<Signal<Vec<State>>>,
     #[prop(optional)] marker: Option<Signal<Option<String>>>,
-    #[prop(optional)] on_pick: Option<Callback<String>>,
+    #[prop(default = None)] on_pick: Option<Callback<String>>,
 ) -> impl IntoView {
     move || {
         attr.with(|a| {
             let Some(a) = a else { return ().into_any() };
             let st = states.map(|s| s.get()).unwrap_or_else(|| a.states.clone());
-            let current = marker.and_then(|m| m.get());
             a.values
                 .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let shown = match v.as_str() {
-                        "True" => "true".to_string(),
-                        "False" => "false".to_string(),
-                        other => other.to_string(),
-                    };
-                    let state = st.get(i).copied().unwrap_or(State::Inside);
-                    let on = current.as_deref() == Some(shown.as_str());
-                    let pick = shown.clone();
+                .zip(st)
+                .map(|(v, state)| {
+                    let (shown, pick) = (v.clone(), v.clone());
+                    let picked =
+                        move || marker.and_then(|m| m.get()).as_deref() == Some(shown.as_str());
                     view! {
                         <button
                             class=format!("cat {}", state.class())
-                            class:picked=on
+                            class:picked=picked
                             class:static=on_pick.is_none()
                             title=state_words(state)
                             on:click=move |_| if let Some(cb) = on_pick { cb.run(pick.clone()) }
                         >
                             <span class="dot"></span>
-                            {shown}
+                            {v.clone()}
                         </button>
                     }
                 })
@@ -423,8 +381,9 @@ pub fn CategoryStrip(
     }
 }
 
-/// The domain of an attribute, drawn as fits it, with the test value on it.
-/// With `module`, what that module accepts instead of the ODD.
+/// The domain of an attribute, drawn as fits it, with the test value on it,
+/// set by dragging or clicking. With `module`, what that module accepts
+/// instead of the ODD, to look at.
 #[component]
 pub fn Domain(
     #[prop(into)] attr: Signal<Option<Attribute>>,
@@ -432,53 +391,48 @@ pub fn Domain(
     #[prop(optional)] compact: bool,
 ) -> impl IntoView {
     let ctx = crate::app::ctx();
-    let name = move || attr.with(|a| a.as_ref().map(|a| a.name.clone()).unwrap_or_default());
-    let probe = move || ctx.probe_value(&name());
+    let name =
+        Memo::new(move |_| attr.with(|a| a.as_ref().map(|a| a.name.clone()).unwrap_or_default()));
+    let probe = move || name.with(|n| ctx.probe_value(n));
     let number = Memo::new(move |_| attr.with(|a| a.as_ref().is_some_and(Attribute::is_number)));
-    let set = move |v: String| ctx.set_probe(&name(), v);
+    let set = move |v: String| name.with(|n| ctx.set_probe(n, v));
     let states = module.map(|m| {
-        Signal::derive(move || {
-            let n = name();
+        Signal::from(Memo::new(move |_| {
             let m = m.get();
-            ctx.report
-                .get()
-                .ok()
-                .map(|r| crate::check::module_states(&r, &m, &n))
-                .unwrap_or_default()
-        })
+            name.with(|n| {
+                ctx.report.with(|r| {
+                    r.as_ref()
+                        .map(|r| crate::check::module_states(r, &m, n))
+                        .unwrap_or_default()
+                })
+            })
+        }))
     });
+    // A module's view is to look at; only the ODD's sets the test value.
+    let editable = module.is_none();
     move || {
         if number.get() {
-            let marker = Signal::derive(move || probe().and_then(|t| t.parse::<f64>().ok()));
-            let handles = Signal::derive(move || marker.get().into_iter().collect::<Vec<_>>());
-            let drag = Callback::new(move |(_, v): (usize, f64)| set(fmt_num(v)));
-            let pick = Callback::new(move |v: f64| set(fmt_num(v)));
-            match module {
-                Some(m) => view! {
-                    <NumberLine attr=attr module=m marker=marker compact=compact/>
-                }
-                .into_any(),
-                None => view! {
-                    <NumberLine attr=attr marker=marker handles=handles on_drag=drag on_pick=pick compact=compact/>
-                }
-                .into_any(),
+            let marker = Signal::derive(move || probe().and_then(|t| parse_float(&t)));
+            let handles = editable
+                .then(|| Signal::derive(move || marker.get().into_iter().collect::<Vec<_>>()));
+            let drag = editable.then(|| Callback::new(move |(_, v): (usize, f64)| set(fmt_num(v))));
+            let pick = editable.then(|| Callback::new(move |v: f64| set(fmt_num(v))));
+            view! {
+                <NumberLine attr=attr module=module marker=marker handles=handles on_drag=drag on_pick=pick compact=compact/>
             }
+            .into_any()
         } else {
             let marker = Signal::derive(probe);
-            let pick = Callback::new(move |v: String| {
-                let same = probe().as_deref() == Some(v.as_str());
-                set(if same { String::new() } else { v });
+            let pick = editable.then(|| {
+                Callback::new(move |v: String| {
+                    let same = probe().as_deref() == Some(v.as_str());
+                    set(if same { String::new() } else { v });
+                })
             });
-            match states {
-                Some(states) => view! {
-                    <div class="cats"><CategoryStrip attr=attr states=states marker=marker/></div>
-                }
-                .into_any(),
-                None => view! {
-                    <div class="cats"><CategoryStrip attr=attr marker=marker on_pick=pick/></div>
-                }
-                .into_any(),
+            view! {
+                <div class="cats"><CategoryStrip attr=attr states=states marker=marker on_pick=pick/></div>
             }
+            .into_any()
         }
     }
 }
@@ -558,14 +512,6 @@ struct Layout {
     headings: Vec<(f64, &'static str)>,
     width: f64,
     height: f64,
-}
-
-impl Layout {
-    fn linked(&self, a: &str, b: &str) -> bool {
-        self.edges
-            .iter()
-            .any(|e| (e.from == a && e.to == b) || (e.from == b && e.to == a))
-    }
 }
 
 const NODE_H: f64 = 38.0;
@@ -651,16 +597,14 @@ fn layout(r: &Report) -> Layout {
         } else {
             NodeKind::Module
         };
-        let sub = match (&m.include, &m.exclude) {
-            (Some((a, _)), Some((b, _))) => format!(
-                "include {} · exclude {}",
-                if *a { "all" } else { "any" },
-                if *b { "all" } else { "any" }
-            ),
-            (Some((a, _)), None) => format!("include {}", if *a { "all" } else { "any" }),
-            (None, Some((b, _))) => format!("exclude {}", if *b { "all" } else { "any" }),
-            _ => String::new(),
-        };
+        let sub = [("include", &m.include), ("exclude", &m.exclude)]
+            .into_iter()
+            .filter_map(|(w, s)| {
+                s.as_ref()
+                    .map(|(all, _)| format!("{w} {}", if *all { "all" } else { "any" }))
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
         nodes.push(Node {
             id: m.name.clone(),
             kind,
@@ -699,11 +643,11 @@ fn layout(r: &Report) -> Layout {
         nodes.push(Node {
             id: a.clone(),
             kind: NodeKind::Attribute,
-            title: a.rsplit('.').next().unwrap_or(a).to_string(),
+            title: tail(a).to_string(),
             sub: attr
                 .map(|x| {
                     let out = x.states.iter().filter(|s| **s == State::Outside).count();
-                    format!("{} · {out}/{} out", x.kind, x.states.len())
+                    format!("{} · {out}/{} out", x.kind.label(), x.states.len())
                 })
                 .unwrap_or_default(),
             active: true,
@@ -806,25 +750,49 @@ fn edge_lines(doc: &Document, e: &Edge) -> (String, Vec<String>) {
 /// Roots, the modules and labels they read, and the attributes tested, as a
 /// graph from left to right: include arrows blue, exclude arrows orange.
 #[component]
-pub fn ModuleGraph(
-    #[prop(into)] report: Signal<Option<Report>>,
-    #[prop(into)] evaluation: Signal<Option<Evaluation>>,
-    #[prop(into)] selected: Signal<Option<String>>,
-    on_select: Callback<(String, bool)>,
-) -> impl IntoView {
+pub fn ModuleGraph(on_select: Callback<(String, bool)>) -> impl IntoView {
     let ctx = crate::app::ctx();
     let hovered = RwSignal::new(None::<String>);
-    // The arrow under the pointer, and where the pointer is in the graph.
-    let tip = RwSignal::new(None::<(usize, f64, f64)>);
+    // The arrow under the pointer, and apart from it where the pointer is,
+    // so that moving along an arrow only moves its tooltip.
+    let hot = RwSignal::new(None::<usize>);
+    let tip_at = RwSignal::new((0.0, 0.0));
     let wrap = NodeRef::<leptos::html::Div>::new();
-    let graph = Memo::new(move |_| report.with(|r| r.as_ref().map(layout)));
+    let graph = Memo::new(move |_| ctx.report.with(|r| r.as_ref().ok().map(layout)));
+    // The hovered node and every node an arrow joins it to.
+    let lit = Memo::new(move |_| {
+        let h = hovered.get()?;
+        graph.with(|g| {
+            let g = g.as_ref()?;
+            let mut near: std::collections::HashSet<String> = g
+                .edges
+                .iter()
+                .filter_map(|e| {
+                    (e.from == h)
+                        .then(|| e.to.clone())
+                        .or_else(|| (e.to == h).then(|| e.from.clone()))
+                })
+                .collect();
+            near.insert(h);
+            Some(near)
+        })
+    });
+    let tip_text = Memo::new(move |_| {
+        let i = hot.get()?;
+        graph.with(|g| {
+            let e = g.as_ref()?.edges.get(i)?;
+            let (title, lines) = ctx.doc.with(|d| edge_lines(d, e));
+            Some((e.class, title, lines))
+        })
+    });
     let tip_view = move || {
-        let (i, x, y) = tip.get()?;
-        let g = graph.get()?;
-        let e = g.edges.get(i)?;
-        let (title, lines) = ctx.doc.with(|d| edge_lines(d, e));
+        let (class, title, lines) = tip_text.get()?;
+        let style = move || {
+            let (x, y) = tip_at.get();
+            format!("left: {}px; top: {}px", x + 14.0, y + 14.0)
+        };
         Some(view! {
-            <div class=format!("edge-tip {}", e.class) style=format!("left: {}px; top: {}px", x + 14.0, y + 14.0)>
+            <div class=format!("edge-tip {class}") style=style>
                 <div class="tip-title">{title}</div>
                 {if lines.is_empty() {
                     view! { <div class="hint">"(see the module)"</div> }.into_any()
@@ -863,17 +831,20 @@ pub fn ModuleGraph(
                 );
                 let (from, to) = (e.from.clone(), e.to.clone());
                 let dim = move || {
-                    tip.get().is_some_and(|(t, _, _)| t != i)
+                    hot.get().is_some_and(|t| t != i)
                         || hovered.get().is_some_and(|h| h != from && h != to)
                 };
-                let hot = move || tip.get().is_some_and(|(t, _, _)| t == i);
+                let is_hot = move || hot.get() == Some(i);
                 let follow = move |ev: leptos::ev::MouseEvent| {
                     if let Some(el) = wrap.get() {
                         let rect = el.get_bounding_client_rect();
                         // Left of the pointer when it would run past the right edge.
                         let x = ev.client_x() as f64 - rect.left();
                         let x = if x + 360.0 > rect.width() { x - 370.0 } else { x };
-                        tip.set(Some((i, x.max(0.0), ev.client_y() as f64 - rect.top())));
+                        tip_at.set((x.max(0.0), ev.client_y() as f64 - rect.top()));
+                    }
+                    if hot.get_untracked() != Some(i) {
+                        hot.set(Some(i));
                     }
                 };
                 Some(view! {
@@ -881,11 +852,11 @@ pub fn ModuleGraph(
                         <path
                             class=format!("edge {}", e.class)
                             class:dim=dim
-                            class:hot=hot
+                            class:hot=is_hot
                             d=d.clone()
                             marker-end=format!("url(#arrow-{})", e.class)
                         />
-                        <path class="edge-hit" d=d on:mousemove=follow on:mouseleave=move |_| tip.set(None)/>
+                        <path class="edge-hit" d=d on:mousemove=follow on:mouseleave=move |_| hot.set(None)/>
                     </g>
                 })
             })
@@ -899,11 +870,7 @@ pub fn ModuleGraph(
             .nodes
             .into_iter()
             .map(|n| {
-                let id = n.id.clone();
-                let id2 = n.id.clone();
-                let id3 = n.id.clone();
-                let id4 = n.id.clone();
-                let id5 = n.id.clone();
+                let id = StoredValue::new(n.id.clone());
                 let kind_class = match n.kind {
                     NodeKind::Root => "root",
                     NodeKind::Module => "module",
@@ -917,35 +884,30 @@ pub fn ModuleGraph(
                     NodeKind::Attribute => concept_icon(&n.title, KindTag::Number),
                 };
                 let truth = move || {
-                    evaluation.with(|e| {
+                    ctx.evaluation.with(|e| {
                         e.as_ref()
-                            .and_then(|e| e.truth(&id5).map(|t| format!("truth-{t}")))
+                            .and_then(|e| id.with_value(|id| e.truth(id).map(|t| format!("truth-{t}"))))
                             .unwrap_or_default()
                     })
                 };
                 let is_attr = n.kind == NodeKind::Attribute;
-                let title = n.title.clone();
-                let full = n.id.clone();
                 view! {
                     <g
                         class=move || format!("node {kind_class} {}", truth())
                         class:inactive=!n.active
-                        class:selected=move || selected.get().as_deref() == Some(id.as_str())
-                        class:dim=move || hovered.get().is_some_and(|h| {
-                            h != id2 && !graph.with(|g| g.as_ref().is_some_and(|g| g.linked(&h, &id2)))
-                        })
+                        class:dim=move || lit.with(|l| l.as_ref().is_some_and(|l| id.with_value(|id| !l.contains(id))))
                         transform=format!("translate({} {})", n.x, n.y)
-                        on:mouseenter=move |_| hovered.set(Some(id3.clone()))
+                        on:mouseenter=move |_| hovered.set(Some(id.get_value()))
                         on:mouseleave=move |_| hovered.set(None)
-                        on:click=move |_| on_select.run((id4.clone(), is_attr))
+                        on:click=move |_| on_select.run((id.get_value(), is_attr))
                     >
-                        <title>{full}</title>
+                        <title>{n.id}</title>
                         <rect width=n.w height=NODE_H rx=if is_attr { "19" } else { "9" }/>
                         <g transform="translate(9 9) scale(0.83)" class="node-icon">
                             <Icon name=icon/>
                         </g>
-                        <text class="node-title" x="34" y="16">{title}</text>
-                        <text class="node-sub" x="34" y="30">{n.sub.clone()}</text>
+                        <text class="node-title" x="34" y="16">{n.title}</text>
+                        <text class="node-sub" x="34" y="30">{n.sub}</text>
                     </g>
                 }
             })
@@ -1070,44 +1032,50 @@ fn rules_view(rules: Vec<Rule>, top: bool) -> AnyView {
 
 /// A value inside bucket `i` of an attribute: what a click on a cell tests.
 pub fn representative(a: &Attribute, i: usize) -> String {
-    if a.is_number() {
-        let (Some(lo), Some(hi)) = (a.edges.get(i), a.edges.get(i + 1)) else {
-            return String::new();
-        };
-        let s = Scale::around(&a.edges, &[]).integral(a.integer);
-        let v = match (lo.is_finite(), hi.is_finite()) {
-            (true, true) => (lo + hi) / 2.0,
-            (false, true) => (s.lo.min(*hi) + hi) / 2.0,
-            (true, false) => (lo + s.hi.max(*lo)) / 2.0,
-            _ => (s.lo + s.hi) / 2.0,
-        };
-        let mut v = round_nice(v, s.step());
-        if a.integer {
-            v = v.floor();
-            // A whole number inside [lo, hi): the lowest one.
-            if v < *lo {
-                v = lo.ceil();
-            }
-            if v >= *hi && hi.is_finite() && i + 2 < a.edges.len() {
-                v = hi.ceil() - 1.0;
-            }
+    if !a.is_number() {
+        return a.values.get(i).cloned().unwrap_or_default();
+    }
+    let (Some(lo), Some(hi)) = (a.edges.get(i), a.edges.get(i + 1)) else {
+        return String::new();
+    };
+    let s = Scale::around(&a.edges, &[], a.integer);
+    let v = match (lo.is_finite(), hi.is_finite()) {
+        (true, true) => (lo + hi) / 2.0,
+        (false, true) => (s.lo.min(*hi) + hi) / 2.0,
+        (true, false) => (lo + s.hi.max(*lo)) / 2.0,
+        _ => (s.lo + s.hi) / 2.0,
+    };
+    let mut v = round_nice(v, s.step());
+    if a.integer {
+        v = v.floor();
+        // A whole number inside [lo, hi): the lowest one.
+        if v < *lo {
+            v = lo.ceil();
         }
-        fmt_num(v)
-    } else {
-        match a.values.get(i).map(String::as_str) {
-            Some("True") => "true".into(),
-            Some("False") => "false".into(),
-            Some(v) => v.into(),
-            None => String::new(),
+        if v >= *hi && hi.is_finite() && i + 2 < a.edges.len() {
+            v = hi.ceil() - 1.0;
         }
     }
+    fmt_num(v)
+}
+
+/// The bucket a test value (as typed) falls in, as openodd buckets it.
+fn bucket_index(r: &Report, a: &Attribute, v: &str) -> Option<usize> {
+    if !a.is_number() {
+        return a.values.iter().position(|x| x == v);
+    }
+    let item = r.odd.0.attribute(&a.name)?.item.as_ref()?;
+    let label = item
+        .bucket_of(&openodd::Value::Float(parse_float(v)?))
+        .ok()?;
+    a.buckets.iter().position(|b| *b == label)
 }
 
 #[component]
-pub fn OddMap(#[prop(into)] report: Signal<Option<Report>>) -> impl IntoView {
+pub fn OddMap() -> impl IntoView {
     let ctx = crate::app::ctx();
     let names = Memo::new(move |_| {
-        report.with(|r| {
+        ctx.report.with(|r| {
             r.as_ref()
                 .map(|r| {
                     r.attributes
@@ -1121,20 +1089,19 @@ pub fn OddMap(#[prop(into)] report: Signal<Option<Report>>) -> impl IntoView {
     });
     // The two attributes the ODD restricts most, by default.
     let pick_default = move || -> (String, String) {
-        report.with(|r| {
-            let Some(r) = r else {
+        ctx.report.with(|r| {
+            let Ok(r) = r else {
                 return (String::new(), String::new());
             };
             let mut ranked: Vec<(&Attribute, usize)> = r
                 .attributes
                 .iter()
                 .filter(|a| !a.buckets.is_empty())
-                .map(|a| (a, a.states.iter().filter(|s| **s != State::Inside).count()))
+                .map(|a| (a, a.states.iter().filter(|s| **s == State::Outside).count()))
                 .collect();
             ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
-            let first = ranked.first().map(|a| a.0.name.clone()).unwrap_or_default();
-            let second = ranked.get(1).map(|a| a.0.name.clone()).unwrap_or_default();
-            (first, second)
+            let name = |i: usize| ranked.get(i).map(|a| a.0.name.clone()).unwrap_or_default();
+            (name(0), name(1))
         })
     };
     let x = RwSignal::new(String::new());
@@ -1148,12 +1115,26 @@ pub fn OddMap(#[prop(into)] report: Signal<Option<Report>>) -> impl IntoView {
         }
     });
     let grid = Memo::new(move |_| {
-        report.with(|r| {
-            let r = r.as_ref()?;
+        ctx.report.with(|r| {
+            let r = r.as_ref().ok()?;
             let (xn, yn) = (x.get(), y.get());
             let ax = r.attribute(&xn)?.clone();
             let ay = r.attribute(&yn)?.clone();
             Some((ax, ay, crate::check::matrix(r, &xn, &yn)))
+        })
+    });
+    // The cell the test values fall in.
+    let hit = Memo::new(move |_| {
+        grid.with(|g| {
+            let (ax, ay, _) = g.as_ref()?;
+            ctx.report.with(|r| {
+                let r = r.as_ref().ok()?;
+                let at = |a: &Attribute| {
+                    ctx.probe_value(&a.name)
+                        .and_then(|v| bucket_index(r, a, &v))
+                };
+                Some((at(ax)?, at(ay)?))
+            })
         })
     });
     let picker = move |which: RwSignal<String>, label: &'static str| {
@@ -1180,42 +1161,35 @@ pub fn OddMap(#[prop(into)] report: Signal<Option<Report>>) -> impl IntoView {
             let Some((ax, ay, rows)) = grid.get() else {
                 return view! { <p class="hint">"Two attributes with buckets are needed."</p> }.into_any();
             };
-            let px = ctx.probe_value(&ax.name);
-            let py = ctx.probe_value(&ay.name);
             let cols = ax.buckets.len();
-            let ax2 = ax.clone();
-            let ay2 = ay.clone();
+            let rep_x: Vec<String> = (0..cols).map(|j| representative(&ax, j)).collect();
             view! {
                 <div class="odd-map" style=format!("grid-template-columns: minmax(70px, auto) repeat({cols}, minmax(34px, 1fr))")>
                     <div class="corner">
-                        <span class="y">{short(&ay.name)}" ↓"</span>
-                        <span class="x">{short(&ax.name)}" →"</span>
+                        <span class="y">{tail(&ay.name).to_string()}" ↓"</span>
+                        <span class="x">{tail(&ax.name).to_string()}" →"</span>
                     </div>
                     {ax.buckets.iter().map(|b| view! { <div class="col-label" title=b.clone()>{b.clone()}</div> }).collect_view()}
                     {rows.into_iter().enumerate().rev().map(|(i, row)| {
                         let ylab = ay.buckets.get(i).cloned().unwrap_or_default();
-                        let rep_y = representative(&ay2, i);
-                        let hit_y = py.as_deref().is_some_and(|v| in_bucket(&ay2, i, v));
-                        let ax3 = ax2.clone();
-                        let px = px.clone();
-                        let yname = ay2.name.clone();
+                        let rep_y = representative(&ay, i);
                         view! {
                             <div class="row-label" title=ylab.clone()>{ylab.clone()}</div>
                             {row.into_iter().enumerate().map(|(j, s)| {
-                                let rep_x = representative(&ax3, j);
-                                let hit = hit_y && px.as_deref().is_some_and(|v| in_bucket(&ax3, j, v));
-                                let (xname, yname, ry) = (ax3.name.clone(), yname.clone(), rep_y.clone());
-                                let tip = format!("{} × {} — {}", ax3.buckets[j], ylab, state_words(s));
+                                let (xname, yname) = (ax.name.clone(), ay.name.clone());
+                                let (rx, ry) = (rep_x[j].clone(), rep_y.clone());
+                                let tip = format!("{} × {} — {}", ax.buckets[j], ylab, state_words(s));
+                                let here = move || hit.get() == Some((j, i));
                                 view! {
                                     <button
                                         class=format!("cell {}", s.class())
-                                        class:hit=hit
+                                        class:hit=here
                                         title=tip
                                         on:click=move |_| {
-                                            ctx.set_probe(&xname, rep_x.clone());
+                                            ctx.set_probe(&xname, rx.clone());
                                             ctx.set_probe(&yname, ry.clone());
                                         }
-                                    >{if hit { "●" } else { "" }}</button>
+                                    >{move || if here() { "●" } else { "" }}</button>
                                 }
                             }).collect_view()}
                         }
@@ -1224,25 +1198,5 @@ pub fn OddMap(#[prop(into)] report: Signal<Option<Report>>) -> impl IntoView {
             }
             .into_any()
         }}
-    }
-}
-
-fn short(name: &str) -> String {
-    name.rsplit('.').next().unwrap_or(name).to_string()
-}
-
-/// Whether a test value (as typed) falls in bucket `i`.
-pub fn in_bucket(a: &Attribute, i: usize, v: &str) -> bool {
-    if a.is_number() {
-        let Ok(x) = v.parse::<f64>() else {
-            return false;
-        };
-        let (Some(lo), Some(hi)) = (a.edges.get(i), a.edges.get(i + 1)) else {
-            return false;
-        };
-        let last = i + 2 == a.edges.len();
-        x >= *lo && (x < *hi || (last && x <= *hi))
-    } else {
-        representative(a, i) == v
     }
 }

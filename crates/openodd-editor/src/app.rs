@@ -8,7 +8,7 @@ use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 
 use crate::check::{self, Evaluation, Report, State};
-use crate::doc::{Concept, Document, Kind, KindTag, Module};
+use crate::doc::{tail, Concept, Document, Kind, KindTag, Module};
 use crate::forms::{ConceptEditor, ModuleEditor, Settings};
 use crate::icons::{concept_icon, Icon};
 use crate::io;
@@ -74,8 +74,13 @@ impl Ctx {
         }
     }
 
-    pub fn report_ok(&self) -> Option<Report> {
-        self.report.get().ok()
+    /// One attribute of the report, as a memo: it fires only when that
+    /// attribute changes.
+    pub fn attribute(&self, name: String) -> Memo<Option<check::Attribute>> {
+        let report = self.report;
+        Memo::new(move |_| {
+            report.with(|r| r.as_ref().ok().and_then(|r| r.attribute(&name).cloned()))
+        })
     }
 
     pub fn probe_value(&self, name: &str) -> Option<String> {
@@ -204,10 +209,7 @@ fn Toolbar() -> impl IntoView {
                 ctx.open("default.yaml", DEFAULT);
             }
             "empty" => {
-                ctx.doc.set(Document::empty());
-                ctx.name.set("odd.yaml".into());
-                ctx.probe.set(vec![]);
-                ctx.sel.set(Sel::Map);
+                ctx.open("odd.yaml", "");
             }
             _ => {}
         }
@@ -334,7 +336,7 @@ pub fn add_concept(parent: Option<u64>, tag: KindTag) {
             let c = Concept {
                 id: crate::doc::fresh_id(),
                 name: unique(base, &taken),
-                kind: Kind::Boolean.convert(tag),
+                kind: Kind::new(tag),
             };
             new_id = Some(c.id);
             list.push(c);
@@ -434,14 +436,16 @@ fn Outline() -> impl IntoView {
             </div>
             <ul class="tree">
                 {move || {
-                    let report = ctx.report_ok();
                     concepts
                         .get()
                         .into_iter()
                         .map(|r| {
                             let id = r.id;
                             let group = r.tag == KindTag::Group;
-                            let ring = report.as_ref().and_then(|rep| restriction(rep, &r.path));
+                            let path = r.path.clone();
+                            let ring = move || {
+                                ctx.report.with(|rep| rep.as_ref().ok().and_then(|rep| restriction(rep, &path)))
+                            };
                             view! {
                                 <li
                                     class="row"
@@ -454,7 +458,7 @@ fn Outline() -> impl IntoView {
                                         <Icon name=concept_icon(&r.name, r.tag)/>
                                     </span>
                                     <span class="name">{r.name}</span>
-                                    {ring.map(|(out, n)| view! { <Ring out=out total=n/> })}
+                                    {move || ring().map(|(out, n)| view! { <Ring out=out total=n/> })}
                                     {group.then(|| view! {
                                         <button
                                             class="mini add"
@@ -522,20 +526,12 @@ fn Ring(out: usize, total: usize) -> impl IntoView {
 #[component]
 fn MapView() -> impl IntoView {
     let ctx = ctx();
-    let report = Signal::derive(move || ctx.report.get().ok());
-    let evaluation = Signal::derive(move || ctx.evaluation.get());
-    let selected = Signal::derive(|| None::<String>);
     let stats = move || {
-        report.with(|r| {
-            let r = r.as_ref()?;
+        ctx.report.with(|r| {
+            let r = r.as_ref().ok()?;
             let mut counts = [0usize; 2];
-            for a in &r.attributes {
-                for s in &a.states {
-                    counts[match s {
-                        State::Inside => 0,
-                        State::Outside => 1,
-                    }] += 1;
-                }
+            for s in r.attributes.iter().flat_map(|a| &a.states) {
+                counts[(*s == State::Outside) as usize] += 1;
             }
             let restricted = r
                 .attributes
@@ -601,9 +597,6 @@ fn MapView() -> impl IntoView {
                     <span class="hint">"Hover an arrow for the conditions behind it. With test values set, nodes show each module's verdict."</span>
                 </div>
                 <ModuleGraph
-                    report=report
-                    evaluation=evaluation
-                    selected=selected
                     on_select=Callback::new(move |(id, attr): (String, bool)| {
                         if attr { ctx.select_attribute(&id) } else { ctx.select_module(&id) }
                     })
@@ -612,7 +605,7 @@ fn MapView() -> impl IntoView {
             <div class="card">
                 <div class="card-title"><Icon name="grid"/>"ODD map"<span class="hint">"two attributes at once · click a cell to test it"</span></div>
                 <Legend/>
-                <OddMap report=report/>
+                <OddMap/>
             </div>
             <div class="card">
                 <div class="card-title"><Icon name="list"/>"Attributes"<span class="hint">"click a value or drag on a line to test it"</span></div>
@@ -665,37 +658,33 @@ fn AttributeCards() -> impl IntoView {
 #[component]
 pub fn AttributeCard(name: String) -> impl IntoView {
     let ctx = ctx();
-    let n = name.clone();
-    let attr = Signal::derive(move || ctx.report.get().ok().and_then(|r| r.attribute(&n).cloned()));
+    let attr = ctx.attribute(name.clone());
     let n2 = name.clone();
     let testers = Memo::new(move |_| {
-        ctx.report
-            .get()
-            .ok()
-            .map(|r| {
-                r.modules
-                    .iter()
-                    .filter(|m| m.links.iter().any(|l| !l.module && l.target == n2))
-                    .map(|m| m.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        ctx.report.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    r.modules
+                        .iter()
+                        .filter(|m| m.links.iter().any(|l| !l.module && l.target == n2))
+                        .map(|m| m.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
     });
-    let short = name.rsplit('.').next().unwrap_or(&name).to_string();
-    let n3 = name.clone();
-    let tag = move || match attr.with(|a| a.as_ref().map(|a| a.kind.clone())).as_deref() {
-        Some("number") => KindTag::Number,
-        Some("boolean") => KindTag::Boolean,
-        Some("derived") => KindTag::Derived,
-        _ => KindTag::Categorical,
+    let short = tail(&name).to_string();
+    let n3 = StoredValue::new(name);
+    let icon = move || {
+        let tag = attr.with(|a| a.as_ref().map_or(KindTag::Other, |a| a.kind));
+        n3.with_value(|n| view! { <Icon name=concept_icon(tail(n), tag)/> })
     };
-    let icon_name = short.clone();
     view! {
         <div class="attr-card">
-            <div class="attr-head" on:click=move |_| ctx.select_attribute(&n3)>
-                <span class="attr-icon">{move || view! { <Icon name=concept_icon(&icon_name, tag())/> }}</span>
-                <span class="attr-name">{short.clone()}</span>
-                <span class="tag">{move || attr.with(|a| a.as_ref().map(|a| if a.unit.is_empty() { a.kind.clone() } else { format!("{} · {}", a.kind, a.unit) }).unwrap_or_default())}</span>
+            <div class="attr-head" on:click=move |_| n3.with_value(|n| ctx.select_attribute(n))>
+                <span class="attr-icon">{icon}</span>
+                <span class="attr-name">{short}</span>
+                <span class="tag">{move || attr.with(|a| a.as_ref().map(|a| if a.unit.is_empty() { a.kind.label().to_string() } else { format!("{} · {}", a.kind.label(), a.unit) }).unwrap_or_default())}</span>
             </div>
             <Domain attr=attr compact=true/>
             <div class="testers">
@@ -755,7 +744,7 @@ fn TestTab() -> impl IntoView {
             .map(|r| {
                 r.attributes
                     .into_iter()
-                    .filter(|a| !a.derived)
+                    .filter(|a| !a.derived())
                     .map(|a| a.name)
                     .collect::<Vec<_>>()
             })
@@ -765,7 +754,7 @@ fn TestTab() -> impl IntoView {
         // A point that may be inside: each attribute's first allowed bucket.
         if let Ok(r) = ctx.report.get() {
             let mut p = vec![];
-            for a in r.attributes.iter().filter(|a| !a.derived) {
+            for a in r.attributes.iter().filter(|a| !a.derived()) {
                 let i = a.states.iter().position(|s| *s == State::Inside);
                 if let Some(i) = i {
                     p.push((a.name.clone(), crate::viz::representative(a, i)));
@@ -809,7 +798,7 @@ fn TestTab() -> impl IntoView {
                                     </div>
                                     {(!derived.is_empty()).then(|| view! {
                                         <div class="truths">
-                                            {derived.into_iter().map(|(n, v)| view! { <span class="truth derived"><Icon name="func"/>{format!("{} = {v}", n.rsplit('.').next().unwrap_or(&n))}</span> }).collect_view()}
+                                            {derived.into_iter().map(|(n, v)| view! { <span class="truth derived"><Icon name="func"/>{format!("{} = {v}", tail(&n))}</span> }).collect_view()}
                                         </div>
                                     })}
                                 </div>
@@ -832,9 +821,8 @@ fn TestTab() -> impl IntoView {
 #[component]
 fn TestRow(name: String) -> impl IntoView {
     let ctx = ctx();
-    let n = name.clone();
-    let attr = Signal::derive(move || ctx.report.get().ok().and_then(|r| r.attribute(&n).cloned()));
-    let short = name.rsplit('.').next().unwrap_or(&name).to_string();
+    let attr = ctx.attribute(name.clone());
+    let short = tail(&name).to_string();
     let n2 = name.clone();
     let n3 = name.clone();
     let number = move || attr.with(|a| a.as_ref().is_some_and(|a| a.is_number()));

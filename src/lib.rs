@@ -35,7 +35,8 @@ pub use loader::{
     load_binding, load_file, load_openodd, load_transmission, Loaded, Options, Resolver, Source,
 };
 pub use model::{
-    Attribute, Condition, Module, Odd, Predicate, Probe, Section, Truth, Values, Verdict,
+    Attribute, ConceptKind, Condition, Module, Odd, Predicate, Probe, Section, Truth, Values,
+    Verdict,
 };
 pub use transmission::{Origin, Transmission};
 pub use value::Value;

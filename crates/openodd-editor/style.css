@@ -207,7 +207,6 @@ textarea.code { font-family: var(--mono); font-size: 12.5px; min-height: 120px; 
 .child:hover { border-color: var(--accent); }
 .state-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--surface-3); }
 .state-dot.inside { background: var(--inside); }
-.state-dot.depends { background: var(--depends); }
 .state-dot.outside { background: var(--outside); }
 
 /* conditions */
@@ -245,7 +244,6 @@ textarea.code { font-family: var(--mono); font-size: 12.5px; min-height: 120px; 
 .legend span, .graph-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
 .sw.inside { background: var(--inside); }
-.sw.depends { background: var(--depends); }
 .sw.outside { background: var(--outside); }
 .ln { width: 20px; height: 0; border-top: 2.5px solid; display: inline-block; }
 .ln.include { border-color: var(--include); }
@@ -256,7 +254,6 @@ textarea.code { font-family: var(--mono); font-size: 12.5px; min-height: 120px; 
 .number-line.interactive { cursor: crosshair; }
 .number-line .track { fill: var(--surface-3); }
 .number-line .seg.inside { fill: var(--inside); }
-.number-line .seg.depends { fill: var(--depends); }
 .number-line .seg.outside { fill: var(--outside); opacity: .85; }
 .number-line .tick { stroke: var(--surface); stroke-width: 2; }
 .number-line .tick-label { fill: var(--muted); font-size: 12px; font-family: var(--mono); }
@@ -275,15 +272,12 @@ textarea.code { font-family: var(--mono); font-size: 12.5px; min-height: 120px; 
 .cat .dot { width: 8px; height: 8px; border-radius: 50%; }
 .cat.inside { background: var(--inside-soft); color: var(--inside); }
 .cat.inside .dot { background: var(--inside); }
-.cat.depends { background: var(--depends-soft); color: var(--depends); }
-.cat.depends .dot { background: var(--depends); }
 .cat.outside { background: var(--outside-soft); color: var(--outside); text-decoration: line-through; text-decoration-thickness: 1px; }
 .cat.outside .dot { background: var(--outside); }
 .cat.picked { border-color: var(--text); box-shadow: 0 0 0 2px var(--surface) inset; text-decoration: none; }
 
 .state-bar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--surface-3); margin: 6px 0; }
 .state-bar .part.inside { background: var(--inside); }
-.state-bar .part.depends { background: var(--depends); }
 .state-bar .part.outside { background: var(--outside); }
 
 /* map view */
@@ -335,7 +329,6 @@ textarea.code { font-family: var(--mono); font-size: 12.5px; min-height: 120px; 
 .odd-map .cell { height: 34px; border: none; border-radius: 6px; cursor: pointer; color: var(--text); font-size: 14px; transition: transform .08s; }
 .odd-map .cell:hover { transform: scale(1.06); outline: 2px solid var(--text); }
 .odd-map .cell.inside { background: var(--inside); }
-.odd-map .cell.depends { background: var(--depends); }
 .odd-map .cell.outside { background: var(--outside); opacity: .85; }
 .odd-map .cell.hit { outline: 3px solid var(--text); outline-offset: -3px; }
 
@@ -406,7 +399,6 @@ table { border-collapse: collapse; width: 100%; }
 .buckets { display: flex; flex-wrap: wrap; gap: 3px; }
 .bucket { font-family: var(--mono); font-size: 11.5px; padding: 0 6px; border-radius: 4px; }
 .bucket.inside { background: var(--inside-soft); color: var(--inside); }
-.bucket.depends { background: var(--depends-soft); color: var(--depends); }
 .bucket.outside { background: var(--outside-soft); color: var(--outside); }
 .module-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; }
 .module-card.inactive { opacity: .6; }
