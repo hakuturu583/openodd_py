@@ -53,6 +53,7 @@ jobs:
           tool: wasm-pack
       - run: cargo build -p openodd --no-default-features --target wasm32-unknown-unknown
       - run: cargo build -p openodd-wasm --release --target wasm32-unknown-unknown
+      - run: cargo build -p openodd-editor --release --target wasm32-unknown-unknown
       - run: wasm-pack test --node crates/openodd-wasm
       - run: wasm-pack build crates/openodd-wasm --release --target web --out-dir "$RUNNER_TEMP/pkg" --no-pack
       - run: ls -l "$RUNNER_TEMP/pkg"

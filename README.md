@@ -46,6 +46,12 @@
   page computes the matrix and the case plot -- the flaky model's background included --
   from coverage JSON on the client, with live axis pickers; no Python, no server
   ([docs/wasm.md](docs/wasm.md), demo in [examples/wasm-viewer](examples/wasm-viewer)).
+- **Edit an ODD in the browser**: `crates/openodd-editor` edits OpenODD YAML as forms --
+  the taxonomy as a tree, modules and their sections, conditions by their form -- and
+  checks it as it is edited with this library's reader compiled to WebAssembly: the
+  buckets outside the ODD, and values judged against it. Rust and Leptos, no server
+  ([docs/editor.md](docs/editor.md), demo at
+  [hakuturu583.github.io/openodd_py](https://hakuturu583.github.io/openodd_py/)).
 - **Comparing two sets on one ODD**: the same views with two sets of runs laid over one
   another -- a baseline and, say, the next version of the software -- each cell and each
   case split in two and outlined by how its failure rate moved, behind the cases the
