@@ -72,6 +72,12 @@
   that drove through it, how many failed (with a 95% Wilson interval) and how many
   failed *in* it, per scenario and environment (`CoverageReport.cell_flakiness`,
   [docs/flaky.md](docs/flaky.md#flakiness-per-odd-cell)).
+- **Weigh importance-sampled runs**: a run that records its likelihood ratio
+  (`record_outcome(passed, weight=...)`, NADE's weight say) counts in the merged
+  report's naturalistic failure rate per scenario and environment -- the mean of the
+  weighted failures, its 95% interval, the relative half width it has converged to and
+  Kish's effective number of runs (`CoverageReport.weighted_outcomes`,
+  [docs/flaky.md](docs/flaky.md#weighted-outcomes)).
 
 - **Write an ODD in Python** instead of YAML (`OddDefinition`, `OddAttribute`,
   `OddModule`), register it by name (`register_odd`, the `openodd.odds` entry point

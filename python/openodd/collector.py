@@ -523,6 +523,7 @@ class CoverageCollector:
         self._passed: Optional[bool] = None
         self._failed_at: Optional[float] = None
         self._environment: Optional[str] = None
+        self._weight: Optional[float] = None
 
     def record_case(self, case: Any, space: Optional[Any] = None) -> None:
         """Record the case this run ran: an :class:`~.sampler.OddSample`.
@@ -550,6 +551,7 @@ class CoverageCollector:
         *,
         failed_at: Optional[float] = None,
         environment: Optional[str] = None,
+        weight: Optional[float] = None,
     ) -> None:
         """Record whether the run passed.
 
@@ -566,9 +568,14 @@ class CoverageCollector:
             environment: What the run ran on, as an opaque ID (a digest of
                 the software and its dependencies' versions): the report
                 pools per-cell outcomes only over runs of the same one.
+            weight: The run's importance-sampling likelihood ratio (NADE's
+                weight, say), for the report's naturalistic failure rate
+                (:attr:`~.report.CoverageReport.weighted_outcomes`).
+                ``None`` for a run not importance sampled. Ignored, with a
+                warning, if not a finite number of at least 0.
 
-        Each call replaces what an earlier one recorded, the time and the
-        environment included.
+        Each call replaces what an earlier one recorded, the time, the
+        environment and the weight included.
         """
         self._passed = bool(passed)
         self._failed_at = None
@@ -583,6 +590,15 @@ class CoverageCollector:
             else:
                 self._failed_at = at  # compared unrounded; written as the samples' times are
         self._environment = None if environment is None else str(environment)
+        self._weight = None
+        if weight is not None:
+            w = math.nan
+            if isinstance(weight, (int, float)) and not isinstance(weight, bool):
+                w = float(weight)
+            if math.isfinite(w) and w >= 0.0:
+                self._weight = w
+            else:
+                logger.warning("coverage: weight=%r is not a likelihood ratio; ignored", weight)
 
     def _outcome(self) -> Optional[dict[str, Any]]:
         """The coverage file's ``outcome``: only what was recorded."""
@@ -596,6 +612,8 @@ class CoverageCollector:
                 outcome["failed_cell"] = cell
         if self._environment is not None:
             outcome["environment"] = self._environment
+        if self._weight is not None:
+            outcome["weight"] = self._weight
         return outcome
 
     def start(self, context: Any, elapsed: float) -> None:

@@ -368,6 +368,35 @@ run's observed operational domain, sample by sample, while per-cell flakiness is
 statistic over many runs' outcomes, which section 8.3 has no column or manifest
 entry for.
 
+## Weighted outcomes
+
+A run sampled with importance sampling -- NADE's adversarial traffic makes
+rare adversities happen far more often than they naturally do -- fails more
+often than it would unsampled, so its raw failure rate is not the one to
+report. Such a run records its likelihood ratio with its outcome:
+
+```python
+collector.record_outcome(result.passed, weight=nade.weight)   # outcome.weight
+```
+
+For every scenario and environment where any run recorded a weight (its runs
+without one count with weight 1), the merged report has a
+`WeightedOutcome` (`CoverageReport.weighted_outcomes`, `weighted_outcomes` in
+the JSON, a "Weighted outcomes" table in the Markdown). Over `n` runs of
+weights `w_i`, `f_i` 1 for a failure:
+
+| Field | Value |
+|---|---|
+| `failure_rate` | `Σ w_i f_i / n`: the unbiased estimate of the naturalistic failure rate |
+| `ci_low`, `ci_high` | its 95% normal interval, `failure_rate ± z s / √n` (`s` the sample standard deviation of `w_i f_i`), clipped to [0, 1] |
+| `relative_half_width` | `z s / (√n failure_rate)`: how far it has converged (TeraSim's NADE runs until it is below 0.3); `None` while no run failed |
+| `self_normalised_rate` | `Σ w_i f_i / Σ w_i`: biased, but of lower variance when the weights vary a lot |
+| `effective_runs` | Kish's `(Σ w_i)² / Σ w_i²` |
+| `runs`, `runs_failed`, `weight_sum`, `documents` | the counts, `Σ w_i`, and the coverage files of the group |
+
+A weight that is not a finite number of at least 0 is ignored with a
+warning when recorded, and leaves the run out when merged.
+
 ## Cost
 
 Fitting is `O(n³)` in the runs observed, repeated for each step of the length-scale
