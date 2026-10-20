@@ -1136,6 +1136,165 @@ impl Module {
     }
 }
 
+// ---------------------------------------------------------------------------
+// In words
+// ---------------------------------------------------------------------------
+
+/// What a rule of [`Document::explain`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleKind {
+    /// A module's include section: it holds when these do.
+    Include,
+    /// A module's exclude section: it does not hold when these do.
+    Exclude,
+    /// A nested group, or the modules a label stands for.
+    Group,
+}
+
+/// A section, in words: all or any of its clauses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rule {
+    pub kind: RuleKind,
+    pub all: bool,
+    pub clauses: Vec<Clause>,
+}
+
+/// One line of a section, in words, and what it stands for when it names a
+/// module, a label or a nested group.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clause {
+    pub text: String,
+    /// The module the line names, to open it.
+    pub module: Option<String>,
+    pub rules: Vec<Rule>,
+}
+
+/// How deep [`Document::explain`] follows modules into modules.
+const EXPLAIN_DEPTH: usize = 4;
+
+impl Document {
+    /// A line of a section in words: `speed_limit <= 50 km/h`,
+    /// `road_type is local or collector`, `dark holds`.
+    pub fn describe(&self, c: &Cond) -> String {
+        let key = &c.key;
+        match &c.value {
+            CondValue::Bool(b) => match self.key_kind(key) {
+                KeyKind::Module | KeyKind::Label => {
+                    format!("{key} {}", if *b { "holds" } else { "does not hold" })
+                }
+                _ => format!("{key} is {b}"),
+            },
+            CondValue::Literals(l) if l.is_empty() => format!("{key} is (nothing chosen)"),
+            CondValue::Literals(l) => format!("{key} is {}", l.join(" or ")),
+            CondValue::Compare { op, operand } => format!("{key} {op} {}", operand.trim()),
+            CondValue::Range { .. } => format!("{key} in {}", c.value.summary()),
+            CondValue::Raw(t) => format!("{key}: {}", t.trim()),
+        }
+    }
+
+    /// The lines of a module's sections that name `target` -- a concept by
+    /// its dotted name or its own, a module or a label -- in words, with
+    /// whether each is in the include section.
+    pub fn lines_naming(&self, module: &str, target: &str) -> Vec<(bool, String)> {
+        let Some(m) = self.modules.iter().find(|m| m.name == module) else {
+            return vec![];
+        };
+        let names = |key: &str| key == target || target.rsplit('.').next() == Some(key);
+        let mut out = vec![];
+        for (include, s) in [(true, &m.include), (false, &m.exclude)] {
+            let Some(s) = s else { continue };
+            for c in s.conditions.iter().filter(|c| names(&c.key)) {
+                out.push((include, self.describe(c)));
+            }
+            let group = if s.all { "any of" } else { "all of" };
+            for c in s.nested.iter().filter(|c| names(&c.key)) {
+                out.push((
+                    include,
+                    format!("{} (in a nested '{group}' group)", self.describe(c)),
+                ));
+            }
+        }
+        out
+    }
+
+    /// A module in words: its sections, and the modules and labels they
+    /// name followed into theirs.
+    pub fn explain(&self, module: &str) -> Vec<Rule> {
+        self.explain_in(module, &mut vec![])
+    }
+
+    fn explain_in(&self, module: &str, stack: &mut Vec<String>) -> Vec<Rule> {
+        let Some(m) = self.modules.iter().find(|m| m.name == module) else {
+            return vec![];
+        };
+        if stack.len() >= EXPLAIN_DEPTH || stack.iter().any(|s| s == module) {
+            return vec![];
+        }
+        stack.push(module.to_string());
+        let mut rules = vec![];
+        for (kind, s) in [
+            (RuleKind::Include, &m.include),
+            (RuleKind::Exclude, &m.exclude),
+        ] {
+            let Some(s) = s else { continue };
+            let mut clauses: Vec<Clause> =
+                s.conditions.iter().map(|c| self.clause(c, stack)).collect();
+            if !s.nested.is_empty() {
+                clauses.push(Clause {
+                    text: String::new(),
+                    module: None,
+                    rules: vec![Rule {
+                        kind: RuleKind::Group,
+                        all: !s.all,
+                        clauses: s.nested.iter().map(|c| self.clause(c, stack)).collect(),
+                    }],
+                });
+            }
+            rules.push(Rule {
+                kind,
+                all: s.all,
+                clauses,
+            });
+        }
+        stack.pop();
+        rules
+    }
+
+    fn clause(&self, c: &Cond, stack: &mut Vec<String>) -> Clause {
+        let text = self.describe(c);
+        match self.key_kind(&c.key) {
+            KeyKind::Module => Clause {
+                text,
+                module: Some(c.key.clone()),
+                rules: self.explain_in(&c.key, stack),
+            },
+            KeyKind::Label => Clause {
+                text,
+                module: None,
+                rules: vec![Rule {
+                    kind: RuleKind::Group,
+                    all: false,
+                    clauses: self
+                        .modules
+                        .iter()
+                        .filter(|m| m.labels.contains(&c.key))
+                        .map(|m| Clause {
+                            text: format!("{} holds", m.name),
+                            module: Some(m.name.clone()),
+                            rules: self.explain_in(&m.name, stack),
+                        })
+                        .collect(),
+                }],
+            },
+            _ => Clause {
+                text,
+                module: None,
+                rules: vec![],
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1236,6 +1395,50 @@ mod tests {
         let Kind::Derived(defs) = &d else { panic!() };
         assert_eq!(defs.len(), 2);
         assert_eq!(d.convert(KindTag::Categorical), k);
+    }
+
+    #[test]
+    fn a_module_reads_as_words() {
+        let doc = Document::from_yaml(URBAN).unwrap();
+        let rules = doc.explain("urban_shuttle");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].kind, RuleKind::Include);
+        assert!(rules[0].all);
+        let texts: Vec<&str> = rules[0].clauses.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["town_roads holds", "ego_speed in [0 .. 40] km/h"]);
+        // A module is followed into its own sections.
+        let town = &rules[0].clauses[0];
+        assert_eq!(town.module.as_deref(), Some("town_roads"));
+        assert_eq!(
+            town.rules[0].clauses[0].text,
+            "road_type is local or collector"
+        );
+        // The nested OR group comes last, as a group.
+        let nested = town.rules[0].clauses.last().unwrap();
+        assert_eq!(nested.rules[0].kind, RuleKind::Group);
+        assert!(!nested.rules[0].all);
+        // A label stands for the modules carrying it.
+        let weather = &rules[1].clauses[0];
+        assert_eq!(weather.text, "weather holds");
+        assert_eq!(
+            weather.rules[0].clauses[0].module.as_deref(),
+            Some("bad_weather")
+        );
+    }
+
+    #[test]
+    fn lines_naming_a_target_are_found() {
+        let doc = Document::from_yaml(URBAN).unwrap();
+        assert_eq!(
+            doc.lines_naming("town_roads", "scenery.speed_limit"),
+            [(true, "speed_limit <= 50 km/h".to_string())]
+        );
+        let junction = doc.lines_naming("town_roads", "scenery.junction");
+        assert!(junction[0].1.contains("nested 'any of'"), "{junction:?}");
+        assert_eq!(
+            doc.lines_naming("urban_shuttle", "dark"),
+            [(false, "dark holds".to_string())]
+        );
     }
 
     #[test]

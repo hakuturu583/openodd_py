@@ -9,7 +9,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::check::{Attribute, Evaluation, Report, State};
-use crate::doc::KindTag;
+use crate::doc::{Document, KindTag, Rule, RuleKind};
 use crate::icons::{concept_icon, Icon};
 
 // ---------------------------------------------------------------------------
@@ -550,11 +550,31 @@ struct Edge {
     class: &'static str,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct Layout {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    /// Each column's heading, at its left.
+    headings: Vec<(f64, &'static str)>,
+    width: f64,
+    height: f64,
+}
+
+impl Layout {
+    fn linked(&self, a: &str, b: &str) -> bool {
+        self.edges
+            .iter()
+            .any(|e| (e.from == a && e.to == b) || (e.from == b && e.to == a))
+    }
+}
+
 const NODE_H: f64 = 38.0;
 const ROW: f64 = 50.0;
 const COL: f64 = 225.0;
+/// Room above the nodes for the columns' headings.
+const HEAD: f64 = 30.0;
 
-fn layout(r: &Report) -> (Vec<Node>, Vec<Edge>, f64, f64) {
+fn layout(r: &Report) -> Layout {
     let labels: Vec<String> = {
         let mut l: Vec<String> = vec![];
         for m in &r.modules {
@@ -727,16 +747,60 @@ fn layout(r: &Report) -> (Vec<Node>, Vec<Edge>, f64, f64) {
         }
         tallest = tallest.max(col.len());
     }
-    let height = tallest.max(1) as f64 * ROW + 20.0;
+    let height = HEAD + tallest.max(1) as f64 * ROW + 20.0;
+    let mut headings = vec![];
     for (c, col) in by_col.iter().enumerate() {
         let offset = (tallest - col.len()) as f64 * ROW / 2.0;
         for (row, i) in col.iter().enumerate() {
             nodes[*i].x = 10.0 + c as f64 * COL;
-            nodes[*i].y = 10.0 + offset + row as f64 * ROW;
+            nodes[*i].y = HEAD + 10.0 + offset + row as f64 * ROW;
         }
+        let kinds = || col.iter().map(|i| nodes[*i].kind);
+        let heading = if c == attr_col {
+            "ATTRIBUTES TESTED"
+        } else if kinds().all(|k| k == NodeKind::Root) {
+            "ODD ROOT"
+        } else if kinds().all(|k| k == NodeKind::Label) {
+            "LABELS"
+        } else {
+            "MODULES"
+        };
+        headings.push((10.0 + c as f64 * COL, heading));
     }
     let width = 10.0 + (cols.max(1) - 1) as f64 * COL + 220.0;
-    (nodes, edges, width, height)
+    Layout {
+        nodes,
+        edges,
+        headings,
+        width,
+        height,
+    }
+}
+
+/// What an arrow says, for its tooltip: the lines behind it, in words.
+fn edge_lines(doc: &Document, e: &Edge) -> (String, Vec<String>) {
+    if e.class == "carries" {
+        return (
+            format!("{} carries the label {}", e.to, e.from),
+            vec![format!(
+                "{} holds when any module labelled {} holds",
+                e.from, e.from
+            )],
+        );
+    }
+    let include = e.class == "include";
+    let lines = doc
+        .lines_naming(&e.from, &e.to)
+        .into_iter()
+        .filter(|(inc, _)| *inc == include)
+        .map(|(_, l)| l)
+        .collect();
+    let what = if include {
+        "include: must hold"
+    } else {
+        "exclude: outside when it holds"
+    };
+    (format!("{} → {} · {what}", e.from, e.to), lines)
 }
 
 /// Roots, the modules and labels they read, and the attributes tested, as a
@@ -748,23 +812,46 @@ pub fn ModuleGraph(
     #[prop(into)] selected: Signal<Option<String>>,
     on_select: Callback<(String, bool)>,
 ) -> impl IntoView {
+    let ctx = crate::app::ctx();
     let hovered = RwSignal::new(None::<String>);
+    // The arrow under the pointer, and where the pointer is in the graph.
+    let tip = RwSignal::new(None::<(usize, f64, f64)>);
+    let wrap = NodeRef::<leptos::html::Div>::new();
     let graph = Memo::new(move |_| report.with(|r| r.as_ref().map(layout)));
-    move || {
-        let Some((nodes, edges, width, height)) = graph.get() else {
+    let tip_view = move || {
+        let (i, x, y) = tip.get()?;
+        let g = graph.get()?;
+        let e = g.edges.get(i)?;
+        let (title, lines) = ctx.doc.with(|d| edge_lines(d, e));
+        Some(view! {
+            <div class=format!("edge-tip {}", e.class) style=format!("left: {}px; top: {}px", x + 14.0, y + 14.0)>
+                <div class="tip-title">{title}</div>
+                {if lines.is_empty() {
+                    view! { <div class="hint">"(see the module)"</div> }.into_any()
+                } else {
+                    lines.into_iter().map(|l| view! { <div class="mono">{l}</div> }).collect_view().into_any()
+                }}
+            </div>
+        })
+    };
+    let body = move || {
+        let Some(g) = graph.get() else {
             return view! { <p class="hint">"The graph appears once openodd reads the document."</p> }.into_any();
         };
-        if nodes.is_empty() {
+        if g.nodes.is_empty() {
             return view! { <p class="hint">"No modules yet: add one in the outline."</p> }
                 .into_any();
         }
-        let pos: HashMap<String, (f64, f64, f64)> = nodes
+        let pos: HashMap<String, (f64, f64, f64)> = g
+            .nodes
             .iter()
             .map(|n| (n.id.clone(), (n.x, n.y, n.w)))
             .collect();
-        let edge_views = edges
+        let edge_views = g
+            .edges
             .iter()
-            .filter_map(|e| {
+            .enumerate()
+            .filter_map(|(i, e)| {
                 let (x1, y1, w1) = *pos.get(&e.from)?;
                 let (x2, y2, _) = *pos.get(&e.to)?;
                 let (sx, sy) = (x1 + w1, y1 + NODE_H / 2.0);
@@ -775,18 +862,41 @@ pub fn ModuleGraph(
                     tx - (tx - sx) * 0.5
                 );
                 let (from, to) = (e.from.clone(), e.to.clone());
-                let dim = move || hovered.get().is_some_and(|h| h != from && h != to);
+                let dim = move || {
+                    tip.get().is_some_and(|(t, _, _)| t != i)
+                        || hovered.get().is_some_and(|h| h != from && h != to)
+                };
+                let hot = move || tip.get().is_some_and(|(t, _, _)| t == i);
+                let follow = move |ev: leptos::ev::MouseEvent| {
+                    if let Some(el) = wrap.get() {
+                        let rect = el.get_bounding_client_rect();
+                        // Left of the pointer when it would run past the right edge.
+                        let x = ev.client_x() as f64 - rect.left();
+                        let x = if x + 360.0 > rect.width() { x - 370.0 } else { x };
+                        tip.set(Some((i, x.max(0.0), ev.client_y() as f64 - rect.top())));
+                    }
+                };
                 Some(view! {
-                    <path
-                        class=format!("edge {}", e.class)
-                        class:dim=dim
-                        d=d
-                        marker-end=format!("url(#arrow-{})", e.class)
-                    />
+                    <g class="edge-g">
+                        <path
+                            class=format!("edge {}", e.class)
+                            class:dim=dim
+                            class:hot=hot
+                            d=d.clone()
+                            marker-end=format!("url(#arrow-{})", e.class)
+                        />
+                        <path class="edge-hit" d=d on:mousemove=follow on:mouseleave=move |_| tip.set(None)/>
+                    </g>
                 })
             })
             .collect_view();
-        let node_views = nodes
+        let headings = g
+            .headings
+            .iter()
+            .map(|(x, h)| view! { <text class="col-head" x=*x y="16">{*h}</text> })
+            .collect_view();
+        let node_views = g
+            .nodes
             .into_iter()
             .map(|n| {
                 let id = n.id.clone();
@@ -821,7 +931,9 @@ pub fn ModuleGraph(
                         class=move || format!("node {kind_class} {}", truth())
                         class:inactive=!n.active
                         class:selected=move || selected.get().as_deref() == Some(id.as_str())
-                        class:dim=move || hovered.get().is_some_and(|h| h != id2 && !edges_touch(&graph.get(), &h, &id2))
+                        class:dim=move || hovered.get().is_some_and(|h| {
+                            h != id2 && !graph.with(|g| g.as_ref().is_some_and(|g| g.linked(&h, &id2)))
+                        })
                         transform=format!("translate({} {})", n.x, n.y)
                         on:mouseenter=move |_| hovered.set(Some(id3.clone()))
                         on:mouseleave=move |_| hovered.set(None)
@@ -838,31 +950,118 @@ pub fn ModuleGraph(
                 }
             })
             .collect_view();
+        let (width, height) = (g.width, g.height);
         view! {
-            <div class="graph-scroll">
-                <svg class="graph" width="100%" style=format!("max-width: {width}px") viewBox=format!("0 0 {width} {height}")>
-                    <defs>
-                        {["include", "exclude", "carries"].into_iter().map(|c| view! {
-                            <marker id=format!("arrow-{c}") viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                                <path class=format!("arrowhead {c}") d="M 0 0 L 10 5 L 0 10 z"/>
-                            </marker>
-                        }).collect_view()}
-                    </defs>
-                    {edge_views}
-                    {node_views}
-                </svg>
-            </div>
+            <svg class="graph" width="100%" style=format!("max-width: {width}px") viewBox=format!("0 0 {width} {height}")>
+                <defs>
+                    {["include", "exclude", "carries"].into_iter().map(|c| view! {
+                        <marker id=format!("arrow-{c}") viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                            <path class=format!("arrowhead {c}") d="M 0 0 L 10 5 L 0 10 z"/>
+                        </marker>
+                    }).collect_view()}
+                </defs>
+                {headings}
+                {edge_views}
+                {node_views}
+            </svg>
         }
         .into_any()
+    };
+    view! {
+        <div class="graph-scroll" node_ref=wrap>
+            {body}
+            {tip_view}
+        </div>
     }
 }
 
-fn edges_touch(graph: &Option<(Vec<Node>, Vec<Edge>, f64, f64)>, a: &str, b: &str) -> bool {
-    graph.as_ref().is_some_and(|(_, edges, _, _)| {
-        edges
-            .iter()
-            .any(|e| (e.from == a && e.to == b) || (e.from == b && e.to == a))
-    })
+/// The roots in words: what puts a situation inside the ODD, each module
+/// named followed into its own sections.
+#[component]
+pub fn OddSentence() -> impl IntoView {
+    let ctx = crate::app::ctx();
+    let roots = Memo::new(move |_| {
+        ctx.doc.with(|d| {
+            let mut roots: Vec<String> = d
+                .modules
+                .iter()
+                .filter(|m| m.root)
+                .map(|m| m.name.clone())
+                .collect();
+            // No ODD section: every module bounds the ODD.
+            if roots.is_empty() {
+                roots = d.modules.iter().map(|m| m.name.clone()).collect();
+            }
+            roots
+                .into_iter()
+                .map(|r| {
+                    let rules = d.explain(&r);
+                    (r, rules)
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    move || {
+        roots
+            .get()
+            .into_iter()
+            .map(|(root, rules)| {
+                let r2 = root.clone();
+                view! {
+                    <div class="sentence">
+                        <div class="sentence-head">
+                            <Icon name="target"/>
+                            "A situation is inside "
+                            <button class="pill this" on:click=move |_| ctx.select_module(&r2)>{root}</button>
+                        </div>
+                        {rules_view(rules, true)}
+                    </div>
+                }
+            })
+            .collect_view()
+    }
+}
+
+/// Rules as nested lists; `top` words them for the ODD itself.
+fn rules_view(rules: Vec<Rule>, top: bool) -> AnyView {
+    let ctx = crate::app::ctx();
+    rules
+        .into_iter()
+        .map(|rule| {
+            let n = if rule.all { "ALL" } else { "ANY" };
+            let (class, head) = match (rule.kind, top) {
+                (RuleKind::Include, true) => ("include", format!("when {n} of these hold:")),
+                (RuleKind::Exclude, true) => ("exclude", format!("but it is outside when {n} of these hold:")),
+                (RuleKind::Include, false) => ("include", format!("which holds when {n} of these hold:")),
+                (RuleKind::Exclude, false) => ("exclude", format!("unless {n} of these hold:")),
+                (RuleKind::Group, _) => ("group", format!("{n} of:")),
+            };
+            view! {
+                <div class=format!("rule {class}")>
+                    <div class="rule-head">{head}</div>
+                    <ul>
+                        {rule.clauses.into_iter().map(|c| {
+                            let module = c.module.clone();
+                            let text = (!c.text.is_empty()).then(|| match module {
+                                Some(m) => {
+                                    let rest = c.text.strip_prefix(m.as_str()).unwrap_or("").to_string();
+                                    let m2 = m.clone();
+                                    view! {
+                                        <button class="pill" on:click=move |_| ctx.select_module(&m2)><Icon name="module"/>{m}</button>
+                                        <span>{rest}</span>
+                                    }.into_any()
+                                }
+                                None => view! { <span class="mono">{c.text.clone()}</span> }.into_any(),
+                            });
+                            let rules = (!c.rules.is_empty()).then(|| rules_view(c.rules, false));
+                            view! { <li>{text}{rules}</li> }
+                        }).collect_view()}
+                    </ul>
+                </div>
+            }
+        })
+        .collect_view()
+        .into_any()
 }
 
 // ---------------------------------------------------------------------------

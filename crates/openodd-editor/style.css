@@ -414,3 +414,37 @@ table { border-collapse: collapse; width: 100%; }
 .module-card .title .icon-svg { color: var(--accent); width: 16px; height: 16px; }
 .module-card .section ul { margin: 2px 0 4px; padding-left: 18px; }
 @media (max-width: 720px) { .graph { min-width: 640px; } }
+
+/* graph: headings, arrows to hover, their tooltip */
+.graph-scroll { position: relative; }
+.graph .col-head { fill: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.graph .edge-hit { fill: none; stroke: transparent; stroke-width: 14; cursor: help; }
+.graph .edge.hot { stroke-width: 4; }
+.edge-tip {
+  position: absolute; z-index: 4; pointer-events: none; max-width: 340px;
+  background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--include);
+  border-radius: 8px; padding: 8px 10px; box-shadow: 0 6px 20px rgb(0 0 0 / .16); font-size: 12.5px;
+}
+.edge-tip.exclude { border-left-color: var(--exclude); }
+.edge-tip.carries { border-left-color: var(--carries); }
+.edge-tip .tip-title { font-weight: 650; margin-bottom: 4px; }
+.edge-tip .mono { padding: 1px 0; }
+
+/* the ODD in words */
+.sentence-box { background: var(--surface-2); border-radius: 10px; padding: 8px 12px; margin: 4px 0 12px; }
+.sentence-box summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 650; list-style: none; }
+.sentence-box summary::-webkit-details-marker { display: none; }
+.sentence-box summary::after { content: "▾"; color: var(--muted); }
+.sentence-box:not([open]) summary::after { content: "▸"; }
+.sentence { margin-top: 8px; }
+.sentence-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.sentence-head .icon-svg { color: var(--accent); }
+.rule { margin: 4px 0 2px 10px; padding-left: 10px; border-left: 3px solid var(--border); }
+.rule.include { border-left-color: var(--include); }
+.rule.exclude { border-left-color: var(--exclude); }
+.rule.group { border-left-style: dashed; }
+.rule-head { font-size: 12.5px; color: var(--muted); font-weight: 600; }
+.rule.exclude > .rule-head { color: var(--exclude); }
+.rule ul { list-style: none; margin: 2px 0; padding: 0; }
+.rule li { margin: 3px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.rule li > .rule { flex-basis: 100%; }

@@ -12,7 +12,7 @@ use crate::doc::{Concept, Document, Kind, KindTag, Module};
 use crate::forms::{ConceptEditor, ModuleEditor, Settings};
 use crate::icons::{concept_icon, Icon};
 use crate::io;
-use crate::viz::{Domain, Legend, ModuleGraph, OddMap, StateBar};
+use crate::viz::{Domain, Legend, ModuleGraph, OddMap, OddSentence, StateBar};
 
 pub const URBAN: &str = include_str!("../examples/urban.yaml");
 pub const DEFAULT: &str = include_str!("../../../python/openodd/odds/default/default.yaml");
@@ -590,11 +590,15 @@ fn MapView() -> impl IntoView {
             })}
             <div class="card">
                 <div class="card-title"><Icon name="graph"/>"Structure"<span class="hint">"roots → modules → attributes · hover to trace, click to edit"</span></div>
+                <details class="sentence-box" open>
+                    <summary><Icon name="doc"/>"In words"</summary>
+                    <OddSentence/>
+                </details>
                 <div class="graph-legend">
                     <span><i class="ln include"></i>"include"</span>
                     <span><i class="ln exclude"></i>"exclude"</span>
                     <span><i class="ln carries"></i>"label"</span>
-                    <span class="hint">"With test values set, nodes show each module's verdict."</span>
+                    <span class="hint">"Hover an arrow for the conditions behind it. With test values set, nodes show each module's verdict."</span>
                 </div>
                 <ModuleGraph
                     report=report
