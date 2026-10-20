@@ -736,8 +736,8 @@ fn edge_lines(doc: &Document, e: &Edge) -> (String, Vec<String>) {
     let lines = doc
         .lines_naming(&e.from, &e.to)
         .into_iter()
-        .filter(|(inc, _)| *inc == include)
-        .map(|(_, l)| l)
+        .filter(|l| l.include == include)
+        .map(|l| l.text)
         .collect();
     let what = if include {
         "include: must hold"
@@ -835,7 +835,9 @@ pub fn ModuleGraph(on_select: Callback<(String, bool)>) -> impl IntoView {
                         || hovered.get().is_some_and(|h| h != from && h != to)
                 };
                 let is_hot = move || hot.get() == Some(i);
+                // The pointer over an arrow, or a tap on it, shows its tooltip.
                 let follow = move |ev: leptos::ev::MouseEvent| {
+                    ev.stop_propagation();
                     if let Some(el) = wrap.get() {
                         let rect = el.get_bounding_client_rect();
                         // Left of the pointer when it would run past the right edge.
@@ -856,7 +858,7 @@ pub fn ModuleGraph(on_select: Callback<(String, bool)>) -> impl IntoView {
                             d=d.clone()
                             marker-end=format!("url(#arrow-{})", e.class)
                         />
-                        <path class="edge-hit" d=d on:mousemove=follow on:mouseleave=move |_| hot.set(None)/>
+                        <path class="edge-hit" d=d on:mousemove=follow on:click=follow on:mouseleave=move |_| hot.set(None)/>
                     </g>
                 })
             })
@@ -914,7 +916,8 @@ pub fn ModuleGraph(on_select: Callback<(String, bool)>) -> impl IntoView {
             .collect_view();
         let (width, height) = (g.width, g.height);
         view! {
-            <svg class="graph" width="100%" style=format!("max-width: {width}px") viewBox=format!("0 0 {width} {height}")>
+            // A tap away from the arrows closes the tooltip.
+            <svg class="graph" width="100%" style=format!("max-width: {width}px") viewBox=format!("0 0 {width} {height}") on:click=move |_| hot.set(None)>
                 <defs>
                     {["include", "exclude", "carries"].into_iter().map(|c| view! {
                         <marker id=format!("arrow-{c}") viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -935,6 +938,226 @@ pub fn ModuleGraph(on_select: Callback<(String, bool)>) -> impl IntoView {
             {tip_view}
         </div>
     }
+}
+
+/// Whether the screen is narrow (a phone), kept up to date as it resizes.
+pub fn narrow_screen() -> Signal<bool> {
+    let now = || {
+        web_sys::window()
+            .and_then(|w| w.inner_width().ok())
+            .and_then(|w| w.as_f64())
+            .is_some_and(|w| w < 720.0)
+    };
+    let narrow = RwSignal::new(now());
+    let listener = window_event_listener(leptos::ev::resize, move |_| {
+        let n = now();
+        if narrow.get_untracked() != n {
+            narrow.set(n);
+        }
+    });
+    on_cleanup(move || listener.remove());
+    narrow.into()
+}
+
+/// One row of the structure as a tree: a module, label or attribute, the
+/// lines of its parent that name it, and what it reads in turn.
+#[derive(Clone, Debug, PartialEq)]
+struct Branch {
+    name: String,
+    kind: NodeKind,
+    /// In its parent's include section (`Some(true)`), exclude section, or neither.
+    include: Option<bool>,
+    /// What being there means, by its group's operator: "must hold", "one of", ...
+    side: &'static str,
+    lines: Vec<String>,
+    active: bool,
+    children: Vec<Branch>,
+}
+
+/// A module's branch: what it reads, followed into modules and labels.
+fn branch(r: &Report, d: &Document, name: &str, stack: &mut Vec<String>) -> Vec<Branch> {
+    let Some(m) = r.modules.iter().find(|m| m.name == name) else {
+        return vec![];
+    };
+    // The reader refuses a cycle; this only keeps a bad document finite.
+    if stack.iter().any(|s| s == name) {
+        return vec![];
+    }
+    stack.push(name.to_string());
+    // The lines naming a target in one section, and the badge the first
+    // gives it: its own group's operator, and whether it negates.
+    let lines_of = |target: &str, include: bool| -> (&'static str, Vec<String>) {
+        let lines: Vec<crate::doc::Line> = d
+            .lines_naming(name, target)
+            .into_iter()
+            .filter(|l| l.include == include)
+            .collect();
+        let badge = lines.first().map_or("", |l| l.badge());
+        (badge, lines.into_iter().map(|l| l.text).collect())
+    };
+    let mut out = vec![];
+    for l in &m.links {
+        let (side, lines) = lines_of(&l.target, l.include);
+        let child = if !l.module {
+            Branch {
+                name: l.target.clone(),
+                kind: NodeKind::Attribute,
+                include: Some(l.include),
+                side,
+                lines,
+                active: true,
+                children: vec![],
+            }
+        } else if let Some(t) = r.modules.iter().find(|t| t.name == l.target) {
+            Branch {
+                name: t.name.clone(),
+                kind: if t.root {
+                    NodeKind::Root
+                } else {
+                    NodeKind::Module
+                },
+                include: Some(l.include),
+                side,
+                lines,
+                active: t.active,
+                children: branch(r, d, &t.name, stack),
+            }
+        } else {
+            // A label: the modules carrying it.
+            Branch {
+                name: l.target.clone(),
+                kind: NodeKind::Label,
+                include: Some(l.include),
+                side,
+                lines,
+                active: true,
+                children: r
+                    .modules
+                    .iter()
+                    .filter(|t| t.labels.contains(&l.target))
+                    .map(|t| Branch {
+                        name: t.name.clone(),
+                        kind: NodeKind::Module,
+                        include: None,
+                        side: "",
+                        lines: vec![],
+                        active: t.active,
+                        children: branch(r, d, &t.name, stack),
+                    })
+                    .collect(),
+            }
+        };
+        out.push(child);
+    }
+    stack.pop();
+    out
+}
+
+/// The structure as an indented tree, each row with the condition that puts
+/// it there: what a narrow screen shows instead of the graph.
+#[component]
+pub fn StructureTree() -> impl IntoView {
+    let ctx = crate::app::ctx();
+    let roots = Memo::new(move |_| {
+        ctx.report.with(|r| {
+            let Ok(r) = r else { return vec![] };
+            ctx.doc.with(|d| {
+                let mut roots: Vec<&crate::check::Module> =
+                    r.modules.iter().filter(|m| m.root).collect();
+                if roots.is_empty() {
+                    roots = r.modules.iter().collect();
+                }
+                roots
+                    .into_iter()
+                    .map(|m| Branch {
+                        name: m.name.clone(),
+                        kind: NodeKind::Root,
+                        include: None,
+                        side: "",
+                        lines: vec![],
+                        active: m.active,
+                        children: branch(r, d, &m.name, &mut vec![]),
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+    });
+    move || {
+        let roots = roots.get();
+        if roots.is_empty() {
+            return view! { <p class="hint">"No modules yet: add one in the outline."</p> }
+                .into_any();
+        }
+        view! { <ul class="stree">{roots.into_iter().map(branch_view).collect_view()}</ul> }
+            .into_any()
+    }
+}
+
+fn branch_view(b: Branch) -> AnyView {
+    let ctx = crate::app::ctx();
+    let (kind_class, icon) = match b.kind {
+        NodeKind::Root => ("root", "target"),
+        NodeKind::Module => ("module", "module"),
+        NodeKind::Label => ("label", "tag"),
+        NodeKind::Attribute => ("attr", concept_icon(tail(&b.name), KindTag::Number)),
+    };
+    let side = match b.include {
+        Some(true) => "include",
+        Some(false) => "exclude",
+        None => "",
+    };
+    let name = StoredValue::new(b.name.clone());
+    let is_attr = b.kind == NodeKind::Attribute;
+    let open = move |_| {
+        name.with_value(|n| {
+            if is_attr {
+                ctx.select_attribute(n)
+            } else {
+                ctx.select_module(n)
+            }
+        })
+    };
+    let truth = move || {
+        ctx.evaluation.with(|e| {
+            e.as_ref()
+                .and_then(|e| name.with_value(|n| e.truth(n).map(|t| format!("truth-dot {t}"))))
+        })
+    };
+    let shown = if is_attr {
+        tail(&b.name).to_string()
+    } else {
+        b.name.clone()
+    };
+    // A module's or label's plain "x holds" says nothing its row does not;
+    // anything else ("x does not hold", a nested group) is shown.
+    let plain = format!("{} holds", b.name);
+    let lines: Vec<String> = b
+        .lines
+        .iter()
+        .filter(|l| is_attr || **l != plain)
+        .cloned()
+        .collect();
+    view! {
+        <li class=format!("sbranch {side}")>
+            <div class=format!("srow {kind_class}") class:inactive=!b.active>
+                {(!side.is_empty()).then(|| view! {
+                    <span class=format!("sside {side}")>{b.side}</span>
+                })}
+                <button class="sname" on:click=open>
+                    <Icon name=icon/>
+                    <span>{shown}</span>
+                </button>
+                {move || truth().map(|c| view! { <span class=c></span> })}
+            </div>
+            {(!lines.is_empty()).then(|| view! {
+                <div class="slines">{lines.into_iter().map(|l| view! { <div class="mono">{l}</div> }).collect_view()}</div>
+            })}
+            {(!b.children.is_empty()).then(|| view! {
+                <ul class="stree">{b.children.into_iter().map(branch_view).collect_view()}</ul>
+            })}
+        </li>
+    }
+    .into_any()
 }
 
 /// The roots in words: what puts a situation inside the ODD, each module
@@ -1198,5 +1421,70 @@ pub fn OddMap() -> impl IntoView {
             }
             .into_any()
         }}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_structure_tree_says_why_each_row_is_there() {
+        let text = include_str!("../examples/urban.yaml");
+        let r = crate::check::check(&crate::check::Files {
+            entry: "urban.yaml".into(),
+            text: text.into(),
+            library: vec![],
+        })
+        .unwrap();
+        let d = Document::from_yaml(text).unwrap();
+        let rows = branch(&r, &d, "urban_shuttle", &mut vec![]);
+        let town = rows.iter().find(|b| b.name == "town_roads").unwrap();
+        assert_eq!(town.side, "must hold");
+        let speed = town
+            .children
+            .iter()
+            .find(|b| b.name == "scenery.speed_limit")
+            .unwrap();
+        assert_eq!(speed.lines, ["speed_limit <= 50 km/h"]);
+        // A label stands for its modules; an any-of section reads "one of".
+        let weather = rows.iter().find(|b| b.name == "weather").unwrap();
+        assert_eq!(weather.side, "outside if");
+        let bad = &weather.children[0];
+        assert_eq!(bad.name, "bad_weather");
+        assert!(bad.children.iter().all(|b| b.side == "one of"));
+        // The nested OR group of an AND section: one of them, not both.
+        let junction = town
+            .children
+            .iter()
+            .find(|b| b.name == "scenery.junction")
+            .unwrap();
+        assert_eq!(junction.side, "one of");
+    }
+
+    #[test]
+    fn the_structure_tree_follows_long_chains_and_negations() {
+        // r -> m1 -> ... -> m6 -> a, with m1 required not to hold.
+        let mut text = String::from("TAXONOMY:\n  a: [x, y]\nMODULES:\n");
+        for i in 1..6 {
+            text += &format!("  m{i}:\n    INCLUDE_AND: {{m{}: true}}\n", i + 1);
+        }
+        text += "  m6:\n    INCLUDE_AND: {a: x}\nODD:\n  r:\n    INCLUDE_AND: {m1: false}\n";
+        let r = crate::check::check(&crate::check::Files {
+            entry: "odd.yaml".into(),
+            text: text.clone(),
+            library: vec![],
+        })
+        .unwrap();
+        let d = Document::from_yaml(&text).unwrap();
+        let rows = branch(&r, &d, "r", &mut vec![]);
+        assert_eq!(rows[0].side, "must not hold");
+        assert_eq!(rows[0].lines, ["m1 does not hold"]);
+        let mut b = &rows[0];
+        for _ in 0..5 {
+            b = &b.children[0];
+        }
+        assert_eq!(b.name, "m6");
+        assert_eq!(b.children[0].name, "a");
     }
 }

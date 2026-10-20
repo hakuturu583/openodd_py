@@ -1186,8 +1186,35 @@ pub struct Clause {
     pub rules: Vec<Rule>,
 }
 
-/// How deep [`Document::explain`] follows modules into modules.
-const EXPLAIN_DEPTH: usize = 4;
+/// A line of a section that names something, as [`Document::lines_naming`]
+/// finds it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+    /// In the include section (else the exclude one).
+    pub include: bool,
+    /// Its group needs all of its lines (`AND`), else any.
+    pub all: bool,
+    /// It says a module or label does *not* hold.
+    pub negated: bool,
+    /// The line in words.
+    pub text: String,
+}
+
+impl Line {
+    /// What the line makes of what it names, in a few words: "must hold",
+    /// "one of", "outside if", ...
+    pub fn badge(&self) -> &'static str {
+        match (self.include, self.all, self.negated) {
+            (true, true, false) => "must hold",
+            (true, true, true) => "must not hold",
+            (true, false, false) => "one of",
+            (true, false, true) => "one of: not",
+            (false, true, false) => "outside if all",
+            (false, false, false) => "outside if",
+            (false, _, true) => "outside unless",
+        }
+    }
+}
 
 impl Document {
     /// A line of a section in words: `speed_limit <= 50 km/h`,
@@ -1210,25 +1237,37 @@ impl Document {
     }
 
     /// The lines of a module's sections that name `target` -- a concept by
-    /// its dotted name or its own, a module or a label -- in words, with
-    /// whether each is in the include section.
-    pub fn lines_naming(&self, module: &str, target: &str) -> Vec<(bool, String)> {
+    /// its dotted name or its own, a module or a label -- in words, with the
+    /// section and the group each is in.
+    pub fn lines_naming(&self, module: &str, target: &str) -> Vec<Line> {
         let Some(m) = self.modules.iter().find(|m| m.name == module) else {
             return vec![];
         };
         let names = |key: &str| key == target || tail(target) == key;
+        let negated = |c: &Cond| {
+            matches!(c.value, CondValue::Bool(false))
+                && matches!(self.key_kind(&c.key), KeyKind::Module | KeyKind::Label)
+        };
         let mut out = vec![];
         for (include, s) in [(true, &m.include), (false, &m.exclude)] {
             let Some(s) = s else { continue };
             for c in s.conditions.iter().filter(|c| names(&c.key)) {
-                out.push((include, self.describe(c)));
+                out.push(Line {
+                    include,
+                    all: s.all,
+                    negated: negated(c),
+                    text: self.describe(c),
+                });
             }
+            // The nested group has the other operator.
             let group = if s.all { "any of" } else { "all of" };
             for c in s.nested.iter().filter(|c| names(&c.key)) {
-                out.push((
+                out.push(Line {
                     include,
-                    format!("{} (in a nested '{group}' group)", self.describe(c)),
-                ));
+                    all: !s.all,
+                    negated: negated(c),
+                    text: format!("{} (in a nested '{group}' group)", self.describe(c)),
+                });
             }
         }
         out
@@ -1244,7 +1283,8 @@ impl Document {
         let Some(m) = self.modules.iter().find(|m| m.name == module) else {
             return vec![];
         };
-        if stack.len() >= EXPLAIN_DEPTH || stack.iter().any(|s| s == module) {
+        // The reader refuses a cycle; this only keeps a bad document finite.
+        if stack.iter().any(|s| s == module) {
             return vec![];
         }
         stack.push(module.to_string());
@@ -1458,15 +1498,27 @@ mod tests {
     #[test]
     fn lines_naming_a_target_are_found() {
         let doc = Document::from_yaml(URBAN).unwrap();
-        assert_eq!(
-            doc.lines_naming("town_roads", "scenery.speed_limit"),
-            [(true, "speed_limit <= 50 km/h".to_string())]
-        );
+        let speed = doc.lines_naming("town_roads", "scenery.speed_limit");
+        assert_eq!(speed[0].text, "speed_limit <= 50 km/h");
+        assert_eq!(speed[0].badge(), "must hold");
+        // In the nested OR group of an AND section: one of them.
         let junction = doc.lines_naming("town_roads", "scenery.junction");
-        assert!(junction[0].1.contains("nested 'any of'"), "{junction:?}");
+        assert!(junction[0].text.contains("nested 'any of'"), "{junction:?}");
+        assert_eq!(junction[0].badge(), "one of");
+        let dark = doc.lines_naming("urban_shuttle", "dark");
         assert_eq!(
-            doc.lines_naming("urban_shuttle", "dark"),
-            [(false, "dark holds".to_string())]
+            (dark[0].text.as_str(), dark[0].badge()),
+            ("dark holds", "outside if")
+        );
+        // A module required not to hold says so.
+        let not = Document::from_yaml(
+            "TAXONOMY:\n  a: [x]\nMODULES:\n  m:\n    INCLUDE_AND: {a: x}\nODD:\n  r:\n    INCLUDE_AND: {m: false}\n",
+        )
+        .unwrap();
+        let line = &not.lines_naming("r", "m")[0];
+        assert_eq!(
+            (line.text.as_str(), line.badge()),
+            ("m does not hold", "must not hold")
         );
     }
 

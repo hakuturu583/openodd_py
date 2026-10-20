@@ -405,7 +405,9 @@ table { border-collapse: collapse; width: 100%; }
 .module-card .title { display: flex; gap: 6px; align-items: center; font-weight: 600; }
 .module-card .title .icon-svg { color: var(--accent); width: 16px; height: 16px; }
 .module-card .section ul { margin: 2px 0 4px; padding-left: 18px; }
-@media (max-width: 720px) { .graph { min-width: 640px; } }
+/* touch: a wider arrow to tap, a tooltip that fits the screen */
+@media (pointer: coarse) { .graph .edge-hit { stroke-width: 22; } }
+.edge-tip { max-width: min(340px, calc(100% - 8px)); }
 
 /* graph: headings, arrows to hover, their tooltip */
 .graph-scroll { position: relative; }
@@ -440,3 +442,23 @@ table { border-collapse: collapse; width: 100%; }
 .rule ul { list-style: none; margin: 2px 0; padding: 0; }
 .rule li { margin: 3px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .rule li > .rule { flex-basis: 100%; }
+
+/* the structure as a tree (narrow screens) */
+.stree { list-style: none; margin: 0; padding: 0; }
+.stree .stree { margin-left: 14px; padding-left: 10px; border-left: 2px solid var(--border); }
+.sbranch { margin: 6px 0; }
+.sbranch.include > .stree { border-left-color: var(--include); }
+.sbranch.exclude > .stree { border-left-color: var(--exclude); }
+.srow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.srow.inactive { opacity: .5; }
+.sname { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--surface); border-radius: 9px; padding: 4px 10px; font-weight: 600; cursor: pointer; }
+.sname .icon-svg { color: var(--accent); width: 16px; height: 16px; }
+.srow.root .sname { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.srow.root .sname .icon-svg { color: var(--accent-text); }
+.srow.label .sname { border-style: dashed; border-color: var(--carries); }
+.srow.label .sname .icon-svg { color: var(--carries); }
+.srow.attr .sname { border-radius: 999px; font-weight: 550; }
+.sside { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; }
+.sside.include { background: var(--accent-soft); color: var(--include); }
+.sside.exclude { background: color-mix(in srgb, var(--exclude) 16%, transparent); color: var(--exclude); }
+.slines { margin: 3px 0 0 4px; color: var(--muted); }

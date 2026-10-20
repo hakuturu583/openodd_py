@@ -106,8 +106,13 @@ fn body(name: &str) -> &'static str {
 #[component]
 pub fn Icon(name: &'static str) -> impl IntoView {
     view! {
+        // The size as attributes too: Safari ignores CSS sizes on an `<svg>`
+        // nested in another (the graph's nodes) and draws it as large as its
+        // parent. CSS sizes it everywhere else.
         <svg
             class="icon-svg"
+            width="18"
+            height="18"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
