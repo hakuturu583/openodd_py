@@ -17,6 +17,10 @@ attributes out inside it. Each cell is coloured by what its runs did:
 | white | `unsampled` | no run was in it |
 | hatched | `unknown` | only runs without an outcome were in it |
 
+When no run recorded an outcome (runs measured on recorded logs), the cells
+are shaded instead by how long the runs stayed in them, and nothing is said
+about failures ([docs/coverage_view.md](../../docs/coverage_view.md#runs-without-outcomes-logs)).
+
 A dashed outline marks a cell with too few runs to judge, by the same
 thresholds as openodd's per-cell report (`stats`). The red "● n" badge counts the runs
 that were in the cell when they failed.

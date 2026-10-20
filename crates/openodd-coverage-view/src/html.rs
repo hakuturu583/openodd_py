@@ -69,6 +69,17 @@ pub struct Labels {
     pub rows: String,
     pub columns: String,
     pub no_rows: String,
+    pub state_covered: String,
+    pub no_outcomes: String,
+    pub no_outcomes_note: String,
+    pub time_recorded: String,
+    pub distance: String,
+    pub thin_cells: String,
+    pub few_runs: String,
+    pub less_time: String,
+    pub more_time: String,
+    pub less_runs: String,
+    pub more_runs: String,
 }
 
 impl Labels {
@@ -112,6 +123,17 @@ impl Labels {
             "rows" => &mut self.rows,
             "columns" => &mut self.columns,
             "no_rows" => &mut self.no_rows,
+            "state_covered" => &mut self.state_covered,
+            "no_outcomes" => &mut self.no_outcomes,
+            "no_outcomes_note" => &mut self.no_outcomes_note,
+            "time_recorded" => &mut self.time_recorded,
+            "distance" => &mut self.distance,
+            "thin_cells" => &mut self.thin_cells,
+            "few_runs" => &mut self.few_runs,
+            "less_time" => &mut self.less_time,
+            "more_time" => &mut self.more_time,
+            "less_runs" => &mut self.less_runs,
+            "more_runs" => &mut self.more_runs,
             _ => return false,
         };
         *slot = value.to_string();
@@ -165,6 +187,20 @@ impl Default for Labels {
             rows: s("Rows"),
             columns: s("Columns"),
             no_rows: s("None (one row)"),
+            state_covered: s("Covered"),
+            no_outcomes: s("no outcomes recorded"),
+            no_outcomes_note: s(
+                "No run recorded an outcome (runs measured on logs, say): each cell shows \
+                 how long the runs stayed in it, not how they fared.",
+            ),
+            time_recorded: s("Time recorded"),
+            distance: s("Distance"),
+            thin_cells: s("Thinly covered cells"),
+            few_runs: s("Fewer than {n} runs"),
+            less_time: s("Less time"),
+            more_time: s("more"),
+            less_runs: s("Fewer runs"),
+            more_runs: s("more"),
         }
     }
 }
@@ -334,6 +370,134 @@ fn cell_tip(c: &Cell, place: &str, labels: &Labels) -> (String, String) {
     (text, tip.to_string())
 }
 
+/// How the cells are shaded when no run recorded an outcome: by the time the
+/// runs stayed in each (or, when no time was recorded, by how many runs were
+/// in it), relative to the cell with the most.
+struct Heat {
+    by_time: bool,
+    max: f64,
+    min_runs: u64,
+}
+
+/// The shades of [`Heat`]: a visited cell is one of `1..=HEAT_LEVELS`.
+const HEAT_LEVELS: usize = 5;
+
+impl Heat {
+    fn of(m: &Matrix) -> Option<Heat> {
+        if m.outcomes {
+            return None;
+        }
+        let by_time = m.total.seconds > 0.0;
+        let max = m
+            .cells
+            .iter()
+            .flatten()
+            .filter(|c| !c.outside)
+            .map(|c| Heat::measure(by_time, c))
+            .fold(0.0, f64::max);
+        Some(Heat {
+            by_time,
+            max,
+            min_runs: m.query.min_runs,
+        })
+    }
+
+    fn measure(by_time: bool, c: &Cell) -> f64 {
+        if by_time {
+            c.seconds
+        } else {
+            c.runs_unknown as f64
+        }
+    }
+
+    /// The shade of a visited cell inside the ODD: on a square-root scale,
+    /// so a few long stays do not wash the rest out.
+    fn level(&self, c: &Cell) -> Option<usize> {
+        if c.outside || !c.visited() || self.max <= 0.0 {
+            return None;
+        }
+        let share = (Heat::measure(self.by_time, c) / self.max).clamp(0.0, 1.0);
+        Some(((share.sqrt() * HEAT_LEVELS as f64).ceil() as usize).clamp(1, HEAT_LEVELS))
+    }
+
+    fn thin(&self, c: &Cell) -> bool {
+        !c.outside && c.visited() && c.runs_unknown < self.min_runs
+    }
+}
+
+/// A duration, in the largest unit that keeps it above one.
+fn duration(seconds: f64, labels: &Labels) -> String {
+    if seconds < 60.0 {
+        format!("{seconds:.1} {}", labels.seconds)
+    } else if seconds < 3600.0 {
+        format!("{:.1} min", seconds / 60.0)
+    } else {
+        format!("{:.1} h", seconds / 3600.0)
+    }
+}
+
+/// A distance, in metres or kilometres.
+fn distance(meters: f64) -> String {
+    if meters < 1000.0 {
+        format!("{meters:.0} m")
+    } else {
+        format!("{:.2} km", meters / 1000.0)
+    }
+}
+
+/// A cell's tooltip when no run recorded an outcome: where the runs went and
+/// how long they stayed, nothing about how they fared.
+fn heat_tip(c: &Cell, place: &str, heat: &Heat, labels: &Labels) -> (String, String) {
+    let mut state = if c.outside {
+        labels.state_outside.clone()
+    } else if c.visited() {
+        labels.state_covered.clone()
+    } else {
+        labels.state_unsampled.clone()
+    };
+    if c.outside && c.visited() {
+        let _ = write!(state, " ({})", labels.reached);
+    }
+    let mut rows: Vec<(String, String)> = vec![(
+        labels.runs.clone(),
+        if c.visited() {
+            c.runs_unknown.to_string()
+        } else {
+            labels.no_runs.clone()
+        },
+    )];
+    if c.seconds > 0.0 {
+        rows.push((labels.time.clone(), duration(c.seconds, labels)));
+    }
+    if c.meters > 0.0 {
+        rows.push((labels.distance.clone(), distance(c.meters)));
+    }
+    let few = labels.few_runs.replace("{n}", &heat.min_runs.to_string());
+    let thin = heat.thin(c);
+    let mut text = format!("{place}: {state}");
+    for (k, v) in &rows {
+        let _ = write!(text, ", {k} {v}");
+    }
+    if thin {
+        let _ = write!(text, " ({few})");
+    }
+    let kind = if c.outside {
+        "outside"
+    } else if c.visited() {
+        "covered"
+    } else {
+        "unsampled"
+    };
+    let tip = serde_json::json!({
+        "place": place,
+        "state": state,
+        "kind": kind,
+        "tentative": if thin { Some(&few) } else { None },
+        "rows": rows,
+    });
+    (text, tip.to_string())
+}
+
 /// The icon of a state: what says it besides the colour.
 fn state_icon(state: CellState) -> &'static str {
     match state {
@@ -375,11 +539,25 @@ fn target_attrs(target: &Target, opts: &Options) -> (String, &'static str) {
     }
 }
 
-fn cell_html(out: &mut String, c: &Cell, place: &str, target: Target, opts: &Options) {
+fn cell_html(
+    out: &mut String,
+    c: &Cell,
+    place: &str,
+    target: Target,
+    heat: Option<&Heat>,
+    opts: &Options,
+) {
     let labels = &opts.labels;
     let (attrs, tag) = target_attrs(&target, opts);
     let mut class = format!("oo-cell oo-{}", c.state.as_str());
-    if c.tentative {
+    if let Some(heat) = heat {
+        if let Some(level) = heat.level(c) {
+            let _ = write!(class, " oo-heat oo-heat-{level}");
+        }
+        if heat.thin(c) {
+            class += " oo-thin";
+        }
+    } else if c.tentative {
         class += " oo-tentative";
     }
     let tag_attrs = if tag == "button" {
@@ -387,13 +565,36 @@ fn cell_html(out: &mut String, c: &Cell, place: &str, target: Target, opts: &Opt
     } else {
         ""
     };
-    let (text, tip) = cell_tip(c, place, labels);
+    let (text, tip) = match heat {
+        Some(heat) => heat_tip(c, place, heat, labels),
+        None => cell_tip(c, place, labels),
+    };
     let _ = write!(
         out,
         "<{tag}{tag_attrs} class=\"{class}\" aria-label=\"{}\" data-oo-tip=\"{}\"{attrs}>",
         escape(&text),
         escape(&tip)
     );
+    if let Some(heat) = heat {
+        if c.visited() {
+            let main = if heat.by_time {
+                duration(c.seconds, labels)
+            } else {
+                c.runs_unknown.to_string()
+            };
+            let _ = write!(
+                out,
+                "<span class=\"oo-rate\">{}</span><span class=\"oo-n\">{} {}</span>",
+                escape(&main),
+                c.runs_unknown,
+                escape(&labels.runs.to_lowercase())
+            );
+        } else if c.outside {
+            out.push_str("<span class=\"oo-ic\" aria-hidden=\"true\">\u{2298}</span>");
+        }
+        let _ = write!(out, "</{tag}>");
+        return;
+    }
     let icon = state_icon(c.state);
     if !icon.is_empty() {
         let _ = write!(
@@ -655,15 +856,12 @@ fn panel(
         .flatten()
         .filter(|c| !c.outside && c.visited())
         .count();
-    let stat = |out: &mut String, key: &str, value: String, sub: String, kind: &str| {
-        let _ = write!(
-            out,
-            "<div class=\"oo-stat oo-stat-{kind}\"><span class=\"oo-k\">{}</span>\
-             <span class=\"oo-v\">{value}</span><span class=\"oo-s\">{sub}</span></div>",
-            escape(key)
-        );
-    };
+    let heat = Heat::of(m);
     out.push_str("<div class=\"oo-stats\">");
+    if let Some(heat) = &heat {
+        heat_summary(out, m, heat, inside, covered, opts);
+        return panel_grid(axes, truncated, out, m, opts, open, has_depth, Some(heat));
+    }
     stat(
         out,
         &labels.runs,
@@ -750,7 +948,147 @@ fn panel(
         escape(&labels.tentative),
         escape(&labels.failed_here)
     );
+    panel_grid(axes, truncated, out, m, opts, open, has_depth, None);
+}
 
+/// A stat tile of the summary.
+fn stat(out: &mut String, key: &str, value: String, sub: String, kind: &str) {
+    let _ = write!(
+        out,
+        "<div class=\"oo-stat oo-stat-{kind}\"><span class=\"oo-k\">{}</span>\
+         <span class=\"oo-v\">{value}</span><span class=\"oo-s\">{sub}</span></div>",
+        escape(key)
+    );
+}
+
+/// The summary, bar and legend of a matrix whose runs recorded no outcome:
+/// how much of the ODD they covered and how long they stayed, the cells
+/// shaded by it.
+fn heat_summary(
+    out: &mut String,
+    m: &Matrix,
+    heat: &Heat,
+    inside: usize,
+    covered: usize,
+    opts: &Options,
+) {
+    let labels = &opts.labels;
+    let t = &m.total;
+    stat(
+        out,
+        &labels.runs,
+        t.runs_unknown.to_string(),
+        escape(&labels.no_outcomes),
+        "runs",
+    );
+    stat(
+        out,
+        &labels.coverage,
+        if inside == 0 {
+            "&ndash;".into()
+        } else {
+            pct(covered as f64 / inside as f64)
+        },
+        format!("{covered} / {inside} {}", escape(&labels.cells)),
+        "coverage",
+    );
+    stat(
+        out,
+        &labels.time_recorded,
+        if t.seconds > 0.0 {
+            escape(&duration(t.seconds, labels))
+        } else {
+            "&ndash;".into()
+        },
+        if t.meters > 0.0 {
+            escape(&distance(t.meters))
+        } else {
+            String::new()
+        },
+        "time",
+    );
+    let thin = m.cells.iter().flatten().filter(|c| heat.thin(c)).count();
+    stat(
+        out,
+        &labels.thin_cells,
+        thin.to_string(),
+        escape(&labels.of_cells.replace("{n}", &covered.to_string())),
+        "thin",
+    );
+    out.push_str("</div>");
+    let _ = write!(
+        out,
+        "<p class=\"oo-info\">{}</p>",
+        escape(&labels.no_outcomes_note)
+    );
+    let counts = m.counts();
+    let outside = counts["outside"];
+    let unsampled = counts["unsampled"];
+    if inside + outside > 0 {
+        out.push_str("<div class=\"oo-bar\" aria-hidden=\"true\">");
+        for (class, n) in [
+            ("oo-heat-4", covered),
+            ("oo-unsampled", unsampled),
+            ("oo-outside", outside),
+        ] {
+            if n > 0 {
+                let _ = write!(
+                    out,
+                    "<span class=\"{class}\" style=\"flex-grow:{n}\"></span>"
+                );
+            }
+        }
+        out.push_str("</div>");
+    }
+    let (less, more) = if heat.by_time {
+        (&labels.less_time, &labels.more_time)
+    } else {
+        (&labels.less_runs, &labels.more_runs)
+    };
+    let _ = write!(
+        out,
+        "<div class=\"oo-legend\"><span class=\"oo-chip\">{}<span class=\"oo-ramp\">",
+        escape(&labels.state_covered)
+    );
+    for level in 1..=HEAT_LEVELS {
+        let _ = write!(out, "<i class=\"oo-sw oo-heat-{level}\"></i>");
+    }
+    let _ = write!(
+        out,
+        "</span><span class=\"oo-ramp-k\">{} &rarr; {}</span><b>{covered}</b></span>",
+        escape(less),
+        escape(more)
+    );
+    for state in [CellState::Unsampled, CellState::Outside] {
+        let _ = write!(
+            out,
+            "<span class=\"oo-chip\"><i class=\"oo-sw oo-{}\">{}</i>{}<b>{}</b></span>",
+            state.as_str(),
+            state_icon(state),
+            escape(state_label(state, labels)),
+            counts[state.as_str()]
+        );
+    }
+    let _ = write!(
+        out,
+        "<span class=\"oo-chip\"><i class=\"oo-sw oo-heat-2 oo-thin\"></i>{}</span></div>",
+        escape(&labels.few_runs.replace("{n}", &heat.min_runs.to_string()))
+    );
+}
+
+/// The grid of a panel, its notes, and the panel's end.
+#[allow(clippy::too_many_arguments)]
+fn panel_grid(
+    axes: (&AxesUi, &[String]),
+    truncated: bool,
+    out: &mut String,
+    m: &Matrix,
+    opts: &Options,
+    open: Option<&Targets>,
+    has_depth: &HasDepth,
+    heat: Option<&Heat>,
+) {
+    let labels = &opts.labels;
     let Some(x) = &m.x else {
         let _ = write!(
             out,
@@ -817,7 +1155,7 @@ fn panel(
                 }
             };
             let _ = write!(out, "<td data-oo-r=\"{r}\" data-oo-c=\"{c}\">");
-            cell_html(out, cell, &place, target, opts);
+            cell_html(out, cell, &place, target, heat, opts);
             out.push_str("</td>");
         }
         out.push_str("</tr>");

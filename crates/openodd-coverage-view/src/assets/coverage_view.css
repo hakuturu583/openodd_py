@@ -9,6 +9,8 @@
   --oo-unknown: #6b7c93; --oo-unknown-fill: color-mix(in oklab, var(--oo-unknown) 16%, var(--oo-surface));
   --oo-outside: #9aa1aa; --oo-outside-fill: color-mix(in oklab, var(--oo-outside) 26%, var(--oo-surface));
   --oo-unsampled-fill: var(--oo-surface);
+  /* Runs without outcomes: cells shaded by how long the runs stayed. */
+  --oo-heat: #2f6fed;
   /* Surfaces and ink. */
   --oo-surface: #ffffff; --oo-surface-2: #f6f7f9; --oo-border: #e4e7ec; --oo-border-strong: #cfd4dc;
   --oo-ink: #101828; --oo-ink-2: #475467; --oo-ink-3: #8a94a6; --oo-accent: #2f6fed;
@@ -21,7 +23,7 @@
 @media (prefers-color-scheme: dark) {
   .oo-cov:not([data-oo-theme="light"]), .oo-tip:not([data-oo-theme="light"]) {
     --oo-pass: #3ccf6a; --oo-fail: #f26b6b; --oo-flaky: #f5b82e; --oo-flaky-ink: #f8cf6b;
-    --oo-unknown: #8fa3bf; --oo-outside: #5d6673;
+    --oo-unknown: #8fa3bf; --oo-outside: #5d6673; --oo-heat: #5b8cff;
     --oo-pass-fill: color-mix(in oklab, var(--oo-pass) 20%, var(--oo-surface));
     --oo-fail-fill: color-mix(in oklab, var(--oo-fail) 20%, var(--oo-surface));
     --oo-flaky-fill: color-mix(in oklab, var(--oo-flaky) 22%, var(--oo-surface));
@@ -33,7 +35,7 @@
 }
 .oo-cov[data-oo-theme="dark"], .oo-tip[data-oo-theme="dark"] {
   --oo-pass: #3ccf6a; --oo-fail: #f26b6b; --oo-flaky: #f5b82e; --oo-flaky-ink: #f8cf6b;
-  --oo-unknown: #8fa3bf; --oo-outside: #5d6673;
+  --oo-unknown: #8fa3bf; --oo-outside: #5d6673; --oo-heat: #5b8cff;
   --oo-pass-fill: color-mix(in oklab, var(--oo-pass) 20%, var(--oo-surface));
   --oo-fail-fill: color-mix(in oklab, var(--oo-fail) 20%, var(--oo-surface));
   --oo-flaky-fill: color-mix(in oklab, var(--oo-flaky) 22%, var(--oo-surface));
@@ -170,6 +172,21 @@
 .oo-cov .oo-outside .oo-ic { background: transparent; color: var(--oo-ink-3); font-size: 13px; }
 .oo-cov .oo-sw.oo-outside { background: var(--oo-outside-fill); color: var(--oo-ink-3); }
 .oo-cov .oo-sw.oo-unsampled { background: var(--oo-surface); border: 1px dashed var(--oo-border-strong); }
+/* Runs without outcomes: a sequential ramp of one hue, by time in the cell. */
+.oo-cov .oo-heat-1 { background: color-mix(in oklab, var(--oo-heat) 10%, var(--oo-surface)); }
+.oo-cov .oo-heat-2 { background: color-mix(in oklab, var(--oo-heat) 24%, var(--oo-surface)); }
+.oo-cov .oo-heat-3 { background: color-mix(in oklab, var(--oo-heat) 42%, var(--oo-surface)); }
+.oo-cov .oo-heat-4 { background: color-mix(in oklab, var(--oo-heat) 64%, var(--oo-surface)); }
+.oo-cov .oo-heat-5 { background: color-mix(in oklab, var(--oo-heat) 86%, var(--oo-surface)); }
+.oo-cov .oo-cell.oo-heat-4, .oo-cov .oo-cell.oo-heat-5 { color: #fff; }
+.oo-cov .oo-cell.oo-heat-4 .oo-n, .oo-cov .oo-cell.oo-heat-5 .oo-n { color: rgba(255, 255, 255, .85); }
+.oo-cov .oo-cell.oo-thin, .oo-cov .oo-sw.oo-thin { border: 1.5px dashed color-mix(in oklab, var(--oo-ink-2) 70%, transparent); }
+.oo-cov .oo-ramp { display: inline-flex; gap: 2px; }
+.oo-cov .oo-ramp .oo-sw { width: 12px; border-radius: 3px; }
+.oo-cov .oo-ramp-k { color: var(--oo-ink-3); }
+.oo-cov .oo-info { margin: 12px 0 0; padding: 8px 12px; border-radius: 10px; font-size: 12.5px; color: var(--oo-ink-2);
+  background: color-mix(in oklab, var(--oo-heat) 7%, var(--oo-surface));
+  border: 1px solid color-mix(in oklab, var(--oo-heat) 22%, transparent); }
 /* Too few runs to judge: faded, with a dashed outline in its colour. */
 .oo-cov .oo-cell.oo-tentative { border: 1.5px dashed color-mix(in oklab, var(--oo-ink-3) 70%, transparent); opacity: .78; }
 .oo-cov .oo-sw.oo-tentative { border: 1.5px dashed var(--oo-ink-3); background: var(--oo-pass-fill); }
@@ -196,6 +213,7 @@
 .oo-tip .oo-tip-dot.oo-pass { background: var(--oo-pass); } .oo-tip .oo-tip-dot.oo-fail { background: var(--oo-fail); }
 .oo-tip .oo-tip-dot.oo-flaky { background: var(--oo-flaky); } .oo-tip .oo-tip-dot.oo-outside { background: var(--oo-outside); }
 .oo-tip .oo-tip-dot.oo-unknown { background: var(--oo-unknown); }
+.oo-tip .oo-tip-dot.oo-covered { background: var(--oo-heat); }
 .oo-tip .oo-tip-dot.oo-unsampled { background: transparent; border: 1px dashed var(--oo-ink-3); }
 .oo-tip dl { display: grid; grid-template-columns: 1fr auto; gap: 2px 16px; margin: 0; }
 .oo-tip dt { color: var(--oo-ink-2); } .oo-tip dd { margin: 0; text-align: right; font-weight: 600; }

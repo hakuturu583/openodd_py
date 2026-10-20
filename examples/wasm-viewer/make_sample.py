@@ -12,6 +12,9 @@ stages every gap 1.5 m longer than drawn, for the drift view to find.
 It also writes sample_compare.json: the same cases on the same ODD, run by a
 "next version" of the software that needs 8 m more gap in heavy rain (a
 regression) and 6 m less in none (an improvement), for the comparison view.
+
+And sample_log.json: the first sweep as if measured on recorded logs, with
+neither a case nor an outcome, for the matrix's view of exposure.
 """
 
 from __future__ import annotations
@@ -103,6 +106,11 @@ def main() -> None:
         out = HERE / name
         out.write_text(json.dumps(docs, separators=(",", ":")), encoding="utf-8")
         print(f"{out}: {len(docs)} runs, {out.stat().st_size // 1024} KiB")
+        if version == 1:
+            logs = [{**d, "case": None, "outcome": None} for d in docs]
+            out = HERE / "sample_log.json"
+            out.write_text(json.dumps(logs, separators=(",", ":")), encoding="utf-8")
+            print(f"{out}: {len(logs)} runs without outcomes, {out.stat().st_size // 1024} KiB")
 
 
 if __name__ == "__main__":
