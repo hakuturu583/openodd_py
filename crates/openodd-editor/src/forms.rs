@@ -41,37 +41,6 @@ fn key_options(d: &Document) -> Vec<(String, &'static str)> {
     out
 }
 
-/// Rename references in every section when a concept or module is renamed.
-fn rename_keys(d: &mut Document, renames: &[(String, String)]) {
-    fn walk(conds: &mut [Cond], renames: &[(String, String)]) {
-        for c in conds {
-            if let Some((_, new)) = renames.iter().find(|(old, _)| *old == c.key) {
-                c.key = new.clone();
-            }
-        }
-    }
-    for m in &mut d.modules {
-        for s in [&mut m.include, &mut m.exclude].into_iter().flatten() {
-            walk(&mut s.conditions, renames);
-            walk(&mut s.nested, renames);
-        }
-    }
-    fn defs(cs: &mut [crate::doc::Concept], renames: &[(String, String)]) {
-        for c in cs {
-            match &mut c.kind {
-                Kind::Group(children) => defs(children, renames),
-                Kind::Derived(ds) => {
-                    for d in ds {
-                        walk(&mut d.conditions, renames);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    defs(&mut d.taxonomy, renames);
-}
-
 // ---------------------------------------------------------------------------
 // The document
 // ---------------------------------------------------------------------------
@@ -201,7 +170,7 @@ pub fn ConceptEditor(id: u64) -> impl IntoView {
                 "{}{new}",
                 old_path.strip_suffix(old.as_str()).unwrap_or_default()
             );
-            rename_keys(d, &[(old_path, new_path), (old, new)]);
+            d.rename_keys(&[(old_path, new_path), (old, new)]);
         });
     };
     let remove = move |_| {
@@ -580,7 +549,7 @@ pub fn ModuleEditor(id: u64) -> impl IntoView {
         ctx.doc.update(|d| {
             let Some(m) = d.module_mut(id) else { return };
             let old = std::mem::replace(&mut m.name, new.clone());
-            rename_keys(d, &[(old, new)]);
+            d.rename_keys(&[(old, new)]);
         });
     };
     let root = Memo::new(move |_| ctx.doc.with(|d| d.module(id).is_some_and(|m| m.root)));

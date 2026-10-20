@@ -878,6 +878,7 @@ impl<'r> Reader<'r> {
                     let c = self.concepts.get_mut(&key).expect("still there");
                     c.kind = t.kind.clone();
                     c.literals = t.literals.clone();
+                    c.primitive = t.primitive.clone();
                     c.unit_type = t.unit_type.clone();
                     c.ordered = ordered;
                 }
@@ -2331,6 +2332,19 @@ ODD:
         assert_eq!(a("v").written_unit, "km/h");
         assert_eq!(a("rate").written_unit, "mm/h");
         assert_eq!(a("n").written_unit, "");
+        // A reference to a number takes its primitive too.
+        let text =
+            "TAXONOMY:\n  types:\n    lanes: integer count\n  road:\n    lane_count: lanes\n";
+        let odd = load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe)
+            .unwrap()
+            .odd;
+        assert_eq!(
+            odd.attribute("road.lane_count").unwrap().concept,
+            ConceptKind::Number {
+                primitive: "integer".into(),
+                unit_type: "count".into()
+            }
+        );
     }
 
     #[test]

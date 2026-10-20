@@ -398,6 +398,15 @@ pub fn yaml_of(text: &str) -> Value {
     }
 }
 
+/// A value as text that [`yaml_of`] reads back the same: a string as it is
+/// unless it would read as something else (`"1.0"`), anything else as YAML.
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) if matches!(yaml_of(s), Value::String(_)) => s.clone(),
+        other => inline(other),
+    }
+}
+
 /// A literal as YAML: a number stays one (`lane_count: [1, 2, 3]`).
 fn literal_yaml(text: &str) -> Value {
     match yaml_of(text) {
@@ -594,10 +603,14 @@ fn read_module(name: String, v: &Value, root: bool) -> Result<Module, String> {
     let active = match m.get("ACTIVE") {
         None => true,
         Some(Value::Bool(b)) => *b,
-        Some(v) => !text_of(v).eq_ignore_ascii_case("false"),
+        // As the reader: `false` or `no`, in any case.
+        Some(v) => !matches!(text_of(v).trim().to_lowercase().as_str(), "false" | "no"),
     };
     let metadata = match m.get("METADATA") {
-        Some(Value::Mapping(meta)) => meta.iter().map(|(k, v)| (text_of(k), text_of(v))).collect(),
+        Some(Value::Mapping(meta)) => meta
+            .iter()
+            .map(|(k, v)| (text_of(k), value_text(v)))
+            .collect(),
         _ => vec![],
     };
     let at = |e: String| format!("module {name}: {e}");
@@ -775,6 +788,47 @@ impl Document {
         let mut out = vec![];
         walk(&self.taxonomy, "", &mut out);
         out
+    }
+
+    /// Rename references in every section when a concept or module is renamed.
+    ///
+    /// `renames` are (old, new) names; a dotted one also renames the names
+    /// under it (`environment` -> `env` renames `environment.rain`).
+    pub fn rename_keys(&mut self, renames: &[(String, String)]) {
+        fn walk(conds: &mut [Cond], renames: &[(String, String)]) {
+            for c in conds {
+                for (old, new) in renames {
+                    if c.key == *old {
+                        c.key = new.clone();
+                        break;
+                    }
+                    if let Some(rest) = c.key.strip_prefix(&format!("{old}.")) {
+                        c.key = format!("{new}.{rest}");
+                        break;
+                    }
+                }
+            }
+        }
+        for m in &mut self.modules {
+            for s in [&mut m.include, &mut m.exclude].into_iter().flatten() {
+                walk(&mut s.conditions, renames);
+                walk(&mut s.nested, renames);
+            }
+        }
+        fn defs(cs: &mut [Concept], renames: &[(String, String)]) {
+            for c in cs {
+                match &mut c.kind {
+                    Kind::Group(children) => defs(children, renames),
+                    Kind::Derived(ds) => {
+                        for d in ds {
+                            walk(&mut d.conditions, renames);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        defs(&mut self.taxonomy, renames);
     }
 
     /// The labels the modules carry.
@@ -1082,7 +1136,7 @@ impl Module {
         if !self.metadata.is_empty() {
             let mut meta = Mapping::new();
             for (k, v) in &self.metadata {
-                meta.insert(text(k), text(v));
+                meta.insert(text(k), yaml_of(v));
             }
             m.insert("METADATA".into(), Value::Mapping(meta));
         }
@@ -1346,6 +1400,18 @@ mod tests {
     }
 
     #[test]
+    fn module_metadata_and_active_read_as_the_reader_does() {
+        let text = "TAXONOMY:\n  a: [x]\nMODULES:\n  m:\n    ACTIVE: no\n    METADATA: {version: \"1.0\", priority: 1, flags: [p, q], by: me}\n    INCLUDE_AND: {a: x}\n";
+        let doc = Document::from_yaml(text).unwrap();
+        assert!(!doc.modules[0].active);
+        // Numbers, lists and strings that look like numbers write back as written.
+        same(
+            &doc.to_yaml().unwrap(),
+            &text.replace("ACTIVE: no", "ACTIVE: false"),
+        );
+    }
+
+    #[test]
     fn a_binding_file_is_refused() {
         let err = Document::from_yaml("openodd: [x.yaml]\nprobes: {}\n").unwrap_err();
         assert!(err.contains("binding"), "{err}");
@@ -1401,6 +1467,19 @@ mod tests {
         assert_eq!(
             doc.lines_naming("urban_shuttle", "dark"),
             [(false, "dark holds".to_string())]
+        );
+    }
+
+    #[test]
+    fn renaming_a_group_renames_the_paths_under_it() {
+        let mut doc = Document::from_yaml(
+            "TAXONOMY:\n  environment:\n    rain: [none, heavy]\nMODULES:\n  m:\n    INCLUDE_AND: {environment.rain: none}\n",
+        )
+        .unwrap();
+        doc.rename_keys(&[("environment".into(), "env".into())]);
+        assert_eq!(
+            doc.modules[0].include.as_ref().unwrap().conditions[0].key,
+            "env.rain"
         );
     }
 
