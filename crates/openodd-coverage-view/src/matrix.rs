@@ -24,6 +24,10 @@
 //! ([`crate::stats::status`]). The renderer marks it so; its colour still
 //! says what the runs did.
 //!
+//! When no selected run recorded an outcome ([`Matrix::outcomes`] is false:
+//! runs measured on recorded logs, say), every visited cell is `Unknown`, and
+//! the renderer shows how long the runs stayed in each cell instead.
+//!
 //! A run's verdict is the whole run's: a run that failed after leaving a cell
 //! still counts as failed in it. `fail_at_cell` counts the runs that were in
 //! the cell when they failed (`outcome.failed_cell`), which tells the two
@@ -240,6 +244,10 @@ pub struct Matrix {
     /// The environments of the selected runs with an outcome: more than one
     /// means runs of different software are pooled.
     pub environments: Vec<Option<String>>,
+    /// Whether any selected run recorded an outcome. Without one -- runs
+    /// measured on recorded logs, say -- there is nothing to judge, only
+    /// where the runs went and how long they stayed.
+    pub outcomes: bool,
 }
 
 impl Matrix {
@@ -307,6 +315,7 @@ impl Matrix {
             "runs": self.runs,
             "unsampled_runs": self.unsampled,
             "environments": self.environments,
+            "outcomes": self.outcomes,
         })
     }
 }
@@ -555,6 +564,7 @@ impl Dataset {
             runs: selected.len(),
             unsampled: self.unsampled,
             environments,
+            outcomes: selected.iter().any(|r| r.passed.is_some()),
             query: q,
         }
     }

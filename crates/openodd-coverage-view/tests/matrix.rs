@@ -473,3 +473,63 @@ fn the_pickers_offer_the_free_attributes() {
     assert!(!html.contains("<option value=\"speed\""));
     assert!(html.contains("data-oo-at=\"at=speed%3D%5B30%2C%2060%5D\""));
 }
+
+/// Runs measured on recorded logs: cells, no outcome.
+fn log_docs() -> Vec<Json> {
+    vec![
+        run(&[SLOW_DRY_DAY, FAST_DRY_NIGHT], None, None, None),
+        run(&[SLOW_DRY_DAY, FAST_DRY_NIGHT], None, None, None),
+        run(&[SLOW_DRY_DAY, FAST_WET_DAY], None, None, None),
+        run(&[SLOW_DRY_DAY], None, None, None),
+    ]
+}
+
+#[test]
+fn without_outcomes_the_cells_show_the_time_spent() {
+    let data = Dataset::from_documents(&log_docs());
+    let m = data.matrix(&Query::default());
+    assert!(!m.outcomes);
+    assert_eq!(m.to_json()["outcomes"], false);
+    assert!(m.cells.iter().flatten().all(|c| c.runs == 0));
+    let html = html::fragment(&data, &m, &Options::default());
+    // Nothing about how the runs fared: no failures, flaky or failing cells.
+    for absent in [
+        "Failing cells",
+        "Flaky cells",
+        "Failed here",
+        "oo-badge",
+        "oo-tentative",
+    ] {
+        assert!(!html.contains(absent), "{absent}: {html}");
+    }
+    assert!(html.contains("no outcomes recorded") && html.contains("Time recorded"));
+    assert!(html.contains("class=\"oo-info\""));
+    // speed x rain: slow and dry has 4 runs, 4 s (the most); fast and dry 2.
+    assert!(
+        html.contains("class=\"oo-cell oo-unknown oo-heat-5\""),
+        "{html}"
+    );
+    assert!(html.contains("<span class=\"oo-rate\">4.0 s</span><span class=\"oo-n\">4 runs</span>"));
+    // Fast in heavy rain: 1 run of 1 s, below `min_runs`, so outlined as thin.
+    assert!(html.contains("oo-heat-3 oo-thin"), "{html}");
+    assert!(html.contains("class=\"oo-cell oo-unsampled\""));
+    assert!(html.contains("class=\"oo-cell oo-outside\""));
+    // A selection with no run is not one without outcomes.
+    let none = Query {
+        scenario: Some("other".into()),
+        ..Query::default()
+    };
+    let empty = html::fragment(&data, &data.matrix(&none), &Options::default());
+    assert!(!empty.contains("oo-info"));
+}
+
+#[test]
+fn one_outcome_keeps_the_verdict_view() {
+    let mut docs = log_docs();
+    docs.push(run(&[SLOW_DRY_DAY], Some(true), None, None));
+    let data = Dataset::from_documents(&docs);
+    let m = data.matrix(&Query::default());
+    assert!(m.outcomes);
+    let html = html::fragment(&data, &m, &Options::default());
+    assert!(html.contains("Failing cells") && !html.contains("oo-heat"));
+}

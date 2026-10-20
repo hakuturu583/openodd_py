@@ -59,6 +59,25 @@ laid out. With `min_seconds`, a run counts there when its stay in the whole
 region reaches it, so a run that stayed briefly in several cells can count in
 the header and in no single cell.
 
+### Runs without outcomes (logs)
+
+Runs measured on recorded logs -- a drive log replayed through the ODD's
+attributes -- have cells but no outcome: there is nothing to judge, only where
+they went. When no run the matrix selects recorded an outcome
+(`matrix["outcomes"]` is false), it says so and shows exposure instead:
+
+- each visited cell is shaded on one blue ramp by the time the runs stayed in
+  it (by how many runs were in it, when no time was recorded), relative to the
+  cell with the most, on a square-root scale; it reads that time and its runs;
+- the summary is the runs, how much of the ODD they covered, the time (and
+  distance) recorded, and the *thinly covered* cells: visited by fewer than
+  `min_runs` runs, which a dashed outline marks;
+- nothing about failures: no failure rate, flaky or failing cells, or badge.
+
+One run with an outcome is enough for the usual view; the runs without one
+are then counted as *covered, no outcome*. The ramp's hue is `--oo-heat`. The
+[comparison](compare.md) of two sets does not have this mode yet.
+
 ## Embedding
 
 ```python

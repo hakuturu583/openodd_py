@@ -36,6 +36,7 @@
   <section class="load" id="drop">
     <label class="file">Open coverage files<input type="file" id="files" multiple accept=".json,application/json"></label>
     <button type="button" id="sample">Load the sample</button>
+    <button type="button" id="sample-log">Load the sample as logs</button>
     <span>or drop <code>*_coverage.json</code> files here</span>
     <span id="status"></span>
   </section>
@@ -103,13 +104,19 @@
     const coverageAttrs = JSON.parse(viewer.attributes());
     const wanted = [hash.get("x"), hash.get("y"), ...caseAttrs].filter(Boolean);
     const shared = [...new Set(wanted)].filter((a) => coverageAttrs.includes(a));
+    // No case with an outcome to place (runs measured on recorded logs, say):
+    // no case plot or scenario realisation to show, only the coverage matrix.
+    const driftEl = document.getElementById("drift");
+    const drawn = viewer.cases > 0;
+    casesEl.hidden = driftEl.hidden = !drawn;
+    if (!drawn) casesEl.innerHTML = driftEl.innerHTML = "";
     views = [
-      mount(viewer, casesEl, {
+      ...(drawn ? [mount(viewer, casesEl, {
         view: "cases", id: "cases-plot",
         x: hash.get("x") || undefined, y: hash.get("y") || undefined,
         basis: hash.get("basis") || undefined, drift_leaders: hash.has("leaders"),
       }),
-      mount(viewer, document.getElementById("drift"), { view: "drift", id: "drift-view" }),
+      mount(viewer, driftEl, { view: "drift", id: "drift-view" })] : []),
       mount(viewer, coverageEl, {
         view: "coverage", id: "coverage-matrix",
         // By default, the case plot's attributes the matrix has too.
@@ -156,12 +163,13 @@
     drop.classList.remove("over");
     readFiles([...e.dataTransfer.files]);
   });
-  async function loadSample() {
-    const url = hash.get("data") || "./sample.json";
+  async function loadSample(url = hash.get("data") || "./sample.json", name = url === "./sample.json" ? "sample" : url) {
     const docs = await (await fetch(url)).json();
-    show(docs, url === "./sample.json" ? "sample" : url);
+    show(docs, name);
   }
-  document.getElementById("sample").addEventListener("click", loadSample);
+  document.getElementById("sample").addEventListener("click", () => loadSample("./sample.json"));
+  // The same runs without cases or outcomes, as measured on recorded logs.
+  document.getElementById("sample-log").addEventListener("click", () => loadSample("./sample_log.json", "sample log"));
   await loadSample();
 
   // The comparison: two sets of runs on the same ODD. #compare=URL loads
