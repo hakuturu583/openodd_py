@@ -12,7 +12,7 @@ use crate::doc::{tail, Concept, Document, Kind, KindTag, Module};
 use crate::forms::{ConceptEditor, ModuleEditor, Settings};
 use crate::icons::{concept_icon, Icon};
 use crate::io;
-use crate::viz::{Domain, Legend, ModuleGraph, OddMap, OddSentence, StateBar};
+use crate::viz::{Domain, Legend, ModuleGraph, OddMap, OddSentence, StateBar, StructureTree};
 
 pub const URBAN: &str = include_str!("../examples/urban.yaml");
 pub const DEFAULT: &str = include_str!("../../../python/openodd/odds/default/default.yaml");
@@ -526,6 +526,8 @@ fn Ring(out: usize, total: usize) -> impl IntoView {
 #[component]
 fn MapView() -> impl IntoView {
     let ctx = ctx();
+    // A phone shows the structure as a tree: a graph does not fit it.
+    let narrow = crate::viz::narrow_screen();
     let stats = move || {
         ctx.report.with(|r| {
             let r = r.as_ref().ok()?;
@@ -585,7 +587,7 @@ fn MapView() -> impl IntoView {
                 }
             })}
             <div class="card">
-                <div class="card-title"><Icon name="graph"/>"Structure"<span class="hint">"roots → modules → attributes · hover to trace, click to edit"</span></div>
+                <div class="card-title"><Icon name="graph"/>"Structure"<span class="hint">{move || if narrow.get() { "roots → modules → attributes · tap to edit" } else { "roots → modules → attributes · hover to trace, click to edit" }}</span></div>
                 <details class="sentence-box" open>
                     <summary><Icon name="doc"/>"In words"</summary>
                     <OddSentence/>
@@ -594,13 +596,23 @@ fn MapView() -> impl IntoView {
                     <span><i class="ln include"></i>"include"</span>
                     <span><i class="ln exclude"></i>"exclude"</span>
                     <span><i class="ln carries"></i>"label"</span>
-                    <span class="hint">"Hover an arrow for the conditions behind it. With test values set, nodes show each module's verdict."</span>
+                    <span class="hint">{move || if narrow.get() {
+                        "Each row says the condition that puts it there. Tap a name to edit it."
+                    } else {
+                        "Hover or tap an arrow for the conditions behind it. With test values set, nodes show each module's verdict."
+                    }}</span>
                 </div>
+                {move || if narrow.get() {
+                    view! { <StructureTree/> }.into_any()
+                } else {
+                    view! {
                 <ModuleGraph
-                    on_select=Callback::new(move |(id, attr): (String, bool)| {
-                        if attr { ctx.select_attribute(&id) } else { ctx.select_module(&id) }
-                    })
-                />
+                            on_select=Callback::new(move |(id, attr): (String, bool)| {
+                                if attr { ctx.select_attribute(&id) } else { ctx.select_module(&id) }
+                            })
+                        />
+                    }.into_any()
+                }}
             </div>
             <div class="card">
                 <div class="card-title"><Icon name="grid"/>"ODD map"<span class="hint">"two attributes at once · click a cell to test it"</span></div>
