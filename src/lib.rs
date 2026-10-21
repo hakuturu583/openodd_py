@@ -24,6 +24,7 @@ pub mod sources;
 pub mod transmission;
 pub mod units;
 pub mod value;
+pub mod weighted;
 pub mod yaml;
 
 #[cfg(feature = "python")]

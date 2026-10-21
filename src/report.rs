@@ -365,6 +365,10 @@ pub struct CoverageReport {
     /// Per scenario, environment and ODD attribute list: the runs' outcomes
     /// per ODD cell. Empty when no run recorded both cells and an outcome.
     pub cell_flakiness: Vec<CellFlakiness>,
+    /// Per scenario and environment: the naturalistic failure rate of the
+    /// runs that recorded an importance-sampling weight
+    /// (`crate::weighted`). Empty when none did.
+    pub weighted_outcomes: Vec<crate::weighted::WeightedOutcome>,
 }
 
 /// How flaky a case is (see `crate::flaky::Metrics`).
@@ -523,6 +527,15 @@ impl CoverageReport {
                 "entries": self.entries.iter().filter(|e| &e.group == g).map(MergedEntry::to_json).collect::<Vec<_>>(),
             }))).collect::<Map<_, _>>(),
         });
+        // Only when there is any: a report without weights is unchanged.
+        if !self.weighted_outcomes.is_empty() {
+            out["weighted_outcomes"] = Json::Array(
+                self.weighted_outcomes
+                    .iter()
+                    .map(crate::weighted::WeightedOutcome::to_json)
+                    .collect(),
+            );
+        }
         // Only when there is any: a report without outcomes is unchanged.
         if !self.cell_flakiness.is_empty() {
             out["cell_flakiness"] = Json::Array(
@@ -685,6 +698,7 @@ impl CoverageReport {
             }
         }
         lines.extend(cases_markdown(&self.cases, MAX_CASE_ROWS));
+        lines.extend(crate::weighted::markdown(&self.weighted_outcomes));
         lines.extend(crate::cell_flakiness::markdown(
             &self.cell_flakiness,
             crate::cell_flakiness::MAX_CELL_ROWS,
@@ -1101,6 +1115,7 @@ pub fn merge_coverage(documents: &[Json]) -> Result<CoverageReport> {
         }
     }
     report.cell_flakiness = crate::cell_flakiness::cell_flakiness(documents);
+    report.weighted_outcomes = crate::weighted::weighted_outcomes(documents);
     Ok(report)
 }
 

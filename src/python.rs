@@ -1314,6 +1314,18 @@ impl CoverageReport {
     fn cases_json(&self) -> String {
         serde_json::Value::Array(self.inner.cases.iter().map(|c| c.to_json()).collect()).to_string()
     }
+    /// The naturalistic failure rate of the weighted runs, per scenario and
+    /// environment, as JSON.
+    fn weighted_outcomes_json(&self) -> String {
+        serde_json::Value::Array(
+            self.inner
+                .weighted_outcomes
+                .iter()
+                .map(|g| g.to_json())
+                .collect(),
+        )
+        .to_string()
+    }
     /// The runs' outcomes per ODD cell, per scenario, environment and
     /// attribute list, as JSON.
     fn cell_flakiness_json(&self) -> String {

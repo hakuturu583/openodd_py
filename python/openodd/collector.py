@@ -56,7 +56,7 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from .backend import Backend, default_backend
 from .cells import OddCells
@@ -523,6 +523,7 @@ class CoverageCollector:
         self._passed: Optional[bool] = None
         self._failed_at: Optional[float] = None
         self._environment: Optional[str] = None
+        self._weight: Optional[Union[float, str]] = None
 
     def record_case(self, case: Any, space: Optional[Any] = None) -> None:
         """Record the case this run ran: an :class:`~.sampler.OddSample`.
@@ -550,6 +551,7 @@ class CoverageCollector:
         *,
         failed_at: Optional[float] = None,
         environment: Optional[str] = None,
+        weight: Optional[float] = None,
     ) -> None:
         """Record whether the run passed.
 
@@ -566,9 +568,15 @@ class CoverageCollector:
             environment: What the run ran on, as an opaque ID (a digest of
                 the software and its dependencies' versions): the report
                 pools per-cell outcomes only over runs of the same one.
+            weight: The run's importance-sampling likelihood ratio (NADE's
+                weight, say), for the report's naturalistic failure rate
+                (:attr:`~.report.CoverageReport.weighted_outcomes`).
+                ``None`` for a run not importance sampled. If not a finite
+                number of at least 0, the run is left out of the weighted
+                outcomes, with a warning.
 
-        Each call replaces what an earlier one recorded, the time and the
-        environment included.
+        Each call replaces what an earlier one recorded, the time, the
+        environment and the weight included.
         """
         self._passed = bool(passed)
         self._failed_at = None
@@ -583,6 +591,21 @@ class CoverageCollector:
             else:
                 self._failed_at = at  # compared unrounded; written as the samples' times are
         self._environment = None if environment is None else str(environment)
+        self._weight = None
+        if weight is not None:
+            w = math.nan
+            if isinstance(weight, (int, float)) and not isinstance(weight, bool):
+                w = float(weight)
+            if math.isfinite(w) and w >= 0.0:
+                self._weight = w
+            else:
+                # Written as a string, so the merge leaves the run out of the
+                # weighted estimate instead of counting it with weight 1.
+                self._weight = str(weight)
+                logger.warning(
+                    "coverage: weight=%r is not a likelihood ratio; the run is left out of the weighted outcomes",
+                    weight,
+                )
 
     def _outcome(self) -> Optional[dict[str, Any]]:
         """The coverage file's ``outcome``: only what was recorded."""
@@ -596,6 +619,8 @@ class CoverageCollector:
                 outcome["failed_cell"] = cell
         if self._environment is not None:
             outcome["environment"] = self._environment
+        if self._weight is not None:
+            outcome["weight"] = self._weight
         return outcome
 
     def start(self, context: Any, elapsed: float) -> None:

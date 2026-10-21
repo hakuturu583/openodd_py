@@ -22,6 +22,13 @@ cell (:attr:`CoverageReport.cell_flakiness`, a :class:`CellFlakiness` per
 scenario, environment and attribute list): for every cell -- one bucket of
 each of the ODD's attributes -- the runs that drove through it, how many of
 them failed, and how many failed while in it.
+
+A run sampled with importance sampling records its likelihood ratio
+(``outcome.weight``, :meth:`~.collector.CoverageCollector.record_outcome`).
+The report then estimates the *naturalistic* failure rate per scenario and
+environment (:attr:`CoverageReport.weighted_outcomes`, a
+:class:`WeightedOutcome` each): the mean of the runs' weighted failures, with
+its 95% interval and how far it has converged.
 """
 
 from __future__ import annotations
@@ -49,6 +56,7 @@ __all__ = [
     "CoverageReport",
     "MergedEntry",
     "OddExposure",
+    "WeightedOutcome",
     "find_coverage_files",
     "load_and_merge",
     "load_coverage_files",
@@ -273,6 +281,46 @@ class CellFlakiness:
         return [r for r in self.rows if r.status(min_runs, (0.0, 1.0)) == "failing"]
 
 
+@dataclass(frozen=True)
+class WeightedOutcome:
+    """The naturalistic failure rate of one scenario and environment's runs,
+    each weighted by its importance-sampling likelihood ratio.
+
+    Over ``runs`` runs of weights ``w_i`` (1 for a run that recorded none),
+    ``f_i`` 1 for a failure:
+
+    Attributes:
+        scenario: The scenario.
+        environment: What the runs ran on (``outcome.environment``), if any.
+        runs: Runs with an outcome.
+        runs_failed: Of those, how many failed.
+        weight_sum: ``Σ w_i``.
+        failure_rate: ``Σ w_i f_i / runs``, the unbiased estimate.
+        ci_low: Its 95% normal interval, clipped to [0, 1].
+        ci_high: Its upper end.
+        relative_half_width: The interval's half width over the rate, how far
+            it has converged (TeraSim's NADE stops below 0.3); ``None`` while
+            no run failed.
+        self_normalised_rate: ``Σ w_i f_i / Σ w_i``, biased but of lower
+            variance; ``None`` when the weights sum to 0.
+        effective_runs: Kish's ``(Σ w_i)² / Σ w_i²``.
+        documents: The coverage files of the group, by their index in the merge.
+    """
+
+    scenario: str
+    environment: Optional[str]
+    runs: int
+    runs_failed: int
+    weight_sum: float
+    failure_rate: float
+    ci_low: float
+    ci_high: float
+    relative_half_width: Optional[float]
+    self_normalised_rate: Optional[float]
+    effective_runs: float
+    documents: list[int] = field(default_factory=list)
+
+
 class CoverageReport:
     """Coverage merged over a number of runs."""
 
@@ -308,6 +356,13 @@ class CoverageReport:
         when no run recorded both an outcome and the ODD's cells table (a run
         of no steps has one, and counts with no cell visited)."""
         return [CellFlakiness.from_dict(raw) for raw in json.loads(self._core.cell_flakiness_json())]
+
+    @property
+    def weighted_outcomes(self) -> list[WeightedOutcome]:
+        """The naturalistic failure rate per scenario and environment, of the
+        groups where a run recorded an importance-sampling weight, in the order
+        merged. Empty when none did."""
+        return [WeightedOutcome(**raw) for raw in json.loads(self._core.weighted_outcomes_json())]
 
     def flaky_cells(self, min_runs: int = CELL_MIN_RUNS,
                     band: tuple[float, float] = CELL_BAND) -> list[tuple[CellFlakiness, CellRow]]:
