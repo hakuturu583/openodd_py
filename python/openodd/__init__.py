@@ -27,6 +27,7 @@ from importlib import metadata as _metadata
 from ._core import GitSourceError, OpenOddError, UnitError, Units, convert, normalize_unit
 from .cells import MISSING, OddCells
 from .backend import Backend, Probe, default_backend, import_callable, set_default_backend
+from .rules import Rules, RulesError
 from .items import (
     ABOVE_RANGE,
     BELOW_RANGE,
@@ -161,6 +162,8 @@ __all__ = [
     "UNDECIDED",
     "BUNDLED_ODDS",
     "Backend",
+    "Rules",
+    "RulesError",
     "bundled_odd",
     "CoverGroup",
     "CoverItem",
