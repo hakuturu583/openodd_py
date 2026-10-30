@@ -82,9 +82,14 @@ where (`weather_rules.yaml: quantities.tire_friction.rule_bases.water.rules[1].i
 - every field known, every term and rule well formed, every clause naming an
   input of its rule base and a term of that input;
 - every input's universe covered by its terms;
-- some rule firing at every point of a grid over the inputs' universes (at
-  most 201 points per input, 20000 in all), so no weather the inputs can hold
-  is left without a value.
+- some rule firing everywhere the inputs can be, so no weather the inputs can
+  hold is left without a value. The terms are piecewise linear between their
+  corners, so a gap -- in what the terms cover, or in where the rules fire --
+  begins and ends at a corner: the checks read each input at its terms'
+  corners (and a bell's centre), a few evenly spaced points and the midpoint
+  of each two neighbours, and a rule base at every combination of those. One
+  whose combinations number more than a million is refused, to be split into
+  rule bases reading fewer inputs.
 
 Which inputs exist is the backend's to say: `Backend(rule_inputs=[...])`
 refuses rules reading any other, its own and a run's alike.

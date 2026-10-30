@@ -39,8 +39,9 @@
 //! their outputs, output by output.
 //!
 //! A rule set is checked when read: every term and rule well formed, every
-//! input's universe covered by its terms, and some rule firing everywhere on a
-//! grid over the inputs' universes. A value outside an input's universe is
+//! input's universe covered by its terms, and some rule firing everywhere the
+//! inputs can be -- read at the terms' corners and between them, which finds
+//! any gap, since the terms are piecewise linear between their corners. A value outside an input's universe is
 //! clamped to it. Which inputs exist is the backend's to say
 //! ([`RuleSet::check_inputs`]); one an input names a `default` for may be left
 //! out.
@@ -53,9 +54,11 @@ use crate::yaml::{parse_all, Node, NodeExt};
 
 /// The rule file format this module reads.
 pub const VERSION: i64 = 1;
-/// The points per input the grid check samples, at most, and in all.
-const CHECK_POINTS: usize = 201;
-const CHECK_TOTAL: f64 = 20000.0;
+/// The evenly spaced points per input the checks add to its terms' own.
+const CHECK_SPACED: usize = 11;
+/// The most points a rule base's firing check evaluates: one reading more
+/// inputs than that lets be checked is refused.
+pub const CHECK_LIMIT: usize = 1_000_000;
 
 /// A fuzzy term: how much a value belongs to it, 0 to 1.
 #[derive(Debug, Clone, PartialEq)]
@@ -130,9 +133,32 @@ impl Input {
         x.clamp(self.low, self.high)
     }
 
-    fn samples(&self, count: usize) -> Vec<f64> {
-        let step = (self.high - self.low) / (count - 1) as f64;
-        (0..count).map(|i| self.low + i as f64 * step).collect()
+    /// The points the checks read the input at: its universe's ends, its
+    /// terms' corners (and a bell's centre) inside it, a few evenly spaced
+    /// ones, and the midpoint of each two neighbours. Its terms are piecewise
+    /// linear between their corners, so where none covers it, or where no
+    /// rule fires, begins and ends at a corner: one of these points is in it.
+    fn check_points(&self) -> Vec<f64> {
+        let mut corners: Vec<f64> = vec![self.low, self.high];
+        for m in self.terms.values() {
+            match m {
+                Membership::Triangle(p) => corners.extend(p),
+                Membership::Trapezoid(p) => corners.extend(p),
+                Membership::Gaussian { mean, .. } => corners.push(*mean),
+            }
+        }
+        let step = (self.high - self.low) / (CHECK_SPACED - 1) as f64;
+        corners.extend((0..CHECK_SPACED).map(|i| self.low + i as f64 * step));
+        corners.retain(|x| self.low <= *x && *x <= self.high);
+        corners.sort_by(f64::total_cmp);
+        corners.dedup();
+        let mut out = Vec::with_capacity(corners.len() * 2);
+        for w in corners.windows(2) {
+            out.push(w[0]);
+            out.push((w[0] + w[1]) / 2.0);
+        }
+        out.push(*corners.last().expect("the universe's ends"));
+        out
     }
 }
 
@@ -226,11 +252,22 @@ impl RuleBase {
             .collect()
     }
 
-    /// Some rule fires at every point of a grid over the inputs' universes.
+    /// Some rule fires everywhere the inputs can be: at every combination of
+    /// their check points ([`Input::check_points`]). A clause reads one input,
+    /// so where no rule fires is made of cells between those points.
     fn check(&self) -> Result<()> {
-        let n = self.inputs.len() as i32;
-        let per = (CHECK_TOTAL.powf(1.0 / n as f64) as usize).clamp(2, CHECK_POINTS);
-        let grids: Vec<Vec<f64>> = self.inputs.iter().map(|i| i.samples(per)).collect();
+        let grids: Vec<Vec<f64>> = self.inputs.iter().map(Input::check_points).collect();
+        let total = grids
+            .iter()
+            .try_fold(1usize, |acc, g| acc.checked_mul(g.len()))
+            .filter(|t| *t <= CHECK_LIMIT);
+        if total.is_none() {
+            return Err(Error::value(format!(
+                "its {} inputs and their terms make more than {CHECK_LIMIT} points to check; \
+                 split it into rule bases reading fewer inputs",
+                self.inputs.len()
+            )));
+        }
         let mut index = vec![0usize; grids.len()];
         loop {
             let point: Vec<f64> = index.iter().zip(&grids).map(|(k, g)| g[*k]).collect();
@@ -641,7 +678,7 @@ fn read_input(name: &str, node: &Node, at: &Where) -> Result<Input> {
         terms,
         default,
     };
-    for x in input.samples(CHECK_POINTS) {
+    for x in input.check_points() {
         let most = input
             .terms
             .values()
@@ -1082,6 +1119,60 @@ quantities:
             assert!(e.contains(expected), "expected {expected:?} in {e:?}");
             assert!(e.starts_with("grip.yaml: "), "{e}");
         }
+    }
+
+    #[test]
+    fn a_gap_between_the_evenly_spaced_points_is_found() {
+        // Nothing covers 33.3, which no evenly spaced point falls on.
+        let text = GRIP
+            .replace(
+                "dry: {trapezoid: [0, 0, 0, 50]}",
+                "dry: {triangle: [0, 0, 33.3]}",
+            )
+            .replace(
+                "wet: {triangle: [0, 50, 100]}",
+                "wet: {triangle: [33.3, 100, 100]}",
+            )
+            .replace(
+                "flooded: {trapezoid: [50, 100, 100, 100]}",
+                "flooded: {triangle: [99, 100, 100]}",
+            );
+        let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
+        assert!(e.contains("no term covers water = 33.3,"), "{e}");
+        // Covered there, but by a term no rule names: no rule fires.
+        let text = text.replace(
+            "flooded: {triangle: [99, 100, 100]}",
+            "flooded: {triangle: [33, 33.3, 33.6]}",
+        );
+        let text = text.replace(
+            "          - if: (water IS flooded)\n            then: {low: 0.45, high: 0.65}\n",
+            "",
+        );
+        let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
+        assert!(e.contains("no rule fires at water=33.3"), "{e}");
+    }
+
+    #[test]
+    fn a_rule_base_too_wide_to_check_is_refused_at_once() {
+        let mut inputs = String::new();
+        let mut clause = Vec::new();
+        for k in 0..25 {
+            inputs.push_str(&format!(
+                "          x{k}:\n            universe: [0, 1]\n            terms: {{any: {{trapezoid: [0, 0, 1, 1]}}}}\n"
+            ));
+            clause.push(format!("(x{k} IS any)"));
+        }
+        let text = format!(
+            "version: 1\nquantities:\n  q:\n    rule_bases:\n      wide:\n        inputs:\n{inputs}        rules:\n          - if: {}\n            then: {{v: 1}}\n",
+            clause.join(" AND ")
+        );
+        let started = std::time::Instant::now();
+        let e = RuleSet::parse(&text, "wide.yaml").unwrap_err().to_string();
+        assert!(
+            e.contains("split it into rule bases reading fewer inputs"),
+            "{e}"
+        );
+        assert!(started.elapsed().as_secs() < 1);
     }
 
     #[test]
