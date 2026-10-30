@@ -95,8 +95,10 @@ else is this library's.
   simulator's rain to the road's grip -- a backend may write as Sugeno rules in YAML
   (`Rules`, inferred in the Rust core with simpful's operators). It holds its own
   (`Backend.rules`), a run reads another file over them (`Backend.use_rules`), and
-  `Backend.derived_range("tire_friction", {"wetness": 70})` gives the range
-  ([docs/rules.md](docs/rules.md)).
+  `Backend.derived_range("tire_friction", {"water": 70})` gives the range
+  ([docs/rules.md](docs/rules.md)). In the browser, `RulesView` draws them as an
+  embeddable component: terms, firing rules, outputs and the response curve
+  ([docs/wasm.md](docs/wasm.md#fuzzy-rules)).
 
 A `default` ODD ships with the package (`openodd.bundled_odd()`,
 [python/openodd/odds/default](python/openodd/odds/default)): every attribute a road-vehicle

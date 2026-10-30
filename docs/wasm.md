@@ -1,7 +1,8 @@
 # The views in the browser: WebAssembly
 
-`crates/openodd-wasm` builds the [coverage view](coverage_view.md) and the
-[case plot](case_plot.md) for `wasm32-unknown-unknown`. A web page computes
+`crates/openodd-wasm` builds the [coverage view](coverage_view.md), the
+[case plot](case_plot.md) and the [fuzzy rules](rules.md) view for
+`wasm32-unknown-unknown`. A web page computes
 them from coverage documents in the browser. There is no Python and no
 server, and nothing is uploaded. The case plot's background is openodd's own
 flaky model, fitted in the browser: the same Gaussian-process classifier,
@@ -83,6 +84,62 @@ and the options as JSON strings:
 | `coverage_html(query, options)`, `coverage_json(query)` | the coverage matrix |
 | `drift_html(query, options)`, `drift_json(query, options)` | the scenario's realisation: drawn against measured, with the knob calibration ([drift.md](drift.md)); `options.knobs` = `{attribute: [scale, offset]}` |
 | `styles()`, `script()` | the components' CSS and script |
+
+## Fuzzy rules
+
+`RulesView` reads a backend's [fuzzy rules](rules.md) (the YAML text of a
+rule file) and renders them as a component: for one quantity, a slider per
+input, the outputs there -- the quantity's, and each rule base's, the one
+`combine` takes marked -- the response chart (the outputs as one input moves
+across its universe, each rule base dashed behind the quantity), and per rule
+base each input's terms with the value chosen, and the rules with how
+strongly each fires. The same engine as Python's `openodd.Rules` computes it.
+
+```html
+<div id="rules"></div>
+<script type="module">
+  import init, { RulesView, styles, script } from "./pkg/openodd_wasm.js";
+  import { install, mount } from "./pkg/viewer.js";
+
+  await init();
+  install({ styles, script });
+  const rules = new RulesView(yamlText, "weather_rules.yaml");   // throws on a bad file, saying where
+  rules.merge(measuredText, "measured.yaml");                    // another file over it, quantity by quantity
+  const view = mount(rules, document.getElementById("rules"), {
+    view: "rules", quantity: "visibility", inputs: { fog_density: 80 }, x: "fog_density",
+  });
+  view.set({ inputs: { sun_altitude_angle: -10 } });
+</script>
+```
+
+- **The sliders and pickers** dispatch `openodd:rules` (`detail.inputs`,
+  `detail.quantity`, `detail.x`). `mount` cancels it, renders again, and puts
+  the keyboard back on the control used. A slider dispatches on release and
+  shows its value while it moves.
+- **`options`** takes the query (`quantity`, `inputs`: `{name: value}`, `x`:
+  the input the response chart moves) and the component's options (`id`,
+  `labels`, `samples`: points per curve, 121 by default). An input not given
+  reads its `default`, else the middle of its universe.
+- **Words** (`labels`): `inputs`, `outputs`, `combined`, `response`, `vary`,
+  `rules`, `firing`, `terms`, `quantity`, `combine`, `rule_base`,
+  `rule_bases`.
+- **Colours**: the coverage view's `--oo-*` variables and theme
+  (`data-oo-theme`, or the reader's light or dark scheme); the terms' and rule
+  bases' series through `--oo-rules-s0` to `s7`, the outputs' through
+  `--oo-rules-o0` to `o3`.
+
+| Method | Returns |
+|---|---|
+| `new RulesView(text, source)`, `merge(text, source)` | read a rule file (`merge`: another over it) |
+| `quantities()` | a JSON array |
+| `inputs(quantity)` | a JSON array of `{name, universe, default}` |
+| `evaluate(quantity, inputs)` | the outputs at `inputs` (JSON objects) |
+| `rules_html(query, options)` | the component |
+| `rules_json(query, options)` | its data: each term's curve and degree, each rule's firing, the outputs, the response |
+
+[`examples/wasm-viewer/rules.html`](../examples/wasm-viewer/rules.html) is an
+editor: the rule file on one side, the component on the other, following
+every edit (a file that does not read shows why and keeps the last view).
 
 ## Comparing two sets on the same ODD
 

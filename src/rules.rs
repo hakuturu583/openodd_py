@@ -125,7 +125,8 @@ pub struct Input {
 }
 
 impl Input {
-    fn clamp(&self, x: f64) -> f64 {
+    /// `x` clamped to the universe.
+    pub fn clamp(&self, x: f64) -> f64 {
         x.clamp(self.low, self.high)
     }
 
@@ -210,6 +211,21 @@ impl RuleBase {
         Ok(sums.into_iter().map(|(o, s)| (o, s / total)).collect())
     }
 
+    /// How strongly each rule fires at `values` (one per input, in order),
+    /// each clamped to its input's universe.
+    pub fn firing(&self, values: &[f64]) -> Vec<f64> {
+        let clamped: Vec<f64> = self
+            .inputs
+            .iter()
+            .zip(values)
+            .map(|(i, v)| i.clamp(*v))
+            .collect();
+        self.rules
+            .iter()
+            .map(|r| r.expr.holds(&self.inputs, &clamped))
+            .collect()
+    }
+
     /// Some rule fires at every point of a grid over the inputs' universes.
     fn check(&self) -> Result<()> {
         let n = self.inputs.len() as i32;
@@ -271,32 +287,7 @@ impl Quantity {
     /// Each output at `inputs`, by name; an input not given reads its default.
     pub fn evaluate(&self, inputs: &IndexMap<String, f64>) -> Result<IndexMap<String, f64>> {
         let mut joined: Option<IndexMap<String, f64>> = None;
-        for base in &self.rule_bases {
-            let mut values = Vec::with_capacity(base.inputs.len());
-            for i in &base.inputs {
-                match inputs.get(&i.name).copied().or(i.default) {
-                    Some(v) if v.is_finite() => values.push(v),
-                    Some(v) => {
-                        return Err(Error::value(format!(
-                            "{}: {}.{}: {} is {}, not a finite number",
-                            self.source,
-                            self.name,
-                            base.name,
-                            i.name,
-                            py_float_repr(v)
-                        )))
-                    }
-                    None => {
-                        return Err(Error::value(format!(
-                            "{}: {}.{} reads {}, which was not given and has no default",
-                            self.source, self.name, base.name, i.name
-                        )))
-                    }
-                }
-            }
-            let out = base.evaluate(&values).map_err(|e| {
-                Error::value(format!("{}: {}.{}: {e}", self.source, self.name, base.name))
-            })?;
+        for (_, out) in self.evaluate_each(inputs)? {
             joined = Some(match joined {
                 None => out,
                 Some(mut acc) => {
@@ -312,6 +303,50 @@ impl Quantity {
             });
         }
         Ok(joined.expect("a quantity has a rule base"))
+    }
+
+    /// Each rule base's outputs at `inputs`, before `combine` joins them.
+    pub fn evaluate_each(
+        &self,
+        inputs: &IndexMap<String, f64>,
+    ) -> Result<Vec<(String, IndexMap<String, f64>)>> {
+        let mut out = Vec::with_capacity(self.rule_bases.len());
+        for base in &self.rule_bases {
+            let values = self.values_of(base, inputs)?;
+            let outputs = base.evaluate(&values).map_err(|e| {
+                Error::value(format!("{}: {}.{}: {e}", self.source, self.name, base.name))
+            })?;
+            out.push((base.name.clone(), outputs));
+        }
+        Ok(out)
+    }
+
+    /// The values `base` reads of `inputs`, in its inputs' order: each given
+    /// one, else its default.
+    pub fn values_of(&self, base: &RuleBase, inputs: &IndexMap<String, f64>) -> Result<Vec<f64>> {
+        let mut values = Vec::with_capacity(base.inputs.len());
+        for i in &base.inputs {
+            match inputs.get(&i.name).copied().or(i.default) {
+                Some(v) if v.is_finite() => values.push(v),
+                Some(v) => {
+                    return Err(Error::value(format!(
+                        "{}: {}.{}: {} is {}, not a finite number",
+                        self.source,
+                        self.name,
+                        base.name,
+                        i.name,
+                        py_float_repr(v)
+                    )))
+                }
+                None => {
+                    return Err(Error::value(format!(
+                        "{}: {}.{} reads {}, which was not given and has no default",
+                        self.source, self.name, base.name, i.name
+                    )))
+                }
+            }
+        }
+        Ok(values)
     }
 }
 

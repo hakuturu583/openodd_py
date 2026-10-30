@@ -104,3 +104,12 @@ refuses rules reading any other, its own and a run's alike.
 A run that reads its own rules should call `use_rules` at its start every
 time, with `None` when it names none, so one run's rules do not reach the
 next: the backend is usually the process's default one, shared by every run.
+
+## Seeing them
+
+The rules view renders a rule file in the browser: each input's terms, which
+rules fire at the inputs chosen, what each rule base and the quantity give,
+and the quantity's response as one input moves. It is a component a page
+embeds (`RulesView` and `mount(..., {view: "rules"})`,
+[wasm.md](wasm.md#fuzzy-rules)); `examples/wasm-viewer/rules.html` puts it
+beside an editor of the file.
