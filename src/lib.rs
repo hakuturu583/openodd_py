@@ -19,6 +19,7 @@ pub mod items;
 pub mod loader;
 pub mod model;
 pub mod report;
+pub mod rules;
 pub mod sampler;
 pub mod shares;
 pub mod sources;

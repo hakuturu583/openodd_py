@@ -23,6 +23,14 @@
 //! failure rate moved, and behind the case plot the change of the predicted
 //! pass rate. It has the same methods as the [`Viewer`], so `mount` drives
 //! it the same way.
+//!
+//! A [`RulesView`] reads a backend's fuzzy rules (openodd's rule file) and
+//! renders them ([`rules_view`]): each input's terms, which rules fire at the
+//! inputs chosen, what each rule base and the quantity give, and how the
+//! quantity answers one input moved across its universe. `mount` drives it
+//! with `view: "rules"`.
+
+pub mod rules_view;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -581,14 +589,113 @@ impl Comparison {
     }
 }
 
-/// The components' CSS (coverage view and case plot): once per page.
+/// A backend's fuzzy rules, as a component ([`rules_view`]).
+#[wasm_bindgen]
+pub struct RulesView {
+    rules: openodd::rules::RuleSet,
+}
+
+impl RulesView {
+    /// The rules of a rule file's `text`; `source` names it in messages.
+    pub fn from_text(text: &str, source: &str) -> Result<RulesView, String> {
+        let rules = openodd::rules::RuleSet::parse(text, source).map_err(|e| e.to_string())?;
+        Ok(RulesView { rules })
+    }
+
+    pub fn merge_str(&mut self, text: &str, source: &str) -> Result<(), String> {
+        let over = openodd::rules::RuleSet::parse(text, source).map_err(|e| e.to_string())?;
+        self.rules = self.rules.merged(&over);
+        Ok(())
+    }
+
+    pub fn inputs_str(&self, quantity: &str) -> Result<String, String> {
+        let q = self.rules.quantity(quantity).map_err(|e| e.to_string())?;
+        let mut seen = Vec::new();
+        let mut out = Vec::new();
+        for base in &q.rule_bases {
+            for i in &base.inputs {
+                if !seen.contains(&i.name) {
+                    seen.push(i.name.clone());
+                    out.push(
+                        json!({"name": i.name, "universe": [i.low, i.high], "default": i.default}),
+                    );
+                }
+            }
+        }
+        Ok(Json::Array(out).to_string())
+    }
+
+    pub fn evaluate_str(&self, quantity: &str, inputs: &str) -> Result<String, String> {
+        let raw = parse(inputs, "inputs")?;
+        let query = rules_view::Query::from_json(&json!({ "inputs": raw }))?;
+        let out = self
+            .rules
+            .evaluate(quantity, &query.inputs)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::to_string(&out).expect("numbers"))
+    }
+
+    pub fn rules_html_str(&self, query: &str, options: &str) -> Result<String, String> {
+        let q = rules_view::Query::from_json(&parse(query, "query")?)?;
+        let o = rules_view::Options::from_json(&parse(options, "options")?)?;
+        rules_view::html(&self.rules, &q, &o)
+    }
+
+    pub fn rules_json_str(&self, query: &str, options: &str) -> Result<String, String> {
+        let q = rules_view::Query::from_json(&parse(query, "query")?)?;
+        let o = rules_view::Options::from_json(&parse(options, "options")?)?;
+        Ok(rules_view::data(&self.rules, &q, o.samples)?.to_string())
+    }
+}
+
+#[wasm_bindgen]
+impl RulesView {
+    /// Read a rule file's text (YAML); `source` names it in messages.
+    #[wasm_bindgen(constructor)]
+    pub fn new(text: &str, source: &str) -> Result<RulesView, JsError> {
+        Self::from_text(text, source).map_err(js)
+    }
+
+    /// Read another rule file over these rules, quantity by quantity.
+    pub fn merge(&mut self, text: &str, source: &str) -> Result<(), JsError> {
+        self.merge_str(text, source).map_err(js)
+    }
+
+    /// The quantities, as a JSON array.
+    pub fn quantities(&self) -> String {
+        Json::from(self.rules.quantities.keys().cloned().collect::<Vec<_>>()).to_string()
+    }
+
+    /// A quantity's inputs: a JSON array of `{name, universe, default}`.
+    pub fn inputs(&self, quantity: &str) -> Result<String, JsError> {
+        self.inputs_str(quantity).map_err(js)
+    }
+
+    /// A quantity's outputs at `inputs` (a JSON object), as a JSON object.
+    pub fn evaluate(&self, quantity: &str, inputs_json: &str) -> Result<String, JsError> {
+        self.evaluate_str(quantity, inputs_json).map_err(js)
+    }
+
+    /// The component at `query` (`{quantity, inputs, x}`), with `options`
+    /// (`{id, labels, samples}`).
+    pub fn rules_html(&self, query_json: &str, options_json: &str) -> Result<String, JsError> {
+        self.rules_html_str(query_json, options_json).map_err(js)
+    }
+
+    /// The component's data, as JSON.
+    pub fn rules_json(&self, query_json: &str, options_json: &str) -> Result<String, JsError> {
+        self.rules_json_str(query_json, options_json).map_err(js)
+    }
+}
+
+/// The components' CSS (coverage view, case plot, rules view): once per page.
 #[wasm_bindgen]
 pub fn styles() -> String {
-    html::styles().to_string()
+    format!("{}\n{}", html::styles(), rules_view::styles())
 }
 
 /// The components' script (events, tooltip cards): once per page.
 #[wasm_bindgen]
 pub fn script() -> String {
-    html::script().to_string()
+    format!("{}\n{}", html::script(), rules_view::script())
 }

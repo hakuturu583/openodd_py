@@ -1,0 +1,95 @@
+/* openodd fuzzy rules view, on the coverage view's styles (put both on the
+   page). Every rule is scoped under .oo-cov.oo-rules; hosts restyle it through
+   the --oo-* variables, the series colours through --oo-rules-s0..7 and the
+   outputs' through --oo-rules-o0..3. */
+.oo-cov.oo-rules {
+  --oo-rules-s0: #2f6fed; --oo-rules-s1: #e8590c; --oo-rules-s2: #0ca30c; --oo-rules-s3: #a83fd8;
+  --oo-rules-s4: #d03b3b; --oo-rules-s5: #0b8fa8; --oo-rules-s6: #b8860b; --oo-rules-s7: #6b7c93;
+  --oo-rules-o0: #2f6fed; --oo-rules-o1: #d03b3b; --oo-rules-o2: #0ca30c; --oo-rules-o3: #a83fd8;
+  display: grid; gap: 16px;
+}
+@media (prefers-color-scheme: dark) {
+  .oo-cov.oo-rules:not([data-oo-theme="light"]) {
+    --oo-rules-s0: #6b9bff; --oo-rules-s1: #ff8a4c; --oo-rules-s2: #3ccf6a; --oo-rules-s3: #c77dff;
+    --oo-rules-s4: #f26b6b; --oo-rules-s5: #3cc7e0; --oo-rules-s6: #e8b84a; --oo-rules-s7: #8fa3bf;
+    --oo-rules-o0: #6b9bff; --oo-rules-o1: #f26b6b; --oo-rules-o2: #3ccf6a; --oo-rules-o3: #c77dff;
+  }
+}
+.oo-cov.oo-rules[data-oo-theme="dark"] {
+  --oo-rules-s0: #6b9bff; --oo-rules-s1: #ff8a4c; --oo-rules-s2: #3ccf6a; --oo-rules-s3: #c77dff;
+  --oo-rules-s4: #f26b6b; --oo-rules-s5: #3cc7e0; --oo-rules-s6: #e8b84a; --oo-rules-s7: #8fa3bf;
+  --oo-rules-o0: #6b9bff; --oo-rules-o1: #f26b6b; --oo-rules-o2: #3ccf6a; --oo-rules-o3: #c77dff;
+}
+.oo-cov.oo-rules h4 { margin: 0 0 8px; font-size: 13px; font-weight: 650; color: var(--oo-ink-2);
+  text-transform: uppercase; letter-spacing: .04em; }
+.oo-cov.oo-rules section { min-width: 0; }
+.oo-cov.oo-rules .oo-rules-name { font-family: var(--oo-mono); font-size: 12px; color: var(--oo-ink); }
+.oo-cov.oo-rules .oo-rules-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.oo-cov.oo-rules .oo-rules-row h4 { margin: 0; }
+
+/* Inputs and outputs */
+.oo-cov.oo-rules .oo-rules-io { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.oo-cov.oo-rules .oo-rules-slider { display: grid; grid-template-columns: minmax(90px, max-content) 1fr 56px;
+  align-items: center; gap: 10px; padding: 4px 0; }
+.oo-cov.oo-rules .oo-rules-slider input[type="range"] { width: 100%; min-width: 0; accent-color: var(--oo-accent); }
+.oo-cov.oo-rules .oo-rules-slider output { font-family: var(--oo-mono); font-size: 12px; text-align: right; }
+
+/* Tables */
+.oo-cov.oo-rules .oo-rules-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.oo-cov.oo-rules .oo-rules-table th, .oo-cov.oo-rules .oo-rules-table td { padding: 5px 8px;
+  border-bottom: 1px solid var(--oo-border); text-align: left; vertical-align: middle; }
+.oo-cov.oo-rules .oo-rules-table thead th { color: var(--oo-ink-3); font-weight: 600; }
+.oo-cov.oo-rules .oo-rules-table .oo-num { text-align: right; font-family: var(--oo-mono); white-space: nowrap; }
+.oo-cov.oo-rules .oo-rules-table code { font-family: var(--oo-mono); font-size: 11.5px; white-space: normal; word-break: break-word; }
+.oo-cov.oo-rules .oo-rules-table tr.oo-off { color: var(--oo-ink-3); }
+.oo-cov.oo-rules .oo-rules-value { font-weight: 650; color: var(--oo-ink); }
+.oo-cov.oo-rules .oo-win { color: var(--oo-accent); font-weight: 650; }
+.oo-cov.oo-rules .oo-rules-bar { display: inline-block; width: 64px; height: 6px; border-radius: 3px;
+  background: var(--oo-surface-2); border: 1px solid var(--oo-border); vertical-align: middle; overflow: hidden; }
+.oo-cov.oo-rules .oo-rules-bar i { display: block; height: 100%; background: var(--oo-accent); }
+.oo-cov.oo-rules .oo-rules-w { margin-left: 6px; font-family: var(--oo-mono); font-size: 11px; }
+
+/* Charts */
+.oo-cov.oo-rules .oo-rules-chart { display: block; width: 100%; height: auto; overflow: visible; }
+.oo-cov.oo-rules .oo-grid { stroke: var(--oo-border); stroke-width: 1; }
+.oo-cov.oo-rules .oo-axis { stroke: var(--oo-border-strong); stroke-width: 1; }
+.oo-cov.oo-rules .oo-tick { fill: var(--oo-ink-3); font: 10px var(--oo-font); }
+.oo-cov.oo-rules .oo-rules-at { stroke: var(--oo-ink); stroke-width: 1.2; stroke-dasharray: 3 3; }
+.oo-cov.oo-rules .oo-rules-line { fill: none; stroke-width: 2; }
+.oo-cov.oo-rules .oo-rules-area { stroke: none; opacity: .12; }
+.oo-cov.oo-rules .oo-rules-band { fill: var(--oo-accent); opacity: .12; }
+.oo-cov.oo-rules .oo-rules-out { fill: none; stroke-width: 2.4; }
+.oo-cov.oo-rules .oo-rules-base { fill: none; stroke-width: 1.2; stroke-dasharray: 5 4; opacity: .75; }
+.oo-cov.oo-rules .oo-rules-mfs { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-bottom: 10px; }
+/* A chart keeps its text near the page's size: it does not grow past twice its own width. */
+.oo-cov.oo-rules .oo-rules-mf .oo-rules-chart { max-width: 420px; }
+.oo-cov.oo-rules .oo-rules-mf { margin: 0; padding: 10px 12px; border: 1px solid var(--oo-border);
+  border-radius: var(--oo-cell-radius); background: var(--oo-surface-2); }
+.oo-cov.oo-rules .oo-rules-mf figcaption { margin-bottom: 4px; }
+.oo-cov.oo-rules .oo-rules-rb { padding-top: 12px; border-top: 1px solid var(--oo-border); }
+.oo-cov.oo-rules .oo-rules-bar-top { display: flex; gap: 12px; }
+
+/* Legends */
+.oo-cov.oo-rules .oo-rules-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 0 0; padding: 0;
+  list-style: none; font-size: 12px; color: var(--oo-ink-2); }
+.oo-cov.oo-rules .oo-rules-legend li { display: inline-flex; align-items: center; gap: 5px; }
+.oo-cov.oo-rules .oo-rules-legend li.oo-off { color: var(--oo-ink-3); }
+.oo-cov.oo-rules .oo-rules-legend i { width: 12px; height: 3px; border-radius: 2px; background: currentColor; }
+.oo-cov.oo-rules .oo-rules-legend .oo-rules-dash i { height: 0; border-top: 2px dashed currentColor; background: none; }
+.oo-cov.oo-rules .oo-rules-legend b { font-family: var(--oo-mono); font-weight: 600; color: var(--oo-ink); }
+
+/* Series colours */
+.oo-cov.oo-rules .oo-rules-s0 { color: var(--oo-rules-s0); stroke: var(--oo-rules-s0); fill: var(--oo-rules-s0); }
+.oo-cov.oo-rules .oo-rules-s1 { color: var(--oo-rules-s1); stroke: var(--oo-rules-s1); fill: var(--oo-rules-s1); }
+.oo-cov.oo-rules .oo-rules-s2 { color: var(--oo-rules-s2); stroke: var(--oo-rules-s2); fill: var(--oo-rules-s2); }
+.oo-cov.oo-rules .oo-rules-s3 { color: var(--oo-rules-s3); stroke: var(--oo-rules-s3); fill: var(--oo-rules-s3); }
+.oo-cov.oo-rules .oo-rules-s4 { color: var(--oo-rules-s4); stroke: var(--oo-rules-s4); fill: var(--oo-rules-s4); }
+.oo-cov.oo-rules .oo-rules-s5 { color: var(--oo-rules-s5); stroke: var(--oo-rules-s5); fill: var(--oo-rules-s5); }
+.oo-cov.oo-rules .oo-rules-s6 { color: var(--oo-rules-s6); stroke: var(--oo-rules-s6); fill: var(--oo-rules-s6); }
+.oo-cov.oo-rules .oo-rules-s7 { color: var(--oo-rules-s7); stroke: var(--oo-rules-s7); fill: var(--oo-rules-s7); }
+.oo-cov.oo-rules .oo-rules-o0 { color: var(--oo-rules-o0); stroke: var(--oo-rules-o0); }
+.oo-cov.oo-rules .oo-rules-o1 { color: var(--oo-rules-o1); stroke: var(--oo-rules-o1); }
+.oo-cov.oo-rules .oo-rules-o2 { color: var(--oo-rules-o2); stroke: var(--oo-rules-o2); }
+.oo-cov.oo-rules .oo-rules-o3 { color: var(--oo-rules-o3); stroke: var(--oo-rules-o3); }
+.oo-cov.oo-rules path.oo-rules-line, .oo-cov.oo-rules path.oo-rules-out, .oo-cov.oo-rules path.oo-rules-base { fill: none; }
+.oo-cov.oo-rules path.oo-rules-area { stroke: none; }

@@ -2216,6 +2216,60 @@ impl FlakinessModel {
     }
 }
 
+/// Fuzzy rules a backend derives settings with (`crate::rules`).
+#[pyclass(frozen, module = "openodd._core")]
+#[derive(Clone)]
+struct RuleSet {
+    inner: crate::rules::RuleSet,
+}
+
+#[pymethods]
+impl RuleSet {
+    /// The rule set of a rule file's `text`; `source` names it in messages.
+    #[staticmethod]
+    fn parse(text: &str, source: &str) -> PyResult<Self> {
+        Ok(RuleSet {
+            inner: crate::rules::RuleSet::parse(text, source).map_err(err)?,
+        })
+    }
+
+    /// This rule set with `over`'s quantities in place of its own.
+    fn merged(&self, over: &RuleSet) -> RuleSet {
+        RuleSet {
+            inner: self.inner.merged(&over.inner),
+        }
+    }
+
+    #[getter]
+    fn quantities(&self) -> Vec<String> {
+        self.inner.quantities.keys().cloned().collect()
+    }
+
+    fn inputs(&self, quantity: &str) -> PyResult<Vec<String>> {
+        Ok(self.inner.quantity(quantity).map_err(err)?.inputs())
+    }
+
+    fn outputs(&self, quantity: &str) -> PyResult<Vec<String>> {
+        Ok(self.inner.quantity(quantity).map_err(err)?.outputs.clone())
+    }
+
+    fn source(&self, quantity: &str) -> PyResult<String> {
+        Ok(self.inner.quantity(quantity).map_err(err)?.source.clone())
+    }
+
+    fn evaluate(
+        &self,
+        quantity: &str,
+        inputs: indexmap::IndexMap<String, f64>,
+    ) -> PyResult<indexmap::IndexMap<String, f64>> {
+        self.inner.evaluate(quantity, &inputs).map_err(err)
+    }
+
+    fn check_inputs(&self, allowed: Vec<String>) -> PyResult<()> {
+        self.inner.check_inputs(&allowed).map_err(err)
+    }
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -2245,6 +2299,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Sampler>()?;
     m.add_class::<ParamSpace>()?;
     m.add_class::<FlakinessModel>()?;
+    m.add_class::<RuleSet>()?;
     for f in [
         wrap_pyfunction!(is_in, m)?,
         wrap_pyfunction!(equals, m)?,

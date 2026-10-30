@@ -16,6 +16,10 @@
 //   mount(cmp, el3, { view: "cases", background: "delta" });
 //   mount(cmp, el4, { view: "coverage" });
 //
+//   // A backend's fuzzy rules: the same mount.
+//   const rules = new RulesView(yamlText, "weather_rules.yaml");
+//   mount(rules, el5, { view: "rules", quantity: "tire_friction", inputs: { water: 70 } });
+//
 // No dependencies; every number is computed in WebAssembly.
 
 /** Put the components' CSS and script on the page, once. */
@@ -45,6 +49,7 @@ export function install({ styles, script }) {
  * state and the time it took (`detail.ms`).
  */
 export function mount(viewer, el, options = {}) {
+  if (options.view === "rules") return mountRules(viewer, el, options);
   const view = ["coverage", "drift"].includes(options.view) ? options.view : "cases";
   const queryKeys = ["x", "y", "conditions", "scenario", "environment", "min_runs", "band", "min_seconds",
     "basis", "measured_at"];
@@ -103,5 +108,63 @@ export function mount(viewer, el, options = {}) {
       el.removeEventListener("openodd:axes", onAxes);
       el.removeEventListener("openodd:drill", onDrill);
     },
+  };
+}
+
+/**
+ * Render a `RulesView` in `el` and keep it live: its sliders (`inputs`) and
+ * pickers (`quantity`, `x`) dispatch `openodd:rules`, handled here. `options`:
+ * the query (`quantity`, `inputs`: `{name: value}`, `x`: the input the
+ * response chart moves) and the component's options (`id`, `labels`,
+ * `samples`). Each render dispatches `openodd:rendered` on `el`, as above.
+ */
+function mountRules(viewer, el, options) {
+  const state = {};
+  for (const k of ["quantity", "inputs", "x"]) if (options[k] !== undefined) state[k] = options[k];
+  const opts = {};
+  for (const k of ["id", "labels", "samples"]) if (options[k] !== undefined) opts[k] = options[k];
+  if (!opts.id) opts.id = el.id ? el.id + "-view" : "oo-rules-" + Math.random().toString(36).slice(2, 8);
+
+  function render(focus) {
+    const t0 = performance.now();
+    el.innerHTML = viewer.rules_html(JSON.stringify(state), JSON.stringify(opts));
+    if (focus) {
+      // Keep the keyboard on the control just used: the render replaced it.
+      const [kind, name] = focus.split(":");
+      const sel = kind === "input" ? `input[data-oo-input="${CSS.escape(name)}"]`
+        : `select[data-oo-rules="${CSS.escape(name)}"]`;
+      const again = el.querySelector(sel);
+      if (again) again.focus({ preventScroll: true });
+    }
+    const ms = performance.now() - t0;
+    el.dispatchEvent(new CustomEvent("openodd:rendered", { detail: { view: "rules", state: { ...state }, ms } }));
+    return ms;
+  }
+
+  function onRules(event) {
+    if (!el.contains(event.target)) return;
+    event.preventDefault();
+    const d = event.detail || {};
+    if (d.quantity !== undefined && d.quantity !== state.quantity) {
+      state.quantity = d.quantity;
+      delete state.x;                     // the next quantity's first input
+    }
+    if (d.x !== undefined) state.x = d.x;
+    if (d.inputs) state.inputs = { ...(state.inputs || {}), ...d.inputs };
+    render(d.focus);
+  }
+  render();                               // throws on a query the rules cannot answer
+  el.addEventListener("openodd:rules", onRules);
+  return {
+    state,
+    render,
+    /** Change the query (e.g. `{inputs: {water: 80}}`) and render. */
+    set(changes) {
+      if (changes.inputs) changes = { ...changes, inputs: { ...(state.inputs || {}), ...changes.inputs } };
+      Object.assign(state, changes);
+      return render();
+    },
+    /** Stop listening; the HTML stays. */
+    unmount() { el.removeEventListener("openodd:rules", onRules); },
   };
 }

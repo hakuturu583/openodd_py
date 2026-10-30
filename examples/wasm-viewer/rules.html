@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>openodd rules</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f2f4f7; --ink: #101828; --ink-2: #475467; --line: #cfd4dc; --card: #fff; --bad: #d03b3b; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0e12; --ink: #eef1f5; --ink-2: #b4bdca; --line: #364151; --card: #12161c; --bad: #f26b6b; } }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 48px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 4px 0 0; color: var(--ink-2); }
+  .work { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 20px; align-items: start; }
+  @media (max-width: 900px) { .work { grid-template-columns: minmax(0, 1fr); } }
+  .editor { display: grid; gap: 8px; position: sticky; top: 12px; }
+  .editor .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .editor button, .editor label.file { font: inherit; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); cursor: pointer; }
+  .editor input[type=file] { display: none; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 60vh; resize: vertical; padding: 12px; border-radius: 12px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 2; }
+  #error { margin: 0; color: var(--bad); font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; }
+  #error:empty { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>openodd rules</h1>
+    <p>A backend's fuzzy rules: each input's terms, the rules that fire, what each rule base and the quantity give, and how the
+      quantity answers one input moved. Edit the YAML and the view follows -- computed in your browser with WebAssembly.
+      <a href="index.html">Coverage viewer</a></p>
+  </header>
+  <div class="work">
+    <section class="editor">
+      <div class="bar">
+        <label class="file">Open a rule file<input type="file" id="file" accept=".yaml,.yml,text/yaml"></label>
+        <button type="button" id="sample">Load the sample</button>
+      </div>
+      <textarea id="yaml" spellcheck="false" aria-label="Rule file (YAML)"></textarea>
+      <p id="error" role="status"></p>
+    </section>
+    <section id="rules"></section>
+  </div>
+</main>
+<script type="module">
+  import init, { RulesView, styles, script } from "./pkg/openodd_wasm.js";
+  import { install, mount } from "./pkg/viewer.js";
+
+  await init();
+  install({ styles, script });
+  const el = document.getElementById("rules");
+  const yaml = document.getElementById("yaml");
+  const error = document.getElementById("error");
+  let view = null;
+  let source = "sample_rules.yaml";
+
+  function show() {
+    let rules;
+    try {
+      rules = new RulesView(yaml.value, source);
+    } catch (e) {
+      error.textContent = String(e.message || e);   // keep the last good view
+      return;
+    }
+    error.textContent = "";
+    // Keep where the reader was: the quantity, the inputs, the input moved.
+    const state = view ? view.state : {};
+    if (view) view.unmount();
+    try {
+      view = mount(rules, el, { view: "rules", id: "rules-view", ...state });
+    } catch (e) {
+      view = mount(rules, el, { view: "rules", id: "rules-view" });
+    }
+  }
+
+  let timer = 0;
+  yaml.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(show, 250); });
+  document.getElementById("sample").addEventListener("click", async () => {
+    yaml.value = await (await fetch("sample_rules.yaml")).text();
+    source = "sample_rules.yaml";
+    show();
+  });
+  document.getElementById("file").addEventListener("change", async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    yaml.value = await file.text();
+    source = file.name;
+    show();
+  });
+  document.getElementById("sample").click();
+</script>
+</body>
+</html>
