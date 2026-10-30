@@ -1927,7 +1927,7 @@ struct Sampler {
 #[pymethods]
 impl Sampler {
     #[new]
-    #[pyo3(signature = (odd, knobs, *, seed="0", strategy="uniform", coverage=None, max_tries=200, drawn=None, derive=None))]
+    #[pyo3(signature = (odd, knobs, *, seed="0", strategy="uniform", coverage=None, max_tries=200, drawn=None, derive=None, weights=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -1939,6 +1939,7 @@ impl Sampler {
         max_tries: usize,
         drawn: Option<Vec<Py<Sample>>>,
         derive: Option<PyObject>,
+        weights: Option<Vec<(String, f64)>>,
     ) -> PyResult<Self> {
         let knobs: indexmap::IndexMap<String, crate::sampler::Knob> = knobs
             .into_iter()
@@ -1961,6 +1962,11 @@ impl Sampler {
             &drawn,
         )
         .map_err(err)?;
+        if strategy == crate::sampler::Strategy::Weighted || weights.is_some() {
+            let weights: indexmap::IndexMap<String, f64> =
+                weights.unwrap_or_default().into_iter().collect();
+            inner = inner.with_weights(&weights).map_err(err)?;
+        }
         if let Some(derive) = derive {
             inner.derive = Some(std::sync::Arc::new(
                 move |values: &mut crate::model::Values| {
@@ -2000,6 +2006,10 @@ impl Sampler {
     #[getter]
     fn situation_holes(&self) -> Vec<String> {
         self.inner.situation_holes()
+    }
+    #[getter]
+    fn weights(&self) -> Vec<(String, f64)> {
+        self.inner.weights()
     }
     #[getter]
     fn unreachable(&self) -> Vec<(String, String)> {

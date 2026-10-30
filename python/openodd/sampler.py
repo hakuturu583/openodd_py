@@ -12,8 +12,11 @@ the others:
   ODD can hold for some value of it.
 
 ``strategy="coverage"`` draws the least covered buckets first and aims the
-first cases at the situations still uncovered. A batch of samplers on one ODD
-goes on where the last left off (:class:`OddDraws`).
+first cases at the situations still uncovered. ``weights`` (``strategy="weighted"``)
+gives a share of the cases to each of some modules -- ``{"heavy_rain": 0.3}``
+puts 30% of them in module ``heavy_rain`` -- and draws the rest as the uniform
+strategy would. A batch of samplers on one ODD goes on where the last left off
+(:class:`OddDraws`), the shares counting what the earlier ones drew.
 """
 
 from __future__ import annotations
@@ -222,9 +225,16 @@ class OddSampler:
             it (a scenario's ``controls``, by measure); the backend turns them
             into knobs for the attributes it reads that way.
         seed: The same seed, ODD, knobs and coverage give the same cases.
-        strategy: ``"uniform"`` or ``"coverage"``.
+        strategy: ``"uniform"``, ``"coverage"`` or ``"weighted"``; ``"weighted"``
+            when *weights* are given, else ``"uniform"``, if not given.
         coverage: The coverage of earlier runs (:func:`~.report.load_and_merge`),
             read by the ``coverage`` strategy.
+        weights: Module -> the share of the cases in it, in ``[0, 1]``, for
+            the ``weighted`` strategy. Modules may overlap: each holds its
+            share of the batch (as closely as whole cases allow), and inside
+            and outside them the cases are drawn as the uniform strategy
+            draws them. A module must not be a root of the ODD, and whether a
+            case is in it must follow from what the knobs set.
         max_tries: Combinations drawn per case before giving up on it.
         drawn: The cases earlier samplers of the batch drew from this ODD
             (:meth:`OddDraws.of`).
@@ -238,11 +248,12 @@ class OddSampler:
         *,
         controls: Optional[Mapping[str, OddKnob]] = None,
         seed: Union[int, str] = 0,
-        strategy: str = "uniform",
+        strategy: Optional[str] = None,
         coverage: Optional[CoverageReport] = None,
         max_tries: int = 200,
         drawn: Sequence[OddSample] = (),
         backend: Optional[Backend] = None,
+        weights: Optional[Mapping[str, float]] = None,
     ) -> None:
         backend = backend or default_backend()
         knobs = dict(knobs or {})
@@ -256,6 +267,8 @@ class OddSampler:
             knob = knobs.get(attribute.name) or backend.knob(attribute, controls)
             if knob is not None:
                 chosen.append((attribute.name, knob._core()))
+        if strategy is None:
+            strategy = "weighted" if weights is not None else "uniform"
         self.odd = odd
         self.strategy = strategy
         derived = list(getattr(odd, "_code_derived", ()))
@@ -272,6 +285,7 @@ class OddSampler:
             max_tries=max_tries,
             drawn=[s._core() for s in drawn],
             derive=derive if derived else None,
+            weights=None if weights is None else [(str(k), float(v)) for k, v in weights.items()],
         )
 
     @property
@@ -284,6 +298,11 @@ class OddSampler:
         """(attribute, bucket) -> how many times over it is covered, as read from
         the coverage given (only what counts what the ODD counts)."""
         return dict(self._core.coverage_amounts)
+
+    @property
+    def weights(self) -> dict[str, float]:
+        """Module -> the share of the cases in it (the ``weighted`` strategy)."""
+        return dict(self._core.weights)
 
     @property
     def situation_holes(self) -> list[str]:
@@ -310,7 +329,8 @@ class OddSampler:
 
     def sample(self, count: int) -> list[OddSample]:
         """Draw *count* cases; with the coverage strategy, the first aim at the
-        situations still uncovered, one each."""
+        situations still uncovered, one each; with the weighted strategy, each
+        module given a share holds it."""
         if count < 0:
             raise ValueError("OddSampler: count must not be negative")
         cases = [OddSample._from_core(c) for c in self._core.sample(count)]

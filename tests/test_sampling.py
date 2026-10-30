@@ -113,3 +113,79 @@ def test_merging_and_drawing_from_coverage(tmp_path: Path) -> None:
 def test_merge_refuses_other_documents() -> None:
     with pytest.raises(ValueError, match="not a coverage file"):
         merge_coverage([{"schema": "x"}])
+
+
+ODD_WITH_REGIONS = """
+TAXONOMY:
+  rain: [none, light, heavy]
+  gap: float length
+  lead: float length
+ODD:
+  o:
+    EXCLUDE_AND:
+      rain: heavy
+      gap: "< 10 m"
+MODULES:
+  wet:
+    INCLUDE_AND:
+      rain: heavy
+  close:
+    INCLUDE_AND:
+      gap: "< 20 m"
+  hidden:
+    INCLUDE_AND:
+      lead: "> 10 m"
+"""
+
+
+def regions() -> openodd.OddDefinition:
+    return openodd.load_openodd(
+        ODD_WITH_REGIONS,
+        bindings={
+            "rain": {"probe": "rain"},
+            "gap": {"measure": "gap_m", "buckets": [0, 10, 20, 40]},
+            "lead": {"measure": "lead_m"},
+        },
+        name="o",
+        backend=backend(),
+    )
+
+
+def test_weighted_holds_each_module_to_its_share() -> None:
+    o = regions()
+    sampler = OddSampler(o, controls=CONTROLS, seed=3, weights={"wet": 0.3, "close": 0.6}, backend=backend())
+    assert sampler.strategy == "weighted"
+    assert sampler.weights == {"wet": 0.3, "close": 0.6}
+    cases = sampler.sample(100)
+    assert [c.index for c in cases] == list(range(100))
+    assert sum(c.buckets["rain"] == "heavy" for c in cases) == 30
+    assert sum(c.values["gap"] < 20 for c in cases) == pytest.approx(60, abs=1)
+    for case in cases:
+        assert not (case.buckets["rain"] == "heavy" and case.values["gap"] < 10)
+
+
+def test_weighted_batches_go_on_from_each_other() -> None:
+    o = regions()
+    draws = OddDraws()
+    for _ in range(10):
+        sampler = OddSampler(
+            o, controls=CONTROLS, seed=4, weights={"wet": 0.2}, drawn=draws.of(o), backend=backend()
+        )
+        draws.add(o, sampler.sample(2))
+    assert sum(c.buckets["rain"] == "heavy" for c in draws.of(o)) == 4
+
+
+def test_weighted_refuses_what_it_cannot_hold() -> None:
+    o = regions()
+    with pytest.raises(ValueError, match="no module dry"):
+        OddSampler(o, controls=CONTROLS, weights={"dry": 0.5}, backend=backend())
+    with pytest.raises(ValueError, match="root"):
+        OddSampler(o, controls=CONTROLS, weights={"o": 0.5}, backend=backend())
+    with pytest.raises(ValueError, match="'weighted'"):
+        OddSampler(o, controls=CONTROLS, strategy="coverage", weights={"wet": 0.5}, backend=backend())
+    with pytest.raises(ValueError, match="needs a share"):
+        OddSampler(o, controls=CONTROLS, strategy="weighted", backend=backend())
+    # Nothing draws the lead, so whether a case is in `hidden` is not known.
+    sampler = OddSampler(o, controls=CONTROLS, weights={"hidden": 0.5}, backend=backend())
+    with pytest.raises(ValueError, match="does not follow from what the knobs set"):
+        sampler.sample(4)

@@ -21,6 +21,16 @@
 //! theirs, so a batch works through the holes rather than piling into the
 //! first. Situations still uncovered are aimed at first, one case each.
 //!
+//! `Strategy::Weighted` is given a share per module (`heavy_rain: 0.3`) and
+//! draws a batch whose fraction in each module is its share, as closely as
+//! whole cases allow; modules may overlap. Of the distributions that hold
+//! every share, it draws from the one closest to the uniform strategy's
+//! ([`crate::shares`]): the cases inside any one pattern of membership are as
+//! the uniform strategy draws them. The shares count the cases drawn before
+//! (by earlier samplers of the batch, and earlier batches of this one), so
+//! small batches add up to them too. Whether a case is in a module must
+//! follow from what the knobs set.
+//!
 //! The random stream is ChaCha8 seeded with the SHA-256 of the seed: the same
 //! seed, ODD, knobs and coverage give the same cases, on any platform.
 
@@ -162,6 +172,8 @@ pub enum Strategy {
     Uniform,
     /// The least covered first.
     Coverage,
+    /// A share of the cases in each module given ([`Sampler::with_weights`]).
+    Weighted,
 }
 
 impl Strategy {
@@ -169,8 +181,9 @@ impl Strategy {
         match s {
             "uniform" => Ok(Strategy::Uniform),
             "coverage" => Ok(Strategy::Coverage),
+            "weighted" => Ok(Strategy::Weighted),
             other => Err(Error::value(format!(
-                "OddSampler: strategy must be 'uniform' or 'coverage', not '{other}'"
+                "OddSampler: strategy must be 'uniform', 'coverage' or 'weighted', not '{other}'"
             ))),
         }
     }
@@ -209,6 +222,11 @@ pub struct Sampler {
     pub warnings: Vec<String>,
     /// Works out the attributes derived outside the core, if any.
     pub derive: Option<Derive>,
+    /// Module -> the share of the cases in it (the weighted strategy).
+    weights: Vec<(String, f64)>,
+    /// The values of the cases drawn so far from this ODD: by earlier
+    /// samplers of the batch, then by this one with the weighted strategy.
+    history: Vec<IndexMap<String, Value>>,
 }
 
 impl std::fmt::Debug for Sampler {
@@ -339,6 +357,8 @@ impl Sampler {
             unreachable: None,
             warnings: Vec::new(),
             derive: None,
+            weights: Vec::new(),
+            history: drawn.iter().map(|s| s.values.clone()).collect(),
         };
         if strategy == Strategy::Coverage {
             sampler.read_coverage(coverage);
@@ -349,6 +369,64 @@ impl Sampler {
         let aimed: HashSet<&String> = drawn.iter().filter_map(|s| s.situation.as_ref()).collect();
         sampler.situation_holes.retain(|s| !aimed.contains(s));
         Ok(sampler)
+    }
+
+    /// The weighted strategy's shares: module -> the fraction of the cases
+    /// in it, in `[0, 1]`. Modules may overlap; a root of the ODD, which
+    /// every case is in, cannot be given one. Only for the weighted strategy,
+    /// which needs at least one.
+    pub fn with_weights(mut self, weights: &IndexMap<String, f64>) -> Result<Self> {
+        if self.strategy != Strategy::Weighted {
+            return Err(Error::value(
+                "OddSampler: weights are for the 'weighted' strategy",
+            ));
+        }
+        if weights.is_empty() {
+            return Err(Error::value(
+                "OddSampler: the 'weighted' strategy needs a share for at least one module",
+            ));
+        }
+        for (name, share) in weights {
+            let Some(module) = self.odd.modules.iter().find(|m| &m.name == name) else {
+                let mut known: Vec<String> = self
+                    .odd
+                    .modules
+                    .iter()
+                    .filter(|m| !self.odd.roots.contains(&m.name))
+                    .map(|m| m.name.clone())
+                    .collect();
+                known.sort();
+                return Err(Error::value(format!(
+                    "OddSampler: ODD {} has no module {name} (modules: {})",
+                    self.odd.name,
+                    crate::model::py_list(&known)
+                )));
+            };
+            if self.odd.roots.contains(name) {
+                return Err(Error::value(format!(
+                    "OddSampler: {name} is a root of ODD {}: every case is in it, so it takes no share",
+                    self.odd.name
+                )));
+            }
+            if !module.active {
+                return Err(Error::value(format!(
+                    "OddSampler: module {name} is not active"
+                )));
+            }
+            if !(0.0..=1.0).contains(share) {
+                return Err(Error::value(format!(
+                    "OddSampler: the share of module {name} must be in [0, 1], not {}",
+                    py_float_repr(*share)
+                )));
+            }
+        }
+        self.weights = weights.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        Ok(self)
+    }
+
+    /// The weighted strategy's shares, module -> fraction.
+    pub fn weights(&self) -> Vec<(String, f64)> {
+        self.weights.clone()
     }
 
     /// Remember how covered each bucket is, and which situations are holes.
@@ -455,10 +533,10 @@ impl Sampler {
     /// bucket is covered `depth` times, counting the coverage given and the
     /// cases planned. A case covers one bucket of each attribute, so this is
     /// what the attribute lacking most lacks. Always 0 with the uniform
-    /// strategy, which does not aim at the holes. A bucket no admitted case
+    /// and weighted strategies, which do not aim at the holes. A bucket no admitted case
     /// has is no hole (see [`Sampler::find_unreachable`]).
     pub fn coverage_deficit(&self, depth: usize) -> usize {
-        if self.strategy == Strategy::Uniform {
+        if self.strategy != Strategy::Coverage {
             return 0;
         }
         self.axes
@@ -544,7 +622,7 @@ impl Sampler {
 
     fn pick(&mut self, axis: usize, least: bool) -> String {
         let labels = self.axes[axis].labels.clone();
-        if self.strategy == Strategy::Uniform {
+        if self.strategy != Strategy::Coverage {
             return labels[self.rng.gen_range(0..labels.len())].clone();
         }
         let attribute = self.axes[axis].attribute.clone();
@@ -776,8 +854,12 @@ impl Sampler {
 
     /// Draw `count` cases; with the coverage strategy, the first aim at the
     /// situations still uncovered, one each. A situation no case can bring
-    /// about is given up on (see [`Sampler::warnings`]).
+    /// about is given up on (see [`Sampler::warnings`]). With the weighted
+    /// strategy, the cases hold the modules' shares.
     pub fn sample(&mut self, count: usize) -> Result<Vec<Sample>> {
+        if self.strategy == Strategy::Weighted {
+            return self.sample_weighted(count);
+        }
         let mut aims: Vec<String> = self.situation_holes.clone();
         let mut cases = Vec::with_capacity(count);
         for index in 0..count {
@@ -798,6 +880,145 @@ impl Sampler {
             if !done {
                 cases.push(self.draw(index, None)?);
             }
+        }
+        Ok(cases)
+    }
+}
+
+/// Cases drawn uniformly per case of a batch, to estimate how the modules
+/// split the ODD: at least `POOL_MIN`, at most `POOL_MAX`.
+const POOL_PER_CASE: usize = 32;
+const POOL_MIN: usize = 1024;
+const POOL_MAX: usize = 8192;
+
+impl Sampler {
+    /// Which of the weighted modules a case with `values` is in; `Err` when
+    /// that does not follow from them.
+    fn membership(&self, values: &IndexMap<String, Value>) -> Result<Vec<bool>> {
+        let mut all: Values = self
+            .odd
+            .attributes
+            .iter()
+            .map(|a| (a.name.clone(), Value::Open))
+            .collect();
+        all.extend(values.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.odd.complete_open(&mut all);
+        if let Some(derive) = &self.derive {
+            derive(&mut all);
+        }
+        let verdict = self.odd.evaluate(&all);
+        self.weights
+            .iter()
+            .map(|(name, _)| match verdict.modules.get(name) {
+                Some(crate::model::Truth::True) => Ok(true),
+                Some(crate::model::Truth::False) => Ok(false),
+                _ => Err(Error::value(format!(
+                    "OddSampler: whether a case is in module {name} does not follow from what \
+                     the knobs set ({}): it tests what no knob draws",
+                    self.attributes().join(", ")
+                ))),
+            })
+            .collect()
+    }
+
+    /// [`Sampler::sample`] with the weighted strategy.
+    fn sample_weighted(&mut self, count: usize) -> Result<Vec<Sample>> {
+        if self.weights.is_empty() {
+            return Err(Error::value(
+                "OddSampler: the 'weighted' strategy needs a share for at least one module",
+            ));
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let names: Vec<String> = self.weights.iter().map(|(n, _)| n.clone()).collect();
+        let shares: Vec<f64> = self.weights.iter().map(|(_, s)| *s).collect();
+        // A pool of uniform cases, by pattern of membership.
+        let size = (count * POOL_PER_CASE).clamp(POOL_MIN, POOL_MAX);
+        let mut cells: IndexMap<Vec<bool>, Vec<Sample>> = IndexMap::new();
+        for _ in 0..size {
+            let case = self.draw_with(0, None, None)?;
+            let pattern = self.membership(&case.values)?;
+            cells.entry(pattern).or_default().push(case);
+        }
+        let patterns: Vec<Vec<bool>> = cells.keys().cloned().collect();
+        let mass: Vec<f64> = cells.values().map(|c| c.len() as f64).collect();
+        let mass = crate::shares::rake(&patterns, &mass, &shares, &names)?;
+        // The cases drawn before count towards the shares; a case whose
+        // membership does not follow from its values (drawn with other
+        // knobs) does not.
+        let mut have = vec![0; patterns.len()];
+        for values in &self.history {
+            if let Ok(pattern) = self.membership(values) {
+                if let Some(i) = cells.get_index_of(&pattern) {
+                    have[i] += 1;
+                }
+            }
+        }
+        let wanted = crate::shares::allocate(count, &mass, &have);
+        // Too few of a cell in the pool: draw on until there are enough.
+        let mut extra = 0;
+        let limit = self.max_tries * count;
+        loop {
+            let short: Vec<usize> = (0..patterns.len())
+                .filter(|i| cells[*i].len() < wanted[*i])
+                .collect();
+            if short.is_empty() {
+                break;
+            }
+            if extra >= limit {
+                let missing: Vec<String> = short
+                    .iter()
+                    .map(|i| {
+                        let pattern: Vec<String> = names
+                            .iter()
+                            .zip(&patterns[*i])
+                            .map(|(n, inside)| {
+                                if *inside {
+                                    n.clone()
+                                } else {
+                                    format!("not {n}")
+                                }
+                            })
+                            .collect();
+                        format!(
+                            "{} of {} cases {}",
+                            cells[*i].len(),
+                            wanted[*i],
+                            pattern.join(" and ")
+                        )
+                    })
+                    .collect();
+                return Err(Error::value(format!(
+                    "OddSampler: found only {} inside ODD {} in {} draws",
+                    missing.join(", "),
+                    self.odd.name,
+                    size + extra
+                )));
+            }
+            let case = self.draw_with(0, None, None)?;
+            let pattern = self.membership(&case.values)?;
+            if let Some(i) = cells.get_index_of(&pattern) {
+                cells[i].push(case);
+            }
+            extra += 1;
+        }
+        let mut cases = Vec::with_capacity(count);
+        for (i, pool) in cells.values_mut().enumerate() {
+            for _ in 0..wanted[i] {
+                let k = self.rng.gen_range(0..pool.len());
+                cases.push(pool.swap_remove(k));
+            }
+        }
+        // In random order, so that a batch cut short still holds the shares
+        // roughly.
+        for i in (1..cases.len()).rev() {
+            let j = self.rng.gen_range(0..=i);
+            cases.swap(i, j);
+        }
+        for (index, case) in cases.iter_mut().enumerate() {
+            case.index = index;
+            self.history.push(case.values.clone());
         }
         Ok(cases)
     }
@@ -1042,6 +1263,77 @@ mod tests {
         let more = next.sample(1).unwrap();
         let used: HashSet<&String> = first.iter().map(|c| &c.buckets["gap"]).collect();
         assert!(!used.contains(&more[0].buckets["gap"]));
+    }
+
+    fn weighted(seed: &str, share: f64, drawn: &[Sample]) -> Result<Sampler> {
+        let weights: IndexMap<String, f64> = [("wet".to_string(), share)].into_iter().collect();
+        Sampler::new(&odd(), &knobs(), seed, Strategy::Weighted, None, 200, drawn)?
+            .with_weights(&weights)
+    }
+
+    #[test]
+    fn weighted_holds_each_module_to_its_share() {
+        for share in [0.0, 0.3, 0.9, 1.0] {
+            let cases = weighted("4", share, &[]).unwrap().sample(50).unwrap();
+            let wet = cases
+                .iter()
+                .filter(|c| c.buckets["rain"] == "heavy")
+                .count();
+            assert_eq!(wet, (50.0 * share).round() as usize, "share {share}");
+            assert!(cases.iter().enumerate().all(|(i, c)| c.index == i));
+            assert!(cases
+                .iter()
+                .all(|c| !(c.buckets["rain"] == "heavy" && c.buckets["gap"] == "[0, 10)")));
+        }
+    }
+
+    #[test]
+    fn weighted_small_batches_add_up_to_the_share() {
+        let mut drawn = Vec::new();
+        for _ in 0..10 {
+            drawn.extend(weighted("6", 0.3, &drawn).unwrap().sample(1).unwrap());
+        }
+        let wet = drawn
+            .iter()
+            .filter(|c| c.buckets["rain"] == "heavy")
+            .count();
+        assert_eq!(wet, 3);
+        let mut s = weighted("6", 0.3, &[]).unwrap();
+        let mut cases = Vec::new();
+        for _ in 0..10 {
+            cases.extend(s.sample(1).unwrap());
+        }
+        assert_eq!(
+            cases
+                .iter()
+                .filter(|c| c.buckets["rain"] == "heavy")
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn weighted_refuses_what_cannot_take_a_share() {
+        let o = odd();
+        let one = |name: &str, share: f64| -> IndexMap<String, f64> {
+            [(name.to_string(), share)].into_iter().collect()
+        };
+        let new = |strategy| Sampler::new(&o, &knobs(), "1", strategy, None, 200, &[]).unwrap();
+        let message = |r: Result<Sampler>| r.unwrap_err().to_string();
+        assert!(
+            message(new(Strategy::Weighted).with_weights(&one("dry", 0.5)))
+                .contains("no module dry")
+        );
+        assert!(message(new(Strategy::Weighted).with_weights(&one("bound", 0.5))).contains("root"));
+        assert!(message(new(Strategy::Weighted).with_weights(&one("wet", 1.5))).contains("[0, 1]"));
+        assert!(
+            message(new(Strategy::Uniform).with_weights(&one("wet", 0.5))).contains("'weighted'")
+        );
+        assert!(
+            message(new(Strategy::Weighted).with_weights(&IndexMap::new()))
+                .contains("at least one")
+        );
+        assert!(new(Strategy::Weighted).sample(1).is_err());
     }
 
     #[test]
