@@ -17,7 +17,8 @@
   run's ODD samples as an OpenODD COD table (section 8.3) with its manifest and
   taxonomy.
 - **Sample** the next runs from the ODD (`OddSampler`), aimed at what coverage
-  left uncovered.
+  left uncovered, or with a share of them in chosen modules -- 30% in `heavy_rain`
+  ([docs/weighted_sampling.md](docs/weighted_sampling.md)).
 - **Find flaky cases**: `FlakySearch` learns where runs pass and fail (Gaussian-process
   classification in the Rust core) and draws part of each batch where a small change
   flips the outcome, keeping the sampler's own policy for the rest. Each case gets

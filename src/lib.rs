@@ -20,6 +20,7 @@ pub mod loader;
 pub mod model;
 pub mod report;
 pub mod sampler;
+pub mod shares;
 pub mod sources;
 pub mod transmission;
 pub mod units;
