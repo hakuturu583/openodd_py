@@ -15,8 +15,13 @@ use crate::error::{Error, Result};
 
 /// The sweeps [`rake`] makes before it gives up.
 const SWEEPS: usize = 10_000;
-/// How far a module's mass may end from its share.
+/// How far a module's mass may end from its share to stop early.
 const TOLERANCE: f64 = 1e-9;
+/// How far it may end from it after every sweep. Shares that hold only with
+/// some cell empty (two modules that never overlap, at 0.5 each, leave none
+/// of the ODD outside both) are approached as `1 / sweeps`, never reached;
+/// this is well under what a case of a batch of thousands weighs.
+const SLACK: f64 = 1e-4;
 
 /// The masses of `cells` (each a pattern of membership, one flag per module)
 /// scaled so that the cells in module `j` hold `shares[j]` together. `mass`
@@ -52,23 +57,35 @@ pub fn rake(
             )));
         }
     }
-    for _ in 0..SWEEPS {
+    let worst = |m: &[f64]| {
+        (0..shares.len())
+            .map(|j| (held(cells, m, j) - shares[j]).abs())
+            .fold(0.0, f64::max)
+    };
+    'sweeps: for _ in 0..SWEEPS {
         for (j, share) in shares.iter().enumerate() {
             let inside = held(cells, &m, j);
-            let (up, down) = (share / inside, (1.0 - share) / (1.0 - inside));
+            // Another module's share has emptied this one, or all outside
+            // it: no scaling gives it its own.
+            if (*share > 0.0 && inside <= 0.0) || (*share < 1.0 && inside >= 1.0) {
+                break 'sweeps;
+            }
+            let up = if *share > 0.0 { share / inside } else { 0.0 };
+            let down = if *share < 1.0 {
+                (1.0 - share) / (1.0 - inside)
+            } else {
+                0.0
+            };
             for (cell, x) in cells.iter().zip(m.iter_mut()) {
                 *x *= if cell[j] { up } else { down };
-                if !x.is_finite() {
-                    *x = 0.0;
-                }
             }
         }
-        let worst = (0..shares.len())
-            .map(|j| (held(cells, &m, j) - shares[j]).abs())
-            .fold(0.0, f64::max);
-        if worst < TOLERANCE {
+        if worst(&m) < TOLERANCE {
             return Ok(m);
         }
+    }
+    if m.iter().sum::<f64>() > 0.0 && worst(&m) < SLACK {
+        return Ok(m);
     }
     let reached: Vec<String> = names
         .iter()
@@ -183,6 +200,24 @@ mod tests {
         assert!(e.to_string().contains("cannot all hold at once"), "{e}");
         let e = rake(&cells, &[0.0, 0.5, 0.5], &[0.1, 0.5], &names(2)).unwrap_err();
         assert!(e.to_string().contains("no case drawn"), "{e}");
+    }
+
+    #[test]
+    fn shares_that_hold_only_with_a_cell_empty_are_reached() {
+        // a and b never overlap and hold everything between them.
+        let cells = vec![vec![true, false], vec![false, true], vec![false, false]];
+        let m = rake(&cells, &[0.25, 0.25, 0.5], &[0.5, 0.5], &names(2)).unwrap();
+        assert!((m[0] - 0.5).abs() < SLACK && (m[1] - 0.5).abs() < SLACK);
+        assert!(m[2] < SLACK);
+        assert_eq!(allocate(100, &m, &[0, 0, 0]), [50, 50, 0]);
+    }
+
+    #[test]
+    fn shares_that_leave_no_case_anywhere_are_refused() {
+        // a and b never overlap and hold everything: neither can be empty.
+        let cells = vec![vec![true, false], vec![false, true]];
+        let e = rake(&cells, &[0.5, 0.5], &[0.0, 0.0], &names(2)).unwrap_err();
+        assert!(e.to_string().contains("cannot all hold at once"), "{e}");
     }
 
     #[test]
