@@ -74,8 +74,20 @@ jobs:
           set -euo pipefail
           # A failed lookup fails the job: swallowing it would read as "no PR" and
           # drop a labelled merge's release without a trace.
-          pr_json=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls \
-            --jq '.[0] // empty')
+          #
+          # Right after a merge, GitHub may not have linked the merge commit to its
+          # PR yet: the lookup answers an empty list, which once dropped a labelled
+          # merge's release (#28). So an empty answer is asked again, for about a
+          # minute, before it is taken as a push no PR made. Of the PRs the commit
+          # belongs to, the one it merged is taken.
+          pr_json=""
+          for wait in 0 5 10 15 30; do
+            sleep "$wait"
+            pr_json=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls \
+              --jq '[.[] | select(.merge_commit_sha == "${{ github.sha }}")][0] // .[0] // empty')
+            [ -n "$pr_json" ] && break
+            echo "No PR linked to ${{ github.sha }} yet"
+          done
           if [ -z "$pr_json" ]; then
             echo "No PR associated with this push -- nothing to release"
             echo "bump=none" >> "$GITHUB_OUTPUT"
