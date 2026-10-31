@@ -1,0 +1,18 @@
+# How the CARLA backend measures the weather ODD (weather.yaml): its probes
+# bucket CARLA's 0-100 weather intensities and the sun's altitude.
+openodd: [weather.yaml]
+name: carla_weather
+text: The weather, as autoware_carla_scenario's CARLA backend measures it.
+probes:
+  environment.illumination:
+    probe: illumination
+    text: Illumination, from the sun's altitude
+  environment.rain:
+    probe: rain
+    text: Rain, from a 0-100 precipitation
+  environment.fog:
+    probe: fog
+    text: Fog, from a 0-100 fog density
+  environment.road_wetness:
+    probe: road_wetness
+    text: The road's wetness, from a 0-100 wetness

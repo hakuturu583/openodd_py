@@ -21,6 +21,11 @@ can stage conditions -- a simulator's weather -- can be sampled from an ODD.
 The coverage collector (:mod:`.collector`) asks it where the ego is
 (:meth:`Backend.position`, :meth:`Backend.geolocation`).
 
+A backend can describe itself (:meth:`Backend.manifest`): its probes, its
+knobs and the inputs its rules read, written out so that tools without the
+application -- the editor in the browser -- can connect an ODD's attributes,
+the binding that measures them, and the backend's rules.
+
 What a run's settings do to the rest of it -- a simulator's rain to the
 road's grip -- a backend may write as fuzzy rules (:mod:`.rules`): its own
 (:attr:`Backend.rules`), which a run may read another file over
@@ -46,12 +51,16 @@ if TYPE_CHECKING:
     from .sampler import OddKnob
 
 __all__ = [
+    "MANIFEST_VERSION",
     "Backend",
     "Probe",
     "default_backend",
     "import_callable",
     "set_default_backend",
 ]
+
+#: The version of the format :meth:`Backend.manifest` writes.
+MANIFEST_VERSION = 1
 
 #: Reads an attribute's value from the backend's context; ``None`` is missing.
 Probe = Callable[[Any], Any]
@@ -96,6 +105,11 @@ class Backend:
             (:mod:`.rules`), if any.
         rule_inputs: The inputs those rules may read (any, if empty): what
             :meth:`rule_values` hands them.
+        rule_input_knobs: Rule input -> the key of the knob whose written
+            value it is (``precipitation`` -> ``environment.rain``): how an
+            attribute a knob sets reaches the rules (:meth:`manifest`).
+        rule_input_text: Rule input -> a line saying what it is (``water``:
+            the larger of ``wetness`` and ``precipitation_deposits``).
     """
 
     name: str = "default"
@@ -108,6 +122,8 @@ class Backend:
     allow_imports: bool = True
     rules: Optional[Rules] = None
     rule_inputs: Sequence[str] = ()
+    rule_input_knobs: Mapping[str, str] = field(default_factory=dict)
+    rule_input_text: Mapping[str, str] = field(default_factory=dict)
     #: A run's rules over :attr:`rules` (:meth:`use_rules`).
     _rules_in_use: Optional[Rules] = field(
         default=None, init=False, repr=False, compare=False
@@ -253,6 +269,79 @@ class Backend:
         if rules is None:
             raise RulesError(f"the {self.name} backend has no rules")
         return rules.range(quantity, self.rule_values(values))
+
+
+    # -- what the backend says of itself ----------------------------------------
+
+    def manifest(self) -> dict[str, Any]:
+        """The backend, described for tools that do not run it.
+
+        A plain mapping (write it as YAML or JSON): the probes a binding may
+        name, with their units; the reader keys (``measure``); each knob, by
+        the probe whose attribute it sets, with the values it writes per
+        bucket label; the inputs the rules may read, each with the knob whose
+        written value it is; and the rule files followed, with their SHA-256.
+        The editor reads it to connect an ODD's attributes, the binding that
+        measures them, and the rules (docs/editor.md).
+        """
+        names: dict[int, str] = {id(p): n for n, (p, _) in self.probes.items()}
+        probes: dict[str, Any] = {}
+        for name, (probe, unit) in self.probes.items():
+            entry: dict[str, Any] = {"unit": unit}
+            text = _first_line(getattr(probe, "__doc__", None))
+            if text:
+                entry["text"] = text
+            probes[name] = entry
+        knobs: dict[str, Any] = {}
+        for key, knob in self.knobs.items():
+            name = key if isinstance(key, str) else names.get(id(key))
+            if name is None:
+                continue
+            knobs[name] = _knob_manifest(knob)
+        inputs: dict[str, Any] = {}
+        for name in self.rule_inputs:
+            entry = {}
+            if name in self.rule_input_knobs:
+                entry["knob"] = self.rule_input_knobs[name]
+            if name in self.rule_input_text:
+                entry["text"] = self.rule_input_text[name]
+            inputs[str(name)] = entry
+        out: dict[str, Any] = {
+            "openodd_backend": MANIFEST_VERSION,
+            "name": self.name,
+            "probes": probes,
+            "readers": sorted(self.readers),
+            "knobs": knobs,
+            "rule_inputs": inputs,
+        }
+        if self.rules is not None:
+            out["rules"] = [{"file": f, "sha256": h} for f, h in self.rules.files]
+        return out
+
+
+def _first_line(text: Optional[str]) -> str:
+    return (text or "").strip().splitlines()[0].strip() if (text or "").strip() else ""
+
+
+def _knob_manifest(knob: "OddKnob") -> dict[str, Any]:
+    out: dict[str, Any] = {"key": knob.key}
+    if knob.values:
+        out["values"] = {
+            str(label): (list(v) if isinstance(v, (list, tuple)) else v)
+            for label, v in knob.values.items()
+        }
+    if knob.range is not None:
+        out["range"] = list(knob.range)
+    if knob.limits is not None:
+        # An open end is None, as a knob is written: JSON has no infinity.
+        out["limits"] = [None if abs(x) == float("inf") else x for x in knob.limits]
+    if knob.scale != 1.0:
+        out["scale"] = knob.scale
+    if knob.offset != 0.0:
+        out["offset"] = knob.offset
+    if knob.integer:
+        out["integer"] = True
+    return out
 
 
 _DEFAULT = Backend()

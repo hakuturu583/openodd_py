@@ -181,3 +181,50 @@ class TestExtends:
         backend = _WaterBackend(rules=Rules.from_text(GRIP), rule_inputs=["water"])
         backend.use_rules("https://example.com/measured.yaml")
         assert backend.derived_range("grip", {"water": 100}) == pytest.approx((0.30, 0.50))
+
+
+class TestManifest:
+    def test_a_backend_describes_its_probes_knobs_and_rule_inputs(self) -> None:
+        from openodd.sampler import OddKnob
+
+        def rain(world):  # type: ignore[no-untyped-def]
+            """Rain, from a 0-100 precipitation."""
+            return None
+
+        backend = Backend(
+            name="sim",
+            probes={"rain": (rain, ""), "speed_kph": (lambda w: None, "km/h")},
+            readers={"measure": lambda v: (lambda w: None, "m")},
+            knobs={
+                rain: OddKnob("environment.rain", values={"none": 0, "heavy": [70, 100]}),
+                "speed_kph": OddKnob("ego.speed", range=(0, 130), limits=(0, None)),
+            },
+            rules=Rules.from_text(GRIP, "grip.yaml"),
+            rule_inputs=["water", "precipitation"],
+            rule_input_knobs={"precipitation": "environment.rain"},
+            rule_input_text={"water": "the larger of wetness and deposits"},
+        )
+        m = backend.manifest()
+        assert m["openodd_backend"] == 1 and m["name"] == "sim"
+        assert m["probes"]["rain"] == {"unit": "", "text": "Rain, from a 0-100 precipitation."}
+        assert m["probes"]["speed_kph"] == {"unit": "km/h"}
+        assert m["readers"] == ["measure"]
+        assert m["knobs"]["rain"] == {
+            "key": "environment.rain",
+            "values": {"none": 0, "heavy": [70.0, 100.0]},
+        }
+        assert m["knobs"]["speed_kph"] == {
+            "key": "ego.speed",
+            "range": [0.0, 130.0],
+            "limits": [0.0, None],
+        }
+        assert m["rule_inputs"] == {
+            "water": {"text": "the larger of wetness and deposits"},
+            "precipitation": {"knob": "environment.rain"},
+        }
+        assert m["rules"][0]["file"] == "grip.yaml"
+        assert len(m["rules"][0]["sha256"]) == 64
+        # It is plain data: JSON writes it as it is.
+        import json
+
+        assert json.loads(json.dumps(m)) == m

@@ -160,9 +160,47 @@ refuses rules reading any other, its own and a run's alike.
 | `derived(quantity, values)` | Each output of the quantity |
 | `derived_range(quantity, values)` | `(low, high)` of a quantity giving those two |
 
+| `rule_input_knobs` | Input → the key of the knob whose written value it is (`precipitation` → `environment.rain`) |
+| `rule_input_text` | Input → a line saying what it is |
+| `manifest()` | The backend described for tools that do not run it ([below](#the-backends-manifest)) |
+
 A run that reads its own rules should call `use_rules` at its start every
 time, with `None` when it names none, so one run's rules do not reach the
 next: the backend is usually the process's default one, shared by every run.
+
+## The backend's manifest
+
+`Backend.manifest()` describes a backend as plain data, to write as YAML or
+JSON for tools that cannot run it, such as the editor in the browser:
+
+```python
+import yaml
+yaml.safe_dump(backend.manifest(), open("carla.manifest.yaml", "w"), sort_keys=False)
+```
+
+```yaml
+openodd_backend: 1
+name: CARLA
+probes:                     # what a binding may name, with the unit it reads in
+  rain: {unit: "", text: "The rain level, from CARLA's 0-100 precipitation."}
+readers: [measure]
+knobs:                      # by the probe whose attribute it sets
+  rain:
+    key: environment.rain
+    values: {none: 0, light: [1, 30], moderate: [30, 70], heavy: [70, 100]}
+rule_inputs:                # what the rules may read, and the knob that writes it
+  precipitation: {knob: environment.rain}
+  water: {text: "The larger of wetness and precipitation_deposits"}
+rules:
+  - {file: weather_rules.yaml, sha256: 3195f993...}
+```
+
+The probes, readers and knobs are the backend's own. An input's `knob` comes
+from `rule_input_knobs`: with it, an ODD attribute can be followed to the
+rules. The binding names the attribute's probe, the manifest names the knob
+of that probe and the values it writes for each bucket, and it names the rule
+inputs the knob writes. The editor draws that chain and checks whether the
+rules' terms match the ODD's buckets ([editor.md](editor.md#the-binding-and-the-connections)).
 
 ## Seeing them
 
@@ -172,3 +210,8 @@ and the quantity's response as one input moves. It is a component a page
 embeds (`RulesView` and `mount(..., {view: "rules"})`,
 [wasm.md](wasm.md#fuzzy-rules)); `examples/wasm-viewer/rules.html` puts it
 beside an editor of the file.
+
+To edit a rule file as forms rather than text, use the editor's **Fuzzy rules**
+mode ([editor.md](editor.md#editing-fuzzy-rules)): drag a term's corners on
+its chart, pick a term per input for each rule, and watch the outputs and the
+response follow, read by this same reader.

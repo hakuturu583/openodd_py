@@ -119,8 +119,74 @@ impl Ctx {
     }
 }
 
+/// Which editor the studio shows: the ODD, or a backend's fuzzy rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Odd,
+    Binding,
+    Rules,
+}
+
+impl Mode {
+    /// The mode the page's address names (`#rules`).
+    fn from_location() -> Mode {
+        let hash = web_sys::window()
+            .and_then(|w| w.location().hash().ok())
+            .unwrap_or_default();
+        match hash.as_str() {
+            "#rules" => Mode::Rules,
+            "#binding" => Mode::Binding,
+            _ => Mode::Odd,
+        }
+    }
+}
+
+/// The studio: an ODD, the binding that measures it, and a backend's fuzzy
+/// rules, each with its own editor and all three held at once, so that each
+/// can show how it meets the others.
 #[component]
 pub fn App() -> impl IntoView {
+    let mode = RwSignal::new(Mode::from_location());
+    provide_context(mode);
+    provide_context(odd_context());
+    provide_context(crate::rules_app::rules_context());
+    provide_context(crate::binding_app::binding_context());
+    move || match mode.get() {
+        Mode::Odd => view! { <OddStudio/> }.into_any(),
+        Mode::Binding => view! { <crate::binding_app::BindingStudio/> }.into_any(),
+        Mode::Rules => view! { <crate::rules_app::RulesStudio/> }.into_any(),
+    }
+}
+
+/// The switch between the ODD editor and the rules editor.
+#[component]
+pub fn ModeSwitch() -> impl IntoView {
+    let mode = expect_context::<RwSignal<Mode>>();
+    let go = move |m: Mode| {
+        mode.set(m);
+        if let Some(w) = web_sys::window() {
+            let _ = w
+                .location()
+                .set_hash(if m == Mode::Rules { "rules" } else { "" });
+        }
+    };
+    view! {
+        <div class="segmented mode" role="tablist" aria-label="Editor">
+            <button class:active=move || mode.get() == Mode::Odd on:click=move |_| go(Mode::Odd)>
+                <Icon name="map"/>"ODD"
+            </button>
+            <button class:active=move || mode.get() == Mode::Binding on:click=move |_| go(Mode::Binding)>
+                <Icon name="link"/>"Binding"
+            </button>
+            <button class:active=move || mode.get() == Mode::Rules on:click=move |_| go(Mode::Rules)>
+                <Icon name="func"/>"Fuzzy rules"
+            </button>
+        </div>
+    }
+}
+
+/// The ODD editor's state, kept while another editor is shown.
+fn odd_context() -> Ctx {
     let (name, text) = io::load_draft().unwrap_or_else(|| ("urban.yaml".into(), URBAN.into()));
     let doc = Document::from_yaml(&text)
         .or_else(|_| Document::from_yaml(URBAN))
@@ -156,15 +222,18 @@ pub fn App() -> impl IntoView {
         evaluation,
         notice: RwSignal::new(None),
     };
-    provide_context(ctx);
-
     // Keep the draft between visits.
     Effect::new(move |_| {
         if let Ok(text) = yaml.get() {
             io::save_draft(&name.get(), &text);
         }
     });
+    ctx
+}
 
+#[component]
+fn OddStudio() -> impl IntoView {
+    let ctx = ctx();
     view! {
         <div class="app">
             <Toolbar/>
@@ -238,6 +307,7 @@ fn Toolbar() -> impl IntoView {
                 <span class="logo"><Icon name="map"/></span>
                 <span>"OpenODD Studio"</span>
             </div>
+            <ModeSwitch/>
             <div class="file">
                 <Icon name="doc"/>
                 <input

@@ -55,7 +55,13 @@
   - number lines whose condition ends you drag;
   - a test drive judging values live.
 
-  It is written in Rust and Leptos, with no server
+  Its **Fuzzy rules** mode edits a backend's [rule files](docs/rules.md) as
+  forms: each input's terms drawn with draggable corners, the rules as a
+  table of term pickers, and each quantity's outputs and response as the
+  inputs move. Its **Binding** mode edits how each attribute is measured. With
+  a backend's manifest (`Backend.manifest()`), it follows each attribute from
+  the ODD through the binding and the backend's knobs to the rules that read
+  it. It is written in Rust and Leptos, with no server
   ([docs/editor.md](docs/editor.md), demo at
   [hakuturu583.github.io/openodd_py](https://hakuturu583.github.io/openodd_py/)).
 - **Comparing two sets on one ODD**: the same views with two sets of runs laid over one
