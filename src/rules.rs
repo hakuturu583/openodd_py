@@ -58,6 +58,10 @@ use crate::yaml::{parse_all, Node, NodeExt};
 
 /// The rule file format this module reads.
 pub const VERSION: i64 = 1;
+/// Where `exp(-x)` is zero in f64: a bell's degree past `sigma * sqrt(2 * this)`.
+const EXP_UNDERFLOW: f64 = 745.2;
+/// The deepest a chain of `extends` may go.
+pub const MAX_EXTENDS_DEPTH: usize = 32;
 /// The evenly spaced points per input the checks add to its terms' own.
 const CHECK_SPACED: usize = 11;
 /// The most points a rule base's firing check evaluates: one reading more
@@ -148,7 +152,12 @@ impl Input {
             match m {
                 Membership::Triangle(p) => corners.extend(p),
                 Membership::Trapezoid(p) => corners.extend(p),
-                Membership::Gaussian { mean, .. } => corners.push(*mean),
+                Membership::Gaussian { mean, sigma } => {
+                    // A bell is never zero, but its degree is, in floating
+                    // point, past where exp() underflows: those are its corners.
+                    let reach = sigma * (2.0 * EXP_UNDERFLOW).sqrt();
+                    corners.extend([mean - reach, *mean, mean + reach]);
+                }
             }
         }
         let step = (self.high - self.low) / (CHECK_SPACED - 1) as f64;
@@ -428,14 +437,26 @@ impl Origin {
                     git_join(&g.path, p),
                 )?),
                 Origin::File(f) if !is_absolute_path(p) => {
-                    Origin::File(f.parent().unwrap_or(Path::new("")).join(p))
+                    Origin::File(normalize(&f.parent().unwrap_or(Path::new("")).join(p)))
                 }
-                _ => Origin::File(PathBuf::from(p)),
+                _ => Origin::File(normalize(Path::new(p))),
             },
         })
     }
 
-    /// How it is named in messages, and the key a file read twice shares.
+    /// The same file's key, however it is named: a local file's canonical
+    /// path (links followed), when it exists.
+    fn key(&self) -> String {
+        match self {
+            Origin::File(p) => p
+                .canonicalize()
+                .map(|c| c.display().to_string())
+                .unwrap_or_else(|_| self.label()),
+            _ => self.label(),
+        }
+    }
+
+    /// How it is named in messages.
     pub fn label(&self) -> String {
         match self {
             Origin::Text => "<text>".into(),
@@ -444,6 +465,27 @@ impl Origin {
             Origin::Git(g) => format!("{}@{}:{}", g.url, g.rev, g.path),
         }
     }
+}
+
+/// `path` with `.` and `..` worked out without the file system (a leading
+/// `..` of a relative path is kept).
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                _ => out.push(part),
+            },
+            other => out.push(other),
+        }
+    }
+    out.iter().collect()
 }
 
 fn is_absolute_path(p: &str) -> bool {
@@ -816,8 +858,13 @@ fn compose(
             .of(&reference)
             .map_err(|e| at.key("extends").error(e))?;
         let label = next.label();
-        if stack.contains(&label) || label == origin.label() {
+        if stack.contains(&next.key()) || next.key() == origin.key() {
             return Err(at.key("extends").error(format!("{label} extends itself")));
+        }
+        if stack.len() >= MAX_EXTENDS_DEPTH {
+            return Err(at.key("extends").error(format!(
+                "extends nests deeper than {MAX_EXTENDS_DEPTH} files"
+            )));
         }
         let text = fetch.fetch(&next).map_err(|e| at.key("extends").error(e))?;
         if let Reference::Url {
@@ -831,7 +878,7 @@ fn compose(
                     .error(format!("{label}: its SHA-256 is {got}, not {want}")));
             }
         }
-        stack.push(origin.label());
+        stack.push(origin.key());
         let extended = compose(&text, &label, &next, fetch, stack, files)?;
         stack.pop();
         base = Some(match base {
@@ -1658,7 +1705,9 @@ quantities:
         ));
         let labels: Vec<&str> = rules.files.iter().map(|f| f.label.as_str()).collect();
         assert!(
-            labels[0].ends_with("../base.yaml") && labels[1].ends_with("mini.yaml"),
+            labels[0].ends_with("base.yaml")
+                && !labels[0].contains("..")
+                && labels[1].ends_with("mini.yaml"),
             "{labels:?}"
         );
         assert_eq!(
@@ -1737,6 +1786,60 @@ quantities:
             .unwrap_err()
             .to_string();
         assert!(e.contains("cannot read rules"), "{e}");
+    }
+
+    #[test]
+    fn a_cycle_through_another_name_of_the_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        files(
+            dir.path(),
+            &[
+                (
+                    "a.yaml",
+                    "version: 1\nextends: sub/../a.yaml\nquantities: {}\n",
+                ),
+                ("sub/keep", ""),
+                (
+                    "deep/b.yaml",
+                    "version: 1\nextends: ./../deep/./b.yaml\nquantities: {}\n",
+                ),
+            ],
+        );
+        for f in ["a.yaml", "deep/b.yaml"] {
+            let e = load(&dir.path().join(f)).unwrap_err().to_string();
+            assert!(e.contains("extends itself"), "{f}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_chain_deeper_than_the_limit_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entries = Vec::new();
+        for k in 0..=MAX_EXTENDS_DEPTH + 1 {
+            entries.push((
+                format!("f{k}.yaml"),
+                format!("version: 1\nextends: f{}.yaml\nquantities: {{}}\n", k + 1),
+            ));
+        }
+        entries.push((format!("f{}.yaml", MAX_EXTENDS_DEPTH + 2), GRIP.to_string()));
+        let refs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        files(dir.path(), &refs);
+        let e = load(&dir.path().join("f0.yaml")).unwrap_err().to_string();
+        assert!(e.contains("nests deeper than"), "{e}");
+    }
+
+    #[test]
+    fn where_a_bell_underflows_is_checked_too() {
+        // All four terms are zero at 33.5: the narrow bells underflow there.
+        let text = GRIP
+            .replace("dry: {trapezoid: [0, 0, 0, 50]}", "dry: {triangle: [0, 0, 33.4]}\n              b1: {gaussian: [33.4, 0.0001]}\n              b2: {gaussian: [33.8, 0.006]}")
+            .replace("wet: {triangle: [0, 50, 100]}", "wet: {triangle: [33.8, 100, 100]}")
+            .replace("flooded: {trapezoid: [50, 100, 100, 100]}", "flooded: {triangle: [99, 100, 100]}");
+        let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
+        assert!(e.contains("no term covers water"), "{e}");
     }
 
     #[test]
