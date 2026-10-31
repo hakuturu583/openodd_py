@@ -35,6 +35,7 @@ pub mod rules_view;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use openodd::case_prediction::CasePredictor;
 use openodd_coverage_view::case_plot::compare::Background;
 use openodd_coverage_view::cases::{Case, CaseQuery, CaseSet};
@@ -595,17 +596,65 @@ pub struct RulesView {
     rules: openodd::rules::RuleSet,
 }
 
+/// Where a rule file is: an `https://` URL, else a path (relative to the page).
+fn rule_origin(source: &str) -> openodd::rules::Origin {
+    if source.starts_with("https://") {
+        openodd::rules::Origin::Url(source.to_string())
+    } else {
+        openodd::rules::Origin::File(source.into())
+    }
+}
+
+/// The files a page fetched (`{location: text}`, as `loadRules` does).
+fn given(files: &str) -> Result<openodd::rules::Given, String> {
+    let mut out = IndexMap::new();
+    if let Some(map) = parse(files, "files")?.as_object() {
+        for (k, v) in map {
+            let v = v.as_str().ok_or(format!("files.{k}: not a string"))?;
+            out.insert(k.clone(), v.to_string());
+        }
+    }
+    Ok(openodd::rules::Given(out))
+}
+
+/// A rule file's `text` read from `source`, what it extends from `files`.
+fn read_rules(text: &str, source: &str, files: &str) -> Result<openodd::rules::RuleSet, String> {
+    openodd::rules::RuleSet::parse_with(text, source, &rule_origin(source), &mut given(files)?)
+        .map_err(|e| e.to_string())
+}
+
 impl RulesView {
     /// The rules of a rule file's `text`; `source` names it in messages.
     pub fn from_text(text: &str, source: &str) -> Result<RulesView, String> {
-        let rules = openodd::rules::RuleSet::parse(text, source).map_err(|e| e.to_string())?;
-        Ok(RulesView { rules })
+        Self::from_files(text, source, "")
     }
 
-    pub fn merge_str(&mut self, text: &str, source: &str) -> Result<(), String> {
-        let over = openodd::rules::RuleSet::parse(text, source).map_err(|e| e.to_string())?;
-        self.rules = self.rules.merged(&over);
+    /// The rules of a rule file's `text` read from `source`, with the files
+    /// it extends in `files` (`{location: text}`).
+    pub fn from_files(text: &str, source: &str, files: &str) -> Result<RulesView, String> {
+        Ok(RulesView {
+            rules: read_rules(text, source, files)?,
+        })
+    }
+
+    pub fn merge_str(&mut self, text: &str, source: &str, files: &str) -> Result<(), String> {
+        // It need only name what it changes: checked once merged.
+        self.rules = self
+            .rules
+            .parse_over(text, source, &rule_origin(source), &mut given(files)?)
+            .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn files_str(&self) -> String {
+        Json::from(
+            self.rules
+                .files
+                .iter()
+                .map(|f| json!({"location": f.label, "sha256": f.sha256}))
+                .collect::<Vec<_>>(),
+        )
+        .to_string()
     }
 
     pub fn inputs_str(&self, quantity: &str) -> Result<String, String> {
@@ -650,15 +699,46 @@ impl RulesView {
 
 #[wasm_bindgen]
 impl RulesView {
-    /// Read a rule file's text (YAML); `source` names it in messages.
+    /// Read a rule file's text (YAML); `source` (its URL or path) names it in
+    /// messages, and what it `extends` is read from `files_json`
+    /// (`{location: text}`; `loadRules` in js/viewer.js fetches them).
     #[wasm_bindgen(constructor)]
-    pub fn new(text: &str, source: &str) -> Result<RulesView, JsError> {
-        Self::from_text(text, source).map_err(js)
+    pub fn new(text: &str, source: &str, files_json: Option<String>) -> Result<RulesView, JsError> {
+        Self::from_files(text, source, files_json.as_deref().unwrap_or("")).map_err(js)
     }
 
-    /// Read another rule file over these rules, quantity by quantity.
-    pub fn merge(&mut self, text: &str, source: &str) -> Result<(), JsError> {
-        self.merge_str(text, source).map_err(js)
+    /// Merge another rule file over these rules (down to the rule base).
+    pub fn merge(
+        &mut self,
+        text: &str,
+        source: &str,
+        files_json: Option<String>,
+    ) -> Result<(), JsError> {
+        self.merge_str(text, source, files_json.as_deref().unwrap_or(""))
+            .map_err(js)
+    }
+
+    /// The locations a rule file's `text`, read from `source`, extends: a
+    /// JSON array of the URLs (or paths) to fetch.
+    pub fn references(text: &str, source: &str) -> Result<String, JsError> {
+        let refs = openodd::rules::RuleSet::references(text, source, &rule_origin(source))
+            .map_err(|e| js(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in refs {
+            if let openodd::rules::Origin::Git(_) = r {
+                return Err(js(format!(
+                    "{source}: a git source ({}) cannot be read in the browser",
+                    r.label()
+                )));
+            }
+            out.push(r.label());
+        }
+        Ok(Json::from(out).to_string())
+    }
+
+    /// `[{location, sha256}]` of every rule file read, as JSON.
+    pub fn files(&self) -> String {
+        self.files_str()
     }
 
     /// The quantities, as a JSON array.

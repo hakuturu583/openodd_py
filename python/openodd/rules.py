@@ -28,18 +28,54 @@ Inference is Sugeno's, zero order, with simpful's operators (``AND`` the
 least, ``OR`` the greatest, ``NOT`` the complement), in the Rust core. A
 backend holds its rules (:attr:`~.backend.Backend.rules`), and a run may read
 another file over them (:meth:`~.backend.Backend.use_rules`).
+
+A rule file may ``extends`` others -- a path relative to it, an ``https://``
+URL (``{url, sha256}`` pins its content), or ``{git, rev, path}`` -- and
+writes only what it changes over them::
+
+    version: 1
+    extends: https://example.com/rules/base_weather.yaml
+    quantities:
+      tire_friction:
+        rule_bases:
+          water:
+            rules: [...]          # its inputs are base_weather.yaml's
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+import urllib.request
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 from . import _core
 
-__all__ = ["Rules", "RulesError"]
+__all__ = ["Rules", "RulesError", "fetch_url"]
+
+#: The most a rule file read from a URL may hold.
+MAX_URL_BYTES = 4 * 1024 * 1024
+#: Seconds a URL has to answer.
+URL_TIMEOUT = 30.0
+
+
+def fetch_url(url: str) -> str:
+    """The text at an ``https://`` *url* (UTF-8, at most :data:`MAX_URL_BYTES`).
+
+    Raises:
+        RulesError: When it is not ``https://``, cannot be read, or is too large.
+    """
+    if not url.startswith("https://"):
+        raise RulesError(f"{url}: only https:// URLs are read")
+    try:
+        with urllib.request.urlopen(url, timeout=URL_TIMEOUT) as response:
+            data = response.read(MAX_URL_BYTES + 1)
+    except OSError as e:
+        raise RulesError(f"cannot read rules {url}: {e}") from e
+    if len(data) > MAX_URL_BYTES:
+        raise RulesError(f"cannot read rules {url}: larger than {MAX_URL_BYTES} bytes")
+    return data.decode("utf-8")
 
 
 class RulesError(ValueError):
@@ -53,34 +89,92 @@ class Rules:
         self._core = core
 
     @classmethod
-    def from_text(cls, text: str, source: str = "<rules>") -> "Rules":
+    def from_text(
+        cls,
+        text: str,
+        source: str = "<rules>",
+        base: Union[str, "os.PathLike[str]", None] = None,
+        fetch: Optional[Callable[[str], str]] = None,
+    ) -> "Rules":
         """The rules of a rule file's *text*; *source* names it in messages.
+        What it ``extends`` is read relative to *base* (its path or URL; the
+        working directory if not given), a URL with *fetch* (:func:`fetch_url`
+        by default).
 
         Raises:
-            RulesError: When the rules are not well formed.
+            RulesError: When the rules, or a file they extend, cannot be read
+                or are not well formed.
         """
-        try:
-            return cls(_core.RuleSet.parse(text, source))
-        except ValueError as e:
-            raise RulesError(str(e)) from None
+        where = None if base is None else str(base)
+        return cls(cls._call(_core.RuleSet.parse, text, source, where, fetch or fetch_url))
 
     @classmethod
-    def read(cls, path: Union[str, "os.PathLike[str]"]) -> "Rules":
-        """The rules of the file at *path*.
+    def read(
+        cls,
+        location: Union[str, "os.PathLike[str]"],
+        fetch: Optional[Callable[[str], str]] = None,
+    ) -> "Rules":
+        """The rules of the file at *location* -- a path, or an ``https://``
+        URL read with *fetch* (:func:`fetch_url` by default) -- and the files
+        it extends.
 
         Raises:
-            RulesError: When it cannot be read or its rules are not well formed.
+            RulesError: When it, or a file it extends, cannot be read or its
+                rules are not well formed.
         """
-        path = Path(path)
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as e:
-            raise RulesError(f"cannot read rules {path}: {e}") from e
-        return cls.from_text(text, str(path))
+        where = str(location)
+        if not where.startswith(("https://", "http://")):
+            where = str(Path(where))
+        return cls(cls._call(_core.RuleSet.load, where, fetch or fetch_url))
+
+    def read_over(
+        self,
+        location: Union[str, "os.PathLike[str]"],
+        fetch: Optional[Callable[[str], str]] = None,
+    ) -> "Rules":
+        """The file at *location* (a path or an ``https://`` URL), and the
+        files it extends, merged over these rules (:meth:`merged`). It need
+        only name what it changes -- a rule base's ``rules`` without its
+        ``inputs`` -- since it is checked once merged.
+
+        Raises:
+            RulesError: When it cannot be read or the merged rules are not
+                well formed.
+        """
+        where = str(location)
+        if not where.startswith(("https://", "http://")):
+            where = str(Path(where))
+        return Rules(self._call(self._core.load_over, where, fetch or fetch_url))
+
+    def text_over(
+        self,
+        text: str,
+        source: str = "<rules>",
+        base: Union[str, "os.PathLike[str]", None] = None,
+        fetch: Optional[Callable[[str], str]] = None,
+    ) -> "Rules":
+        """:meth:`read_over` for a rule file's *text* in hand."""
+        where = None if base is None else str(base)
+        return Rules(
+            self._call(self._core.parse_over, text, source, where, fetch or fetch_url)
+        )
 
     def merged(self, over: "Rules") -> "Rules":
-        """These rules with *over*'s quantities in place of their own."""
-        return Rules(self._core.merged(over._core))
+        """These rules with *over*'s merged over them: a quantity, a rule base
+        and an input *over* names replaces these rules' of that name, field by
+        field down to the rule base (``null`` removes one), and a rule base's
+        ``rules`` are replaced whole.
+
+        Raises:
+            RulesError: When the merged rules are not well formed.
+        """
+        return Rules(self._call(self._core.merged, over._core))
+
+    @property
+    def files(self) -> list[tuple[str, str]]:
+        """``(path or URL, sha256)`` of every file read, the files extended
+        first: what a run records of the rules it followed."""
+        return self._core.files
 
     @property
     def quantities(self) -> list[str]:

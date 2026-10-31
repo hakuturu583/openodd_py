@@ -99,12 +99,13 @@ strongly each fires. The same engine as Python's `openodd.Rules` computes it.
 <div id="rules"></div>
 <script type="module">
   import init, { RulesView, styles, script } from "./pkg/openodd_wasm.js";
-  import { install, mount } from "./pkg/viewer.js";
+  import { install, mount, loadRules } from "./pkg/viewer.js";
 
   await init();
   install({ styles, script });
-  const rules = new RulesView(yamlText, "weather_rules.yaml");   // throws on a bad file, saying where
-  rules.merge(measuredText, "measured.yaml");                    // another file over it, quantity by quantity
+  // The file and every file it extends, fetched; throws on a bad one, saying where.
+  const rules = await loadRules(RulesView, "https://example.com/rules/vehicles/mini.yaml");
+  rules.merge(measuredText, "measured.yaml");   // another file over it: only what it changes
   const view = mount(rules, document.getElementById("rules"), {
     view: "rules", quantity: "visibility", inputs: { fog_density: 80 }, x: "fog_density",
   });
@@ -130,7 +131,10 @@ strongly each fires. The same engine as Python's `openodd.Rules` computes it.
 
 | Method | Returns |
 |---|---|
-| `new RulesView(text, source)`, `merge(text, source)` | read a rule file (`merge`: another over it) |
+| `loadRules(RulesView, url, {text})` (viewer.js) | fetch a rule file (or read `text` as if from `url`) and every file it [extends](rules.md#extending-a-rule-file); a git source cannot be read in the browser |
+| `new RulesView(text, source, files)`, `merge(text, source, files)` | read a rule file from its location `source`, what it extends from `files` (`{location: text}`); `merge` reads one over these rules, naming only what it changes |
+| `RulesView.references(text, source)` | the locations a file extends, to fetch (what `loadRules` does) |
+| `files()` | `[{location, sha256}]` of every file read |
 | `quantities()` | a JSON array |
 | `inputs(quantity)` | a JSON array of `{name, universe, default}` |
 | `evaluate(quantity, inputs)` | the outputs at `inputs` (JSON objects) |

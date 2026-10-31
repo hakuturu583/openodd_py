@@ -2223,21 +2223,111 @@ struct RuleSet {
     inner: crate::rules::RuleSet,
 }
 
+/// Where a rule file is: an `https://` URL, else a path.
+fn rule_origin(location: &str) -> crate::rules::Origin {
+    if location.starts_with("https://") || location.starts_with("http://") {
+        crate::rules::Origin::Url(location.to_string())
+    } else {
+        crate::rules::Origin::File(PathBuf::from(location))
+    }
+}
+
+/// Reads rule files: local and git ones itself, a URL through `fetch`.
+fn with_fetch<T>(
+    py: Python<'_>,
+    fetch: Option<PyObject>,
+    f: impl FnOnce(&mut dyn crate::rules::Fetch) -> crate::error::Result<T>,
+) -> PyResult<T> {
+    let mut url = |u: &str| -> crate::error::Result<String> {
+        let Some(fetch) = &fetch else {
+            return Err(Error::value(format!(
+                "cannot read rules {u}: no way to fetch a URL was given"
+            )));
+        };
+        fetch
+            .call1(py, (u,))
+            .and_then(|r| r.extract::<String>(py))
+            .map_err(|e| Error::value(format!("cannot read rules {u}: {e}")))
+    };
+    let mut files = crate::rules::Files {
+        url: Some(&mut url),
+    };
+    f(&mut files).map_err(err)
+}
+
 #[pymethods]
 impl RuleSet {
     /// The rule set of a rule file's `text`; `source` names it in messages.
+    /// With `base` (the file's path or URL), what it `extends` is read,
+    /// relative to it; `fetch(url) -> str` reads an `https://` one.
     #[staticmethod]
-    fn parse(text: &str, source: &str) -> PyResult<Self> {
+    #[pyo3(signature = (text, source, base=None, fetch=None))]
+    fn parse(
+        py: Python<'_>,
+        text: &str,
+        source: &str,
+        base: Option<&str>,
+        fetch: Option<PyObject>,
+    ) -> PyResult<Self> {
+        let origin = base.map(rule_origin).unwrap_or(crate::rules::Origin::Text);
+        let inner = with_fetch(py, fetch, |f| {
+            crate::rules::RuleSet::parse_with(text, source, &origin, f)
+        })?;
+        Ok(RuleSet { inner })
+    }
+
+    /// The rule set of the file at `location` (a path or an `https://` URL)
+    /// and the files it extends.
+    #[staticmethod]
+    #[pyo3(signature = (location, fetch=None))]
+    fn load(py: Python<'_>, location: &str, fetch: Option<PyObject>) -> PyResult<Self> {
+        let origin = rule_origin(location);
+        let inner = with_fetch(py, fetch, |f| crate::rules::RuleSet::load(&origin, f))?;
+        Ok(RuleSet { inner })
+    }
+
+    /// The file at `location`, and the files it extends, merged over this
+    /// rule set: it need only name what it changes.
+    #[pyo3(signature = (location, fetch=None))]
+    fn load_over(&self, py: Python<'_>, location: &str, fetch: Option<PyObject>) -> PyResult<Self> {
+        let origin = rule_origin(location);
+        let inner = with_fetch(py, fetch, |f| self.inner.load_over(&origin, f))?;
+        Ok(RuleSet { inner })
+    }
+
+    /// A rule file's `text`, and the files it extends, merged over this rule
+    /// set; what it extends is read relative to `base`.
+    #[pyo3(signature = (text, source, base=None, fetch=None))]
+    fn parse_over(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        source: &str,
+        base: Option<&str>,
+        fetch: Option<PyObject>,
+    ) -> PyResult<Self> {
+        let origin = base.map(rule_origin).unwrap_or(crate::rules::Origin::Text);
+        let inner = with_fetch(py, fetch, |f| {
+            self.inner.parse_over(text, source, &origin, f)
+        })?;
+        Ok(RuleSet { inner })
+    }
+
+    /// This rule set with `over`'s rules merged over it.
+    fn merged(&self, over: &RuleSet) -> PyResult<RuleSet> {
         Ok(RuleSet {
-            inner: crate::rules::RuleSet::parse(text, source).map_err(err)?,
+            inner: self.inner.merged(&over.inner).map_err(err)?,
         })
     }
 
-    /// This rule set with `over`'s quantities in place of its own.
-    fn merged(&self, over: &RuleSet) -> RuleSet {
-        RuleSet {
-            inner: self.inner.merged(&over.inner),
-        }
+    /// `(label, sha256)` of every file read.
+    #[getter]
+    fn files(&self) -> Vec<(String, String)> {
+        self.inner
+            .files
+            .iter()
+            .map(|f| (f.label.clone(), f.sha256.clone()))
+            .collect()
     }
 
     #[getter]

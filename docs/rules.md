@@ -74,6 +74,60 @@ same in either: `tests/rules_golden.json` holds simpful's outputs, written by
 a little more than simpful parses: a `NOT` clause may come first in an `AND` or
 an `OR`.
 
+## Extending a rule file
+
+A rule file may `extends` others and write only what it changes over them:
+one weather model, and a file per vehicle with its own grip.
+
+```yaml
+# vehicles/mini.yaml
+version: 1
+extends: ../base_weather.yaml        # relative to this file
+quantities:
+  tire_friction:
+    rule_bases:
+      water:
+        rules:                       # replaced; the inputs are base_weather.yaml's
+          - {if: (water IS dry),     then: {low: 0.95, high: 1.05}}
+          - {if: (water IS wet),     then: {low: 0.60, high: 0.80}}
+          - {if: (water IS flooded), then: {low: 0.30, high: 0.50}}
+```
+
+`extends` takes one reference or a list, merged in order, each over the
+last, and the file itself over them all:
+
+| Reference | Read |
+|---|---|
+| `base.yaml`, `../shared/base.yaml` | relative to the file naming it -- a local file, a URL, or a file in a git checkout -- or an absolute path |
+| `https://example.com/rules/base.yaml` | through the host: Python's `openodd.rules.fetch_url` (urllib, 30 s, at most 4 MB), the browser's `fetch` |
+| `{url: https://..., sha256: <64 hex digits>}` | the same, refused unless its content has that digest |
+| `{git: <repository>, rev: <tag, branch or commit>, path: <file>}` | from a git repository at a revision, cached as an ODD's [git sources](../README.md) are (`$OPENODD_CACHE`) |
+
+Only `https://` URLs are read. A file that extends itself, through any chain,
+is refused.
+
+**How files merge.** A quantity, a rule base and an input the later file
+names replace the earlier file's of that name; a quantity and a rule base
+merge field by field (`combine`, `rule_bases`; `inputs`, `rules`), and an
+input, or a rule base's `rules`, is replaced whole. `null` removes a quantity,
+a rule base or an input. So `rules:` alone keeps the inputs, and
+`inputs: {water: {...}}` alone replaces that input and keeps the rules.
+
+**Inside one file**, YAML anchors share a part (`&terms` ... `*terms`), and
+merge keys take a mapping and change some of it:
+
+```yaml
+inputs:
+  water:
+    <<: *water          # the anchored input
+    default: 0          # and a default
+```
+
+A merged rule set is checked as a whole, once merged, so an extending file
+need not be one on its own. `Rules.files` lists every file read, the
+extended ones first, with the SHA-256 of each: what a run records of the
+rules it followed.
+
 ## Checks
 
 A rule file is checked when it is read, and `RulesError` (a `ValueError`) says
@@ -82,9 +136,14 @@ where (`weather_rules.yaml: quantities.tire_friction.rule_bases.water.rules[1].i
 - every field known, every term and rule well formed, every clause naming an
   input of its rule base and a term of that input;
 - every input's universe covered by its terms;
-- some rule firing at every point of a grid over the inputs' universes (at
-  most 201 points per input, 20000 in all), so no weather the inputs can hold
-  is left without a value.
+- some rule firing everywhere the inputs can be, so no weather the inputs can
+  hold is left without a value. The terms are piecewise linear between their
+  corners, so a gap -- in what the terms cover, or in where the rules fire --
+  begins and ends at a corner: the checks read each input at its terms'
+  corners (and a bell's centre), a few evenly spaced points and the midpoint
+  of each two neighbours, and a rule base at every combination of those. One
+  whose combinations number more than a million is refused, to be split into
+  rule bases reading fewer inputs.
 
 Which inputs exist is the backend's to say: `Backend(rule_inputs=[...])`
 refuses rules reading any other, its own and a run's alike.
@@ -95,7 +154,7 @@ refuses rules reading any other, its own and a run's alike.
 |---|---|
 | `rules` | The backend's own rules (`None`: none) |
 | `rule_inputs` | The inputs they may read (any, if empty) |
-| `use_rules(path or Rules or None)` | Follow a file's rules over `rules` from now on, quantity by quantity; `None` goes back to `rules` alone |
+| `use_rules(path, URL or Rules or None)` | Follow a file's rules merged over `rules` from now on (it need only name what it changes, as an extending file does); `None` goes back to `rules` alone |
 | `active_rules` | The rules followed |
 | `rule_values(values)` | What the rules read of the values a caller has: by default those. A backend whose rules read something derived -- the larger of `wetness` and `precipitation_deposits` -- overrides it |
 | `derived(quantity, values)` | Each output of the quantity |

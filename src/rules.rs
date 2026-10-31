@@ -39,23 +39,34 @@
 //! their outputs, output by output.
 //!
 //! A rule set is checked when read: every term and rule well formed, every
-//! input's universe covered by its terms, and some rule firing everywhere on a
-//! grid over the inputs' universes. A value outside an input's universe is
+//! input's universe covered by its terms, and some rule firing everywhere the
+//! inputs can be -- read at the terms' corners and between them, which finds
+//! any gap, since the terms are piecewise linear between their corners. A value outside an input's universe is
 //! clamped to it. Which inputs exist is the backend's to say
 //! ([`RuleSet::check_inputs`]); one an input names a `default` for may be left
 //! out.
 
+use std::path::{Path, PathBuf};
+
 use indexmap::IndexMap;
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
+use crate::sources::GitSource;
 use crate::value::py_float_repr;
 use crate::yaml::{parse_all, Node, NodeExt};
 
 /// The rule file format this module reads.
 pub const VERSION: i64 = 1;
-/// The points per input the grid check samples, at most, and in all.
-const CHECK_POINTS: usize = 201;
-const CHECK_TOTAL: f64 = 20000.0;
+/// Where `exp(-x)` is zero in f64: a bell's degree past `sigma * sqrt(2 * this)`.
+const EXP_UNDERFLOW: f64 = 745.2;
+/// The deepest a chain of `extends` may go.
+pub const MAX_EXTENDS_DEPTH: usize = 32;
+/// The evenly spaced points per input the checks add to its terms' own.
+const CHECK_SPACED: usize = 11;
+/// The most points a rule base's firing check evaluates: one reading more
+/// inputs than that lets be checked is refused.
+pub const CHECK_LIMIT: usize = 1_000_000;
 
 /// A fuzzy term: how much a value belongs to it, 0 to 1.
 #[derive(Debug, Clone, PartialEq)]
@@ -130,9 +141,37 @@ impl Input {
         x.clamp(self.low, self.high)
     }
 
-    fn samples(&self, count: usize) -> Vec<f64> {
-        let step = (self.high - self.low) / (count - 1) as f64;
-        (0..count).map(|i| self.low + i as f64 * step).collect()
+    /// The points the checks read the input at: its universe's ends, its
+    /// terms' corners (and a bell's centre) inside it, a few evenly spaced
+    /// ones, and the midpoint of each two neighbours. Its terms are piecewise
+    /// linear between their corners, so where none covers it, or where no
+    /// rule fires, begins and ends at a corner: one of these points is in it.
+    fn check_points(&self) -> Vec<f64> {
+        let mut corners: Vec<f64> = vec![self.low, self.high];
+        for m in self.terms.values() {
+            match m {
+                Membership::Triangle(p) => corners.extend(p),
+                Membership::Trapezoid(p) => corners.extend(p),
+                Membership::Gaussian { mean, sigma } => {
+                    // A bell is never zero, but its degree is, in floating
+                    // point, past where exp() underflows: those are its corners.
+                    let reach = sigma * (2.0 * EXP_UNDERFLOW).sqrt();
+                    corners.extend([mean - reach, *mean, mean + reach]);
+                }
+            }
+        }
+        let step = (self.high - self.low) / (CHECK_SPACED - 1) as f64;
+        corners.extend((0..CHECK_SPACED).map(|i| self.low + i as f64 * step));
+        corners.retain(|x| self.low <= *x && *x <= self.high);
+        corners.sort_by(f64::total_cmp);
+        corners.dedup();
+        let mut out = Vec::with_capacity(corners.len() * 2);
+        for w in corners.windows(2) {
+            out.push(w[0]);
+            out.push((w[0] + w[1]) / 2.0);
+        }
+        out.push(*corners.last().expect("the universe's ends"));
+        out
     }
 }
 
@@ -226,11 +265,22 @@ impl RuleBase {
             .collect()
     }
 
-    /// Some rule fires at every point of a grid over the inputs' universes.
+    /// Some rule fires everywhere the inputs can be: at every combination of
+    /// their check points ([`Input::check_points`]). A clause reads one input,
+    /// so where no rule fires is made of cells between those points.
     fn check(&self) -> Result<()> {
-        let n = self.inputs.len() as i32;
-        let per = (CHECK_TOTAL.powf(1.0 / n as f64) as usize).clamp(2, CHECK_POINTS);
-        let grids: Vec<Vec<f64>> = self.inputs.iter().map(|i| i.samples(per)).collect();
+        let grids: Vec<Vec<f64>> = self.inputs.iter().map(Input::check_points).collect();
+        let total = grids
+            .iter()
+            .try_fold(1usize, |acc, g| acc.checked_mul(g.len()))
+            .filter(|t| *t <= CHECK_LIMIT);
+        if total.is_none() {
+            return Err(Error::value(format!(
+                "its {} inputs and their terms make more than {CHECK_LIMIT} points to check; \
+                 split it into rule bases reading fewer inputs",
+                self.inputs.len()
+            )));
+        }
         let mut index = vec![0usize; grids.len()];
         loop {
             let point: Vec<f64> = index.iter().zip(&grids).map(|(k, g)| g[*k]).collect();
@@ -350,35 +400,283 @@ impl Quantity {
     }
 }
 
-/// Quantities, read from a rule file.
+/// A rule file another one `extends`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Reference {
+    /// A path: relative to the file that names it (a local file, a URL, or a
+    /// file in a git checkout), or absolute.
+    Path(String),
+    /// An `https://` URL, and the SHA-256 its content must have, if pinned.
+    Url { url: String, sha256: Option<String> },
+    /// A file in a git repository at a revision ([`crate::sources`]).
+    Git(GitSource),
+}
+
+/// Where a rule file was read from: what a relative [`Reference::Path`] in
+/// it is relative to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// Given as text: a relative path is relative to the working directory.
+    Text,
+    File(PathBuf),
+    Url(String),
+    Git(GitSource),
+}
+
+impl Origin {
+    /// The origin a reference made in a file from here names.
+    pub fn of(&self, reference: &Reference) -> Result<Origin> {
+        Ok(match reference {
+            Reference::Url { url, .. } => Origin::Url(url.clone()),
+            Reference::Git(g) => Origin::Git(g.clone()),
+            Reference::Path(p) => match self {
+                Origin::Url(base) if !is_absolute_path(p) => Origin::Url(url_join(base, p)?),
+                Origin::Git(g) if !is_absolute_path(p) => Origin::Git(GitSource::new(
+                    g.url.clone(),
+                    g.rev.clone(),
+                    git_join(&g.path, p),
+                )?),
+                Origin::File(f) if !is_absolute_path(p) => {
+                    Origin::File(normalize(&f.parent().unwrap_or(Path::new("")).join(p)))
+                }
+                _ => Origin::File(normalize(Path::new(p))),
+            },
+        })
+    }
+
+    /// The same file's key, however it is named: a local file's canonical
+    /// path (links followed), when it exists.
+    fn key(&self) -> String {
+        match self {
+            Origin::File(p) => p
+                .canonicalize()
+                .map(|c| c.display().to_string())
+                .unwrap_or_else(|_| self.label()),
+            _ => self.label(),
+        }
+    }
+
+    /// How it is named in messages.
+    pub fn label(&self) -> String {
+        match self {
+            Origin::Text => "<text>".into(),
+            Origin::File(p) => p.display().to_string(),
+            Origin::Url(u) => u.clone(),
+            Origin::Git(g) => format!("{}@{}:{}", g.url, g.rev, g.path),
+        }
+    }
+}
+
+/// `path` with `.` and `..` worked out without the file system (a leading
+/// `..` of a relative path is kept).
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                _ => out.push(part),
+            },
+            other => out.push(other),
+        }
+    }
+    out.iter().collect()
+}
+
+fn is_absolute_path(p: &str) -> bool {
+    Path::new(p).is_absolute() || p.starts_with("https://") || p.starts_with("http://")
+}
+
+/// `rel` against the URL `base`, its `.` and `..` worked out.
+fn url_join(base: &str, rel: &str) -> Result<String> {
+    let Some(rest) = base.strip_prefix("https://") else {
+        return Err(Error::value(format!("{base}: only https:// URLs are read")));
+    };
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let mut parts: Vec<&str> = path.split('/').collect();
+    parts.pop(); // the file's own name
+    for part in rel.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    Ok(format!("https://{host}/{}", parts.join("/")))
+}
+
+/// `rel` against the directory of `path`, inside a repository.
+fn git_join(path: &str, rel: &str) -> String {
+    let mut parts: Vec<&str> = path.split('/').collect();
+    parts.pop();
+    for part in rel.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
+/// Reads the rule files a rule file `extends`.
+pub trait Fetch {
+    /// The text of the file at `origin` (never [`Origin::Text`]).
+    fn fetch(&mut self, origin: &Origin) -> Result<String>;
+}
+
+/// Reads local files and git sources itself, and asks `url` for an
+/// `https://` URL (the host's: Python's urllib, the browser's fetch); without
+/// one, a URL is an error.
+pub struct Files<'a> {
+    pub url: Option<&'a mut FetchUrl<'a>>,
+}
+
+/// Reads an `https://` URL's text: the host's.
+pub type FetchUrl<'a> = dyn FnMut(&str) -> Result<String> + 'a;
+
+impl Fetch for Files<'_> {
+    fn fetch(&mut self, origin: &Origin) -> Result<String> {
+        match origin {
+            Origin::Text => Err(Error::value("a rule file given as text has no file")),
+            Origin::File(p) => std::fs::read_to_string(p)
+                .map_err(|e| Error::value(format!("cannot read rules {}: {e}", p.display()))),
+            Origin::Git(g) => {
+                let (path, _) = crate::sources::checkout(g)?;
+                std::fs::read_to_string(&path)
+                    .map_err(|e| Error::value(format!("cannot read rules {}: {e}", origin.label())))
+            }
+            Origin::Url(u) => match self.url.as_mut() {
+                Some(f) => f(u),
+                None => Err(Error::value(format!(
+                    "cannot read rules {u}: no way to fetch a URL was given"
+                ))),
+            },
+        }
+    }
+}
+
+/// Files already read, by [`Origin::label`]: what the browser fetched ahead.
+pub struct Given(pub IndexMap<String, String>);
+
+impl Fetch for Given {
+    fn fetch(&mut self, origin: &Origin) -> Result<String> {
+        self.0
+            .get(&origin.label())
+            .cloned()
+            .ok_or_else(|| Error::value(format!("cannot read rules {}: not given", origin.label())))
+    }
+}
+
+/// A rule file read, and the SHA-256 of its text: what a run records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRead {
+    pub label: String,
+    pub sha256: String,
+}
+
+/// Quantities, read from a rule file and the files it extends.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RuleSet {
     pub quantities: IndexMap<String, Quantity>,
+    /// Every file read, the files extended before those extending them.
+    pub files: Vec<FileRead>,
+    /// The rules as one document, every `extends` worked in: what a later
+    /// set merges over ([`RuleSet::merged`]).
+    doc: Node,
 }
 
 impl RuleSet {
     /// The rule set of a rule file's `text`; `source` names it in messages.
+    /// It may not extend another file ([`RuleSet::parse_with`] reads those).
     pub fn parse(text: &str, source: &str) -> Result<Self> {
-        let docs = parse_all(text).map_err(|e| Error::value(format!("{source}: {e}")))?;
-        let [doc] = docs.as_slice() else {
-            return Err(Error::value(format!(
-                "{source}: expected one YAML document, got {}",
-                docs.len()
-            )));
-        };
-        let at = Where::new(source);
-        let map = mapping(doc, &at, &["version", "quantities"])?;
-        match get(map, "version").and_then(Node::as_i64) {
-            Some(VERSION) => {}
-            _ => {
-                return Err(at.error(format!(
-                    "version must be {VERSION}, got {}",
-                    get(map, "version")
-                        .map(NodeExt::py_repr)
-                        .unwrap_or("None".into())
-                )))
+        Self::parse_with(text, source, &Origin::Text, &mut Given(IndexMap::new()))
+    }
+
+    /// The rule set of the file at `origin` and the files it extends: a
+    /// whole set, checked on its own ([`RuleSet::load_over`] reads one that
+    /// only changes another).
+    pub fn load(origin: &Origin, fetch: &mut dyn Fetch) -> Result<Self> {
+        let text = fetch.fetch(origin)?;
+        Self::parse_with(&text, &origin.label(), origin, fetch)
+    }
+
+    /// The rule set of a rule file's `text`, read from `origin` (what a
+    /// relative path it extends is relative to), and the files it extends,
+    /// read with `fetch`.
+    pub fn parse_with(
+        text: &str,
+        source: &str,
+        origin: &Origin,
+        fetch: &mut dyn Fetch,
+    ) -> Result<Self> {
+        let mut files = Vec::new();
+        let doc = compose(text, source, origin, fetch, &mut Vec::new(), &mut files)?;
+        let mut set = Self::from_doc(doc, source)?;
+        set.files = files;
+        Ok(set)
+    }
+
+    /// The file at `origin`, and the files it extends, merged over these
+    /// rules ([`RuleSet::merged`]): it need only name what it changes, since
+    /// it is checked once merged.
+    pub fn load_over(&self, origin: &Origin, fetch: &mut dyn Fetch) -> Result<Self> {
+        let text = fetch.fetch(origin)?;
+        self.parse_over(&text, &origin.label(), origin, fetch)
+    }
+
+    /// A rule file's `text` (read from `origin`), and the files it extends,
+    /// merged over these rules: [`RuleSet::load_over`] for text in hand.
+    pub fn parse_over(
+        &self,
+        text: &str,
+        source: &str,
+        origin: &Origin,
+        fetch: &mut dyn Fetch,
+    ) -> Result<Self> {
+        let mut files = Vec::new();
+        let over = compose(text, source, origin, fetch, &mut Vec::new(), &mut files)?;
+        let touched: Vec<String> = over
+            .get("quantities")
+            .and_then(Node::as_mapping)
+            .map(|m| m.keys().map(NodeExt::py_str).collect())
+            .unwrap_or_default();
+        let mut doc = self.doc.clone();
+        merge_doc(&mut doc, &over);
+        let mut set = Self::from_doc(doc, source)?;
+        for (name, q) in &mut set.quantities {
+            if !touched.contains(name) {
+                if let Some(mine) = self.quantities.get(name) {
+                    q.source = mine.source.clone();
+                }
             }
         }
+        set.files = self.files.iter().cloned().chain(files).collect();
+        Ok(set)
+    }
+
+    /// The references a rule file's `text` extends, each as the origin it
+    /// names from `origin`: what a host fetches ahead ([`Given`]).
+    pub fn references(text: &str, source: &str, origin: &Origin) -> Result<Vec<Origin>> {
+        let doc = document(text, source)?;
+        extends_of(&doc, &Where::new(source))?
+            .iter()
+            .map(|r| origin.of(r))
+            .collect()
+    }
+
+    fn from_doc(doc: Node, source: &str) -> Result<Self> {
+        let at = Where::new(source);
+        let map = mapping(&doc, &at, &["version", "quantities"])?;
         let at = at.key("quantities");
         let quantities = required_mapping(map, "quantities", &at)?;
         let mut out = IndexMap::new();
@@ -387,17 +685,36 @@ impl RuleSet {
             let quantity = read_quantity(&name, raw, source, &at.key(&name))?;
             out.insert(name, quantity);
         }
-        Ok(RuleSet { quantities: out })
+        Ok(RuleSet {
+            quantities: out,
+            files: Vec::new(),
+            doc,
+        })
     }
 
-    /// This rule set with `over`'s quantities in place of its own, quantity by
-    /// quantity.
-    pub fn merged(&self, over: &RuleSet) -> RuleSet {
-        let mut quantities = self.quantities.clone();
-        for (name, q) in &over.quantities {
-            quantities.insert(name.clone(), q.clone());
+    /// This rule set with `over`'s rules merged over it: a quantity, a rule
+    /// base and an input `over` names replaces this one's of that name, field
+    /// by field down to the rule base, and `null` removes one; a rule base's
+    /// `rules` are replaced whole.
+    pub fn merged(&self, over: &RuleSet) -> Result<RuleSet> {
+        let source = over
+            .files
+            .last()
+            .map(|f| f.label.clone())
+            .unwrap_or_else(|| "<rules>".into());
+        let mut doc = self.doc.clone();
+        merge_doc(&mut doc, &over.doc);
+        let mut set = Self::from_doc(doc, &source)?;
+        // Quantities over did not touch keep where they came from.
+        for (name, q) in &mut set.quantities {
+            if !over.quantities.contains_key(name) {
+                if let Some(mine) = self.quantities.get(name) {
+                    q.source = mine.source.clone();
+                }
+            }
         }
-        RuleSet { quantities }
+        set.files = self.files.iter().chain(&over.files).cloned().collect();
+        Ok(set)
     }
 
     pub fn quantity(&self, name: &str) -> Result<&Quantity> {
@@ -439,6 +756,203 @@ impl RuleSet {
             }
         }
         Ok(())
+    }
+}
+
+/// One YAML document of `text`, merge keys (`<<`) worked out, its version
+/// checked.
+fn document(text: &str, source: &str) -> Result<Node> {
+    let docs = parse_all(text).map_err(|e| Error::value(format!("{source}: {e}")))?;
+    let [doc] = docs.as_slice() else {
+        return Err(Error::value(format!(
+            "{source}: expected one YAML document, got {}",
+            docs.len()
+        )));
+    };
+    let mut doc = doc.clone();
+    doc.apply_merge()
+        .map_err(|e| Error::value(format!("{source}: {e}")))?;
+    let at = Where::new(source);
+    let map = mapping(&doc, &at, &["version", "extends", "quantities"])?;
+    match get(map, "version").and_then(Node::as_i64) {
+        Some(VERSION) => Ok(doc),
+        _ => Err(at.error(format!(
+            "version must be {VERSION}, got {}",
+            get(map, "version")
+                .map(NodeExt::py_repr)
+                .unwrap_or("None".into())
+        ))),
+    }
+}
+
+/// What a document `extends`: a reference, or a list of them.
+fn extends_of(doc: &Node, at: &Where) -> Result<Vec<Reference>> {
+    let Some(raw) = doc.get("extends").map(untag) else {
+        return Ok(Vec::new());
+    };
+    let at = at.key("extends");
+    let items: Vec<&Node> = match raw {
+        Node::Sequence(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    let mut out = Vec::new();
+    for (k, item) in items.into_iter().enumerate() {
+        let at = at.index(k);
+        out.push(match untag(item) {
+            Node::String(s) if s.starts_with("https://") => Reference::Url {
+                url: s.clone(),
+                sha256: None,
+            },
+            Node::String(s) if s.starts_with("http://") => {
+                return Err(at.error(format!("{s}: only https:// URLs are read")))
+            }
+            Node::String(s) if !s.trim().is_empty() => Reference::Path(s.clone()),
+            Node::Mapping(_) if item.get("url").is_some() => {
+                let map = mapping(item, &at, &["url", "sha256"])?;
+                let url = get(map, "url").map(NodeExt::py_str).unwrap_or_default();
+                if !url.starts_with("https://") {
+                    return Err(at.error(format!("{url}: only https:// URLs are read")));
+                }
+                let sha256 = get(map, "sha256").map(|n| n.py_str().to_lowercase());
+                if let Some(h) = &sha256 {
+                    if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return Err(at.error("sha256 must be 64 hex digits"));
+                    }
+                }
+                Reference::Url { url, sha256 }
+            }
+            Node::Mapping(_) => {
+                let map = mapping(item, &at, &["git", "rev", "path"])?;
+                let field = |k: &str| get(map, k).map(NodeExt::py_str).unwrap_or_default();
+                Reference::Git(
+                    GitSource::new(field("git"), field("rev"), field("path"))
+                        .map_err(|e| at.error(e))?,
+                )
+            }
+            other => {
+                return Err(at.error(format!(
+                "expected a path, an https:// URL, {{url, sha256}} or {{git, rev, path}}, got {}",
+                other.py_repr()
+            )))
+            }
+        });
+    }
+    Ok(out)
+}
+
+/// `text` with every file it extends merged in under it, as one document:
+/// the files extended in order, each over the last, then `text` over them.
+fn compose(
+    text: &str,
+    source: &str,
+    origin: &Origin,
+    fetch: &mut dyn Fetch,
+    stack: &mut Vec<String>,
+    files: &mut Vec<FileRead>,
+) -> Result<Node> {
+    let mut doc = document(text, source)?;
+    let at = Where::new(source);
+    let mut base: Option<Node> = None;
+    for reference in extends_of(&doc, &at)? {
+        let next = origin
+            .of(&reference)
+            .map_err(|e| at.key("extends").error(e))?;
+        let label = next.label();
+        if stack.contains(&next.key()) || next.key() == origin.key() {
+            return Err(at.key("extends").error(format!("{label} extends itself")));
+        }
+        if stack.len() >= MAX_EXTENDS_DEPTH {
+            return Err(at.key("extends").error(format!(
+                "extends nests deeper than {MAX_EXTENDS_DEPTH} files"
+            )));
+        }
+        let text = fetch.fetch(&next).map_err(|e| at.key("extends").error(e))?;
+        if let Reference::Url {
+            sha256: Some(want), ..
+        } = &reference
+        {
+            let got = hex::encode(Sha256::digest(text.as_bytes()));
+            if &got != want {
+                return Err(at
+                    .key("extends")
+                    .error(format!("{label}: its SHA-256 is {got}, not {want}")));
+            }
+        }
+        stack.push(origin.key());
+        let extended = compose(&text, &label, &next, fetch, stack, files)?;
+        stack.pop();
+        base = Some(match base {
+            None => extended,
+            Some(mut b) => {
+                merge_doc(&mut b, &extended);
+                b
+            }
+        });
+    }
+    if let Node::Mapping(map) = &mut doc {
+        map.remove("extends");
+    }
+    files.push(FileRead {
+        label: source.to_string(),
+        sha256: hex::encode(Sha256::digest(text.as_bytes())),
+    });
+    Ok(match base {
+        None => doc,
+        Some(mut b) => {
+            merge_doc(&mut b, &doc);
+            b
+        }
+    })
+}
+
+/// Merge the rule document `over` into `base` (see [`RuleSet::merged`]).
+fn merge_doc(base: &mut Node, over: &Node) {
+    merge_level(base, over, &[("quantities", 0)]);
+}
+
+/// `over`'s entries into `base`'s, `depth` naming what the mapping holds:
+/// 0 quantities, 1 rule bases, 2 inputs. Down to the rule base an entry
+/// merges field by field; below it, it replaces.
+fn merge_level(base: &mut Node, over: &Node, named: &[(&str, usize)]) {
+    let (Node::Mapping(b), Node::Mapping(o)) = (base, untag(over)) else {
+        return;
+    };
+    for (k, v) in o {
+        let key = k.py_str();
+        let Some((_, depth)) = named.iter().find(|(n, _)| *n == key) else {
+            b.insert(k.clone(), v.clone());
+            continue;
+        };
+        let Node::Mapping(entries) = untag(v) else {
+            b.insert(k.clone(), v.clone());
+            continue;
+        };
+        if !matches!(b.get(k), Some(Node::Mapping(_))) {
+            b.insert(k.clone(), Node::Mapping(crate::yaml::Mapping::new()));
+        }
+        let Some(Node::Mapping(mine)) = b.get_mut(k) else {
+            continue;
+        };
+        for (name, entry) in entries {
+            if matches!(untag(entry), Node::Null) {
+                mine.remove(name);
+                continue;
+            }
+            let fields: &[(&str, usize)] = match depth {
+                0 => &[("rule_bases", 1)],
+                1 => &[("inputs", 2)],
+                _ => {
+                    mine.insert(name.clone(), entry.clone());
+                    continue;
+                }
+            };
+            match mine.get_mut(name) {
+                Some(existing @ Node::Mapping(_)) => merge_level(existing, entry, fields),
+                _ => {
+                    mine.insert(name.clone(), entry.clone());
+                }
+            }
+        }
     }
 }
 
@@ -641,7 +1155,7 @@ fn read_input(name: &str, node: &Node, at: &Where) -> Result<Input> {
         terms,
         default,
     };
-    for x in input.samples(CHECK_POINTS) {
+    for x in input.check_points() {
         let most = input
             .terms
             .values()
@@ -1023,7 +1537,7 @@ quantities:
     fn a_later_set_replaces_quantities_by_name() {
         let base = RuleSet::parse(GRIP, "base.yaml").unwrap();
         let over = RuleSet::parse(&GRIP.replace("0.45", "0.30"), "over.yaml").unwrap();
-        let merged = base.merged(&over);
+        let merged = base.merged(&over).unwrap();
         assert!(close(
             at(&merged, "grip", &[("water", 100.0)]).unwrap(),
             (0.30, 0.65)
@@ -1082,6 +1596,385 @@ quantities:
             assert!(e.contains(expected), "expected {expected:?} in {e:?}");
             assert!(e.starts_with("grip.yaml: "), "{e}");
         }
+    }
+
+    #[test]
+    fn a_gap_between_the_evenly_spaced_points_is_found() {
+        // Nothing covers 33.3, which no evenly spaced point falls on.
+        let text = GRIP
+            .replace(
+                "dry: {trapezoid: [0, 0, 0, 50]}",
+                "dry: {triangle: [0, 0, 33.3]}",
+            )
+            .replace(
+                "wet: {triangle: [0, 50, 100]}",
+                "wet: {triangle: [33.3, 100, 100]}",
+            )
+            .replace(
+                "flooded: {trapezoid: [50, 100, 100, 100]}",
+                "flooded: {triangle: [99, 100, 100]}",
+            );
+        let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
+        assert!(e.contains("no term covers water = 33.3,"), "{e}");
+        // Covered there, but by a term no rule names: no rule fires.
+        let text = text.replace(
+            "flooded: {triangle: [99, 100, 100]}",
+            "flooded: {triangle: [33, 33.3, 33.6]}",
+        );
+        let text = text.replace(
+            "          - if: (water IS flooded)\n            then: {low: 0.45, high: 0.65}\n",
+            "",
+        );
+        let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
+        assert!(e.contains("no rule fires at water=33.3"), "{e}");
+    }
+
+    #[test]
+    fn a_rule_base_too_wide_to_check_is_refused_at_once() {
+        let mut inputs = String::new();
+        let mut clause = Vec::new();
+        for k in 0..25 {
+            inputs.push_str(&format!(
+                "          x{k}:\n            universe: [0, 1]\n            terms: {{any: {{trapezoid: [0, 0, 1, 1]}}}}\n"
+            ));
+            clause.push(format!("(x{k} IS any)"));
+        }
+        let text = format!(
+            "version: 1\nquantities:\n  q:\n    rule_bases:\n      wide:\n        inputs:\n{inputs}        rules:\n          - if: {}\n            then: {{v: 1}}\n",
+            clause.join(" AND ")
+        );
+        let started = std::time::Instant::now();
+        let e = RuleSet::parse(&text, "wide.yaml").unwrap_err().to_string();
+        assert!(
+            e.contains("split it into rule bases reading fewer inputs"),
+            "{e}"
+        );
+        assert!(started.elapsed().as_secs() < 1);
+    }
+
+    const OVER_WATER: &str = r#"
+version: 1
+extends: base.yaml
+quantities:
+  grip:
+    rule_bases:
+      water:
+        rules:
+          - if: (water IS dry)
+            then: {low: 0.95, high: 1.05}
+          - if: (water IS wet)
+            then: {low: 0.60, high: 0.80}
+          - if: (water IS flooded)
+            then: {low: 0.30, high: 0.50}
+"#;
+
+    fn files(dir: &Path, entries: &[(&str, &str)]) {
+        for (name, text) in entries {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+    }
+
+    fn load(path: &Path) -> Result<RuleSet> {
+        RuleSet::load(&Origin::File(path.to_path_buf()), &mut Files { url: None })
+    }
+
+    #[test]
+    fn a_file_extends_another_writing_only_what_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        files(
+            dir.path(),
+            &[
+                ("base.yaml", GRIP),
+                (
+                    "vehicles/mini.yaml",
+                    &OVER_WATER.replace("base.yaml", "../base.yaml"),
+                ),
+            ],
+        );
+        let rules = load(&dir.path().join("vehicles/mini.yaml")).unwrap();
+        // The inputs are base.yaml's, the rules mini.yaml's.
+        assert!(close(
+            at(&rules, "grip", &[("water", 100.0)]).unwrap(),
+            (0.30, 0.50)
+        ));
+        assert!(close(
+            at(&rules, "grip", &[("water", 25.0)]).unwrap(),
+            (0.775, 0.925)
+        ));
+        let labels: Vec<&str> = rules.files.iter().map(|f| f.label.as_str()).collect();
+        assert!(
+            labels[0].ends_with("base.yaml")
+                && !labels[0].contains("..")
+                && labels[1].ends_with("mini.yaml"),
+            "{labels:?}"
+        );
+        assert_eq!(
+            rules.files[0].sha256,
+            hex::encode(Sha256::digest(GRIP.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn extending_merges_down_to_the_rule_base_and_null_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let two = GRIP.replace("    rule_bases:\n", "    combine: max\n    rule_bases:\n")
+            + &GRIP
+                .replace(
+                    "version: 1\nquantities:\n  grip:\n    rule_bases:\n      water:",
+                    "      water2:",
+                )
+                .replace("\nversion: 1\nquantities:\n  grip:\n    rule_bases:\n", "");
+        let child = "version: 1\nextends: base.yaml\nquantities:\n  grip:\n    combine: min\n    rule_bases:\n      water2: null\n      water:\n        inputs:\n          water:\n            universe: [0, 100]\n            default: 100\n            terms:\n              dry: {trapezoid: [0, 0, 0, 50]}\n              wet: {triangle: [0, 50, 100]}\n              flooded: {trapezoid: [50, 100, 100, 100]}\n";
+        files(dir.path(), &[("base.yaml", &two), ("child.yaml", child)]);
+        let base = load(&dir.path().join("base.yaml")).unwrap();
+        assert_eq!(base.quantity("grip").unwrap().rule_bases.len(), 2);
+        let rules = load(&dir.path().join("child.yaml")).unwrap();
+        let q = rules.quantity("grip").unwrap();
+        assert_eq!(q.combine, Combine::Min);
+        assert_eq!(q.rule_bases.len(), 1);
+        // The input replaced (a default now), the rules kept.
+        assert!(close(at(&rules, "grip", &[]).unwrap(), (0.45, 0.65)));
+    }
+
+    #[test]
+    fn a_file_naming_only_its_change_is_read_over_rules_in_hand() {
+        let dir = tempfile::tempdir().unwrap();
+        files(
+            dir.path(),
+            &[("run.yaml", &OVER_WATER.replace("extends: base.yaml\n", ""))],
+        );
+        let origin = Origin::File(dir.path().join("run.yaml"));
+        // On its own it is no whole set: water has no inputs.
+        let e = load(&dir.path().join("run.yaml")).unwrap_err().to_string();
+        assert!(e.contains("inputs: missing"), "{e}");
+        let base = RuleSet::parse(GRIP, "backend.yaml").unwrap();
+        let rules = base.load_over(&origin, &mut Files { url: None }).unwrap();
+        assert!(close(
+            at(&rules, "grip", &[("water", 100.0)]).unwrap(),
+            (0.30, 0.50)
+        ));
+        assert_eq!(rules.files.len(), 2);
+    }
+
+    #[test]
+    fn a_chain_of_files_and_a_list_apply_in_order_and_a_cycle_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        files(
+            dir.path(),
+            &[
+                ("base.yaml", GRIP),
+                ("a.yaml", &OVER_WATER.replace("0.30", "0.31")),
+                ("b.yaml", &OVER_WATER.replace("0.30", "0.32")),
+                (
+                    "both.yaml",
+                    "version: 1\nextends: [a.yaml, b.yaml]\nquantities: {}\n",
+                ),
+                ("c1.yaml", "version: 1\nextends: c2.yaml\nquantities: {}\n"),
+                ("c2.yaml", "version: 1\nextends: c1.yaml\nquantities: {}\n"),
+            ],
+        );
+        let rules = load(&dir.path().join("both.yaml")).unwrap();
+        assert!(close(
+            at(&rules, "grip", &[("water", 100.0)]).unwrap(),
+            (0.32, 0.50)
+        ));
+        let e = load(&dir.path().join("c1.yaml")).unwrap_err().to_string();
+        assert!(e.contains("extends itself"), "{e}");
+        let e = load(&dir.path().join("nowhere.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("cannot read rules"), "{e}");
+    }
+
+    #[test]
+    fn a_cycle_through_another_name_of_the_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        files(
+            dir.path(),
+            &[
+                (
+                    "a.yaml",
+                    "version: 1\nextends: sub/../a.yaml\nquantities: {}\n",
+                ),
+                ("sub/keep", ""),
+                (
+                    "deep/b.yaml",
+                    "version: 1\nextends: ./../deep/./b.yaml\nquantities: {}\n",
+                ),
+            ],
+        );
+        for f in ["a.yaml", "deep/b.yaml"] {
+            let e = load(&dir.path().join(f)).unwrap_err().to_string();
+            assert!(e.contains("extends itself"), "{f}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_chain_deeper_than_the_limit_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entries = Vec::new();
+        for k in 0..=MAX_EXTENDS_DEPTH + 1 {
+            entries.push((
+                format!("f{k}.yaml"),
+                format!("version: 1\nextends: f{}.yaml\nquantities: {{}}\n", k + 1),
+            ));
+        }
+        entries.push((format!("f{}.yaml", MAX_EXTENDS_DEPTH + 2), GRIP.to_string()));
+        let refs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        files(dir.path(), &refs);
+        let e = load(&dir.path().join("f0.yaml")).unwrap_err().to_string();
+        assert!(e.contains("nests deeper than"), "{e}");
+    }
+
+    #[test]
+    fn where_a_bell_underflows_is_checked_too() {
+        // All four terms are zero at 33.5: the narrow bells underflow there.
+        let text = GRIP
+            .replace("dry: {trapezoid: [0, 0, 0, 50]}", "dry: {triangle: [0, 0, 33.4]}\n              b1: {gaussian: [33.4, 0.0001]}\n              b2: {gaussian: [33.8, 0.006]}")
+            .replace("wet: {triangle: [0, 50, 100]}", "wet: {triangle: [33.8, 100, 100]}")
+            .replace("flooded: {trapezoid: [50, 100, 100, 100]}", "flooded: {triangle: [99, 100, 100]}");
+        let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
+        assert!(e.contains("no term covers water"), "{e}");
+    }
+
+    #[test]
+    fn a_url_is_read_by_the_host_and_its_relative_paths_against_it() {
+        let mut seen = Vec::new();
+        let mut url = |u: &str| -> Result<String> {
+            seen.push(u.to_string());
+            match u {
+                "https://example.com/rules/base.yaml" => Ok(GRIP.to_string()),
+                "https://example.com/rules/vehicles/mini.yaml" => {
+                    Ok(OVER_WATER.replace("base.yaml", "../base.yaml"))
+                }
+                _ => Err(Error::value("404")),
+            }
+        };
+        let rules = RuleSet::load(
+            &Origin::Url("https://example.com/rules/vehicles/mini.yaml".into()),
+            &mut Files {
+                url: Some(&mut url),
+            },
+        )
+        .unwrap();
+        assert!(close(
+            at(&rules, "grip", &[("water", 100.0)]).unwrap(),
+            (0.30, 0.50)
+        ));
+        assert_eq!(seen[1], "https://example.com/rules/base.yaml");
+        // Without a way to fetch, a URL is an error; plain http is refused.
+        let text = OVER_WATER.replace("base.yaml", "https://example.com/rules/base.yaml");
+        let e = RuleSet::parse_with(&text, "x.yaml", &Origin::Text, &mut Files { url: None })
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no way to fetch a URL"), "{e}");
+        let e = RuleSet::parse(
+            &OVER_WATER.replace("base.yaml", "http://example.com/b.yaml"),
+            "x.yaml",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("only https:// URLs are read"), "{e}");
+    }
+
+    #[test]
+    fn a_pinned_url_must_have_its_digest() {
+        let digest = hex::encode(Sha256::digest(GRIP.as_bytes()));
+        let given = |pin: &str| {
+            let text = OVER_WATER.replace(
+                "extends: base.yaml",
+                &format!("extends: {{url: https://example.com/base.yaml, sha256: {pin}}}"),
+            );
+            let mut map = IndexMap::new();
+            map.insert(
+                "https://example.com/base.yaml".to_string(),
+                GRIP.to_string(),
+            );
+            RuleSet::parse_with(&text, "x.yaml", &Origin::Text, &mut Given(map))
+        };
+        assert!(given(&digest).is_ok());
+        let e = given(&"0".repeat(64)).unwrap_err().to_string();
+        assert!(e.contains(&format!("its SHA-256 is {digest}")), "{e}");
+    }
+
+    #[test]
+    fn the_references_are_what_a_browser_fetches_ahead() {
+        let text = OVER_WATER.replace(
+            "extends: base.yaml",
+            "extends: [base.yaml, https://x.org/a/b.yaml]",
+        );
+        let refs = RuleSet::references(
+            &text,
+            "v.yaml",
+            &Origin::Url("https://example.com/r/v.yaml".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            refs.iter().map(Origin::label).collect::<Vec<_>>(),
+            vec!["https://example.com/r/base.yaml", "https://x.org/a/b.yaml"]
+        );
+    }
+
+    #[test]
+    fn a_git_source_is_read_at_its_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        files(&repo, &[("weather/base.yaml", GRIP)]);
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        git(&["tag", "v1"]);
+        std::env::set_var(crate::sources::CACHE_ENV, dir.path().join("cache"));
+        let text = OVER_WATER.replace(
+            "extends: base.yaml",
+            &format!(
+                "extends: {{git: {}, rev: v1, path: weather/base.yaml}}",
+                repo.display()
+            ),
+        );
+        let rules =
+            RuleSet::parse_with(&text, "x.yaml", &Origin::Text, &mut Files { url: None }).unwrap();
+        assert!(close(
+            at(&rules, "grip", &[("water", 100.0)]).unwrap(),
+            (0.30, 0.50)
+        ));
+        assert!(rules.files[0].label.ends_with("@v1:weather/base.yaml"));
+    }
+
+    #[test]
+    fn merge_keys_share_part_of_a_mapping() {
+        let text = GRIP.replace(
+            "          water:\n            universe: [0, 100]\n",
+            "          water:\n            <<: &universe {universe: [0, 100]}\n",
+        );
+        let rules = RuleSet::parse(&text, "grip.yaml").unwrap();
+        assert!(close(
+            at(&rules, "grip", &[("water", 25.0)]).unwrap(),
+            (0.775, 0.975)
+        ));
     }
 
     #[test]
