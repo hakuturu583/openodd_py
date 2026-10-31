@@ -140,12 +140,9 @@ fn the_data_is_the_same_as_json() {
 #[test]
 fn a_later_file_replaces_quantities() {
     let mut v = view();
-    let grip_only = SAMPLE
-        .split("\n  # How far a driver sees")
-        .next()
-        .unwrap()
-        .replace("0.45", "0.30");
-    v.merge_str(&grip_only, "measured.yaml").unwrap();
+    // Only the rules it changes: the inputs are the sample's.
+    let grip_only = "version: 1\nquantities:\n  tire_friction:\n    rule_bases:\n      water:\n        rules:\n          - {if: (water IS dry), then: {low: 0.9, high: 1.1}}\n          - {if: (water IS wet), then: {low: 0.65, high: 0.85}}\n          - {if: (water IS flooded), then: {low: 0.3, high: 0.65}}\n";
+    v.merge_str(grip_only, "measured.yaml", "").unwrap();
     let out: Json = serde_json::from_str(
         &v.evaluate_str("tire_friction", r#"{"water": 100}"#)
             .unwrap(),
@@ -161,4 +158,34 @@ fn a_later_file_replaces_quantities() {
 fn the_page_assets_include_the_rules_view() {
     assert!(styles().contains(".oo-cov.oo-rules"));
     assert!(script().contains("openodd:rules"));
+}
+
+#[wasm_bindgen_test]
+#[test]
+fn a_file_extending_others_reads_them_from_what_the_page_fetched() {
+    let child = "version: 1\nextends: ../sample_rules.yaml\nquantities:\n  tire_friction:\n    rule_bases:\n      water:\n        rules:\n          - {if: (water IS dry), then: {low: 0.95, high: 1.05}}\n          - {if: (water IS wet), then: {low: 0.6, high: 0.8}}\n          - {if: (water IS flooded), then: {low: 0.3, high: 0.5}}\n";
+    let source = "https://example.com/rules/vehicles/mini.yaml";
+    let refs: Vec<String> =
+        serde_json::from_str(&RulesView::references(child, source).unwrap()).unwrap();
+    assert_eq!(refs, vec!["https://example.com/rules/sample_rules.yaml"]);
+    let files =
+        serde_json::json!({ "https://example.com/rules/sample_rules.yaml": SAMPLE }).to_string();
+    let v = RulesView::from_files(child, source, &files).unwrap();
+    let out: Json = serde_json::from_str(
+        &v.evaluate_str("tire_friction", r#"{"water": 100}"#)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!((out["low"].as_f64().unwrap() - 0.3).abs() < 1e-12);
+    // The visibility is the extended file's.
+    let q: Vec<String> = serde_json::from_str(&v.quantities()).unwrap();
+    assert_eq!(q, vec!["tire_friction", "visibility"]);
+    let read: Json = serde_json::from_str(&v.files_str()).unwrap();
+    assert_eq!(read.as_array().unwrap().len(), 2);
+    // Not fetched: an error naming it.
+    let e = RulesView::from_files(child, source, "{}").err().unwrap();
+    assert!(
+        e.contains("https://example.com/rules/sample_rules.yaml: not given"),
+        "{e}"
+    );
 }

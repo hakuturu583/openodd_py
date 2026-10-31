@@ -202,9 +202,10 @@ class Backend:
     def use_rules(
         self, rules: Union[str, "os.PathLike[str]", Rules, None]
     ) -> Optional[Rules]:
-        """Follow *rules* -- a rule file, or rules -- over :attr:`rules` from now
-        on, quantity by quantity; ``None`` goes back to :attr:`rules` alone.
-        Returns the rules followed.
+        """Follow *rules* -- a rule file (a path or an ``https://`` URL), or
+        rules -- merged over :attr:`rules` from now on (:meth:`.Rules.merged`:
+        what it names replaces, down to the rule base); ``None`` goes back to
+        :attr:`rules` alone. Returns the rules followed.
 
         Raises:
             RulesError: When the file cannot be read, its rules are not well
@@ -213,10 +214,16 @@ class Backend:
         if rules is None:
             self._rules_in_use = None
             return self.rules
-        over = rules if isinstance(rules, Rules) else Rules.read(rules)
+        if isinstance(rules, Rules):
+            followed = rules if self.rules is None else self.rules.merged(rules)
+        elif self.rules is None:
+            followed = Rules.read(rules)
+        else:
+            # The file need only name what it changes over the backend's.
+            followed = self.rules.read_over(rules)
         if self.rule_inputs:
-            over.check_inputs(self.rule_inputs)
-        self._rules_in_use = over if self.rules is None else self.rules.merged(over)
+            followed.check_inputs(self.rule_inputs)
+        self._rules_in_use = followed
         return self._rules_in_use
 
     def rule_values(self, values: Mapping[str, float]) -> dict[str, float]:

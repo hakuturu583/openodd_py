@@ -47,7 +47,7 @@
 </main>
 <script type="module">
   import init, { RulesView, styles, script } from "./pkg/openodd_wasm.js";
-  import { install, mount } from "./pkg/viewer.js";
+  import { install, mount, loadRules } from "./pkg/viewer.js";
 
   await init();
   install({ styles, script });
@@ -57,10 +57,12 @@
   let view = null;
   let source = "sample_rules.yaml";
 
-  function show() {
+  async function show() {
     let rules;
     try {
-      rules = new RulesView(yaml.value, source);
+      // What the file extends is fetched relative to it (a file opened from
+      // disk has no location: relative to this page).
+      rules = await loadRules(RulesView, source, { text: yaml.value });
     } catch (e) {
       error.textContent = String(e.message || e);   // keep the last good view
       return;

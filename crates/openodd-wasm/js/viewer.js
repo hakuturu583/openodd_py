@@ -16,8 +16,9 @@
 //   mount(cmp, el3, { view: "cases", background: "delta" });
 //   mount(cmp, el4, { view: "coverage" });
 //
-//   // A backend's fuzzy rules: the same mount.
-//   const rules = new RulesView(yamlText, "weather_rules.yaml");
+//   // A backend's fuzzy rules: the same mount. loadRules fetches a rule
+//   // file and every file it extends.
+//   const rules = await loadRules(RulesView, "https://example.com/rules/mini.yaml");
 //   mount(rules, el5, { view: "rules", quantity: "tire_friction", inputs: { water: 70 } });
 //
 // No dependencies; every number is computed in WebAssembly.
@@ -167,4 +168,32 @@ function mountRules(viewer, el, options) {
     /** Stop listening; the HTML stays. */
     unmount() { el.removeEventListener("openodd:rules", onRules); },
   };
+}
+
+/**
+ * Fetch the rule file at `url` and every file it `extends` (relative paths
+ * against the file naming them, `https://` URLs as they are), and read them
+ * into a `RulesView` (pass the class: `loadRules(RulesView, url)`). A git
+ * source cannot be read in the browser. `text`, if given, is the file's
+ * content already in hand (an editor's), read as if fetched from `url`.
+ */
+export async function loadRules(RulesView, url, { text, fetchText } = {}) {
+  const get = fetchText || (async (u) => {
+    const response = await fetch(u);
+    if (!response.ok) throw new Error(`cannot read rules ${u}: ${response.status} ${response.statusText}`);
+    return response.text();
+  });
+  const source = new URL(url, document.baseURI).href;
+  const top = text !== undefined ? text : await get(source);
+  const files = {};
+  const queue = [[top, source]];
+  while (queue.length) {
+    const [body, from] = queue.shift();
+    for (const ref of JSON.parse(RulesView.references(body, from))) {
+      if (ref in files || ref === source) continue;
+      files[ref] = await get(ref);
+      queue.push([files[ref], ref]);
+    }
+  }
+  return new RulesView(top, source, JSON.stringify(files));
 }

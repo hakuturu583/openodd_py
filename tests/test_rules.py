@@ -109,3 +109,75 @@ class TestBackend:
         path.write_text(GRIP)
         backend.use_rules(path)
         assert backend.derived_range("grip", {"water": 0}) == pytest.approx((0.9, 1.1))
+
+
+OVER = """
+version: 1
+extends: {base}
+quantities:
+  grip:
+    rule_bases:
+      water:
+        rules:
+          - {{if: (water IS dry), then: {{low: 0.95, high: 1.05}}}}
+          - {{if: (water IS wet), then: {{low: 0.60, high: 0.80}}}}
+          - {{if: (water IS flooded), then: {{low: 0.30, high: 0.50}}}}
+"""
+
+
+class TestExtends:
+    def test_a_file_extends_a_relative_path_writing_only_its_change(self, tmp_path) -> None:
+        (tmp_path / "base.yaml").write_text(GRIP)
+        (tmp_path / "vehicles").mkdir()
+        mini = tmp_path / "vehicles" / "mini.yaml"
+        mini.write_text(OVER.format(base="../base.yaml"))
+        rules = Rules.read(mini)
+        assert rules.range("grip", {"water": 100}) == pytest.approx((0.30, 0.50))
+        # The inputs are base.yaml's.
+        assert rules.range("grip", {"water": 25}) == pytest.approx((0.775, 0.925))
+        assert [Path(p).name for p, _ in rules.files] == ["base.yaml", "mini.yaml"]
+
+    def test_a_url_is_fetched_and_its_relative_paths_read_against_it(self) -> None:
+        pages = {
+            "https://example.com/rules/base.yaml": GRIP,
+            "https://example.com/rules/vehicles/mini.yaml": OVER.format(base="../base.yaml"),
+        }
+        asked: list[str] = []
+
+        def fetch(url: str) -> str:
+            asked.append(url)
+            return pages[url]
+
+        rules = Rules.read("https://example.com/rules/vehicles/mini.yaml", fetch=fetch)
+        assert rules.range("grip", {"water": 100}) == pytest.approx((0.30, 0.50))
+        assert asked == [
+            "https://example.com/rules/vehicles/mini.yaml",
+            "https://example.com/rules/base.yaml",
+        ]
+        assert rules.files[0][0] == "https://example.com/rules/base.yaml"
+
+    def test_a_failing_fetch_and_plain_http_are_refused(self, tmp_path) -> None:
+        def fetch(url: str) -> str:
+            raise OSError("404")
+
+        with pytest.raises(RulesError, match="cannot read rules https://example.com/b.yaml"):
+            Rules.from_text(OVER.format(base="https://example.com/b.yaml"), fetch=fetch)
+        with pytest.raises(RulesError, match="only https:// URLs are read"):
+            Rules.from_text(OVER.format(base="http://example.com/b.yaml"))
+
+    def test_text_reads_what_it_extends_against_its_base(self, tmp_path) -> None:
+        (tmp_path / "base.yaml").write_text(GRIP)
+        rules = Rules.from_text(OVER.format(base="base.yaml"), "edited", base=tmp_path / "x.yaml")
+        assert rules.range("grip", {"water": 100}) == pytest.approx((0.30, 0.50))
+
+    def test_a_run_reads_a_url_over_the_backends_rules(self, monkeypatch) -> None:
+        import openodd.rules
+
+        monkeypatch.setattr(
+            openodd.rules, "fetch_url", lambda url: OVER.format(base="base.yaml").replace(
+                "extends: base.yaml\n", ""
+            )
+        )
+        backend = _WaterBackend(rules=Rules.from_text(GRIP), rule_inputs=["water"])
+        backend.use_rules("https://example.com/measured.yaml")
+        assert backend.derived_range("grip", {"water": 100}) == pytest.approx((0.30, 0.50))
