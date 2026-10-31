@@ -148,6 +148,14 @@ impl Mode {
 pub fn App() -> impl IntoView {
     let mode = RwSignal::new(Mode::from_location());
     provide_context(mode);
+    // The address chooses the editor too (`#binding`), so a page embedding
+    // the studio can show one.
+    let _ = window_event_listener(leptos::ev::hashchange, move |_| {
+        let m = Mode::from_location();
+        if mode.get_untracked() != m {
+            mode.set(m);
+        }
+    });
     provide_context(odd_context());
     provide_context(crate::rules_app::rules_context());
     provide_context(crate::binding_app::binding_context());

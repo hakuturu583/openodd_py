@@ -154,6 +154,14 @@ editor's.
 The model is `rules_doc.rs` (the rule file read and written, tested natively)
 and the interface `rules_app.rs`.
 
+## Embedding the studio
+
+A page that has an element `id="openodd-studio"` gets the studio mounted in
+it instead of in the body, so a page can wrap the studio with its own text.
+The address picks the editor (`#binding`, `#rules`) when the page loads and
+whenever it changes, so the page can switch it. The studio's stylesheet sets
+`:root` and `body`; scope it to the element when the page has its own.
+
 ## Building
 
 ```bash
