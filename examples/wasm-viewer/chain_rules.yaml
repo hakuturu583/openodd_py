@@ -1,0 +1,73 @@
+# A weather model as rules: the road's grip and how far drivers see, by the
+# weather a simulator sets (docs/rules.md). The demo's sample.
+version: 2
+quantities:
+  # The grip a tyre keeps on the road, as a share of the simulator's dry
+  # road's, by how wet the road is. Measured tyre-road friction coefficients
+  # are about 0.8-1.0 on dry asphalt, 0.5-0.7 on wet and 0.3-0.5 under a water
+  # film (what heavy rain leaves): a wet road keeps about three quarters of the
+  # dry grip, a flooded one about half. Each range spans what tyres, their wear
+  # and the asphalt make of the same water; a dry road's is centred on the
+  # simulator's own grip, so a dry run at the middle of its range drives as it
+  # did before.
+  tire_friction:
+    parts:
+      water:
+        at: {water: [0, 50, 100]}           # dry, wet, flooded
+        uniform:
+          low:  [0.90, 0.65, 0.45]
+          high: [1.10, 0.85, 0.65]
+
+  # How far a driver sees, metres. The fog, the rain and the light each bound
+  # it, and the shortest bound holds: fog at night is seen through no further
+  # than either. Each range spans what eyes, windscreens, headlights and the
+  # road's own lighting make of the same weather.
+  visibility:
+    combine: min
+    parts:
+      # A clear day's is what a driver looks ahead on an open road; dense
+      # fog's is meteorology's dense fog (under 50 m).
+      fog:
+        at: {fog_density: [0, 30, 70, 100]}  # clear, mist, fog, dense
+        uniform:
+          low:  [250, 120, 40, 15]
+          high: [400, 250, 100, 40]
+      # Falling rain and the spray the traffic throws up shorten the view
+      # less than fog does.
+      rain:
+        at: {precipitation: [0, 30, 70, 100]}  # dry, light, heavy, torrential
+        uniform:
+          low:  [250, 180, 100, 60]
+          high: [400, 320, 220, 150]
+      # By the sun's altitude, degrees: from sunset to the end of civil
+      # twilight (6 degrees below the horizon, the ODD's `night`) down to what
+      # headlights light, from a dipped beam's 50 m to a main beam's or a lit
+      # street's 150 m.
+      light:
+        at: {sun_altitude_angle: [-6, 0]}    # night, day
+        uniform:
+          low:  [50, 250]
+          high: [150, 400]
+
+  # The speed drivers keep, m/s, from how far they see: the speed they can
+  # stop from within it, braking at 4.5 m/s^2 a second after they see
+  # (7.6 m/s in 15 m, 25 m/s in 100 m). Most keep somewhat below it. A part
+  # reading a quantity: the visibility above is worked out first.
+  sight_speed:
+    parts:
+      sight:
+        at: {visibility: [15, 50, 100, 250, 400]}
+        triangular:
+          low:  [4.6, 10.0, 15.2, 25.7, 33.4]
+          mode: [6.5, 14.1, 21.6, 36.5, 47.3]
+          high: [7.6, 16.6, 25.4, 42.9, 55.6]
+
+  # The time gap drivers keep to the car ahead, seconds, by the grip: a
+  # longer one on a slippery road.
+  following_gap:
+    parts:
+      grip:
+        at: {tire_friction: [0.45, 1.1]}
+        uniform:
+          low:  [2.2, 1.2]
+          high: [3.5, 2.0]

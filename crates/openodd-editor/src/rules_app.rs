@@ -22,6 +22,8 @@ use crate::rules_doc::{
 };
 
 pub const SAMPLE: &str = include_str!("../../../examples/wasm-viewer/sample_rules.yaml");
+/// The weather, and what drivers make of it: quantities reading quantities.
+pub const CHAIN_SAMPLE: &str = include_str!("../../../examples/wasm-viewer/chain_rules.yaml");
 
 /// What the middle shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,7 +310,7 @@ pub fn RulesStudio() -> impl IntoView {
 }
 
 #[component]
-fn RulesToolbar() -> impl IntoView {
+pub fn RulesToolbar() -> impl IntoView {
     let ctx = rctx();
     let open = move |ev: leptos::ev::Event| {
         let input: HtmlInputElement = event_target(&ev);
@@ -322,6 +324,9 @@ fn RulesToolbar() -> impl IntoView {
         match event_target_value(&ev).as_str() {
             "weather" => {
                 ctx.open_text("sample_rules.yaml", SAMPLE);
+            }
+            "chain" => {
+                ctx.open_text("chain_rules.yaml", CHAIN_SAMPLE);
             }
             "empty" => {
                 ctx.open_text("rules.yaml", "version: 2\nquantities: {}\n");
@@ -370,6 +375,7 @@ fn RulesToolbar() -> impl IntoView {
             <select class="button" on:change=example aria-label="Examples">
                 <option value="" selected>"Examples…"</option>
                 <option value="weather">"Weather: grip and visibility"</option>
+                <option value="chain">"Chain: weather, then drivers' speed and gap"</option>
                 <option value="empty">"Empty rule file"</option>
             </select>
             <button class="button primary" on:click=save><Icon name="download"/>"Download YAML"</button>
@@ -397,7 +403,7 @@ fn RulesToolbar() -> impl IntoView {
 }
 
 #[component]
-fn ErrorCard() -> impl IntoView {
+pub fn ErrorCard() -> impl IntoView {
     let ctx = rctx();
     move || {
         ctx.checked.get().err().map(|e| {
@@ -416,7 +422,7 @@ fn ErrorCard() -> impl IntoView {
 // Outline
 // ---------------------------------------------------------------------------
 
-fn add_quantity() {
+pub fn add_quantity() {
     let ctx = rctx();
     let mut sel = None;
     ctx.doc.update(|d| {
@@ -437,7 +443,7 @@ fn add_quantity() {
     }
 }
 
-fn add_part(q: u64) {
+pub fn add_part(q: u64) {
     let ctx = rctx();
     let mut sel = None;
     ctx.doc.update(|d| {
@@ -664,7 +670,15 @@ fn InputRow(i: u64) -> impl IntoView {
     view! {
         <tr>
             <td><input class="term-name" prop:value=move || input.with(|x| x.as_ref().map(|x| x.name.clone()).unwrap_or_default())
-                on:change=move |ev| { let n = event_target_value(&ev).trim().to_string(); if !n.is_empty() { update(Box::new(move |x| x.name = n)); } }/></td>
+                on:change=move |ev| {
+                    let n = event_target_value(&ev).trim().to_string();
+                    if n.is_empty() { return; }
+                    ctx.doc.update(|d| {
+                        if let Some(old) = d.inputs.iter().find(|x| x.id == i).map(|x| x.name.clone()) {
+                            d.rename_input(&old, &n);
+                        }
+                    });
+                }/></td>
             <td><input class="corner" inputmode="decimal" placeholder="none" prop:value=move || input.with(|x| x.as_ref().and_then(|x| x.default).map(num).unwrap_or_default())
                 on:change=move |ev| { let v = parse_num(&event_target_value(&ev)); update(Box::new(move |x| x.default = v)); }/></td>
             <td><input prop:value=move || input.with(|x| x.as_ref().map(|x| x.text.clone()).unwrap_or_default())
@@ -732,7 +746,7 @@ fn summary_table(name: &str, j: &Joined, p: f64, link: Option<u64>) -> AnyView {
 }
 
 #[component]
-fn QuantityView(q: u64) -> impl IntoView {
+pub fn QuantityView(q: u64) -> impl IntoView {
     let ctx = rctx();
     let quantity = Memo::new(move |_| ctx.doc.with(|d| d.quantity(q).cloned()));
     let rename = move |ev: leptos::ev::Event| {
@@ -741,8 +755,8 @@ fn QuantityView(q: u64) -> impl IntoView {
             return;
         }
         ctx.doc.update(|d| {
-            if let Some(x) = d.quantity_mut(q) {
-                x.name = n.clone();
+            if let Some(old) = d.quantity(q).map(|x| x.name.clone()) {
+                d.rename_quantity(&old, &n);
             }
         });
         ctx.tested.set(Some(n));
@@ -829,7 +843,7 @@ fn QuantityView(q: u64) -> impl IntoView {
 // ---------------------------------------------------------------------------
 
 #[component]
-fn PartView(q: u64, p: u64) -> impl IntoView {
+pub fn PartView(q: u64, p: u64) -> impl IntoView {
     let ctx = rctx();
     let part = Memo::new(move |_| ctx.doc.with(|d| d.part(q, p).cloned()));
     let qname = Memo::new(move |_| {
@@ -1524,7 +1538,7 @@ fn ValuesTable(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
 // ---------------------------------------------------------------------------
 
 #[component]
-fn RulesPanel() -> impl IntoView {
+pub fn RulesPanel() -> impl IntoView {
     let tab = RwSignal::new(Tab::Test);
     let button = move |t: Tab, label: &'static str, icon: &'static str| {
         view! {

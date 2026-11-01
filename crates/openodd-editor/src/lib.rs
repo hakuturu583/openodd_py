@@ -6,7 +6,8 @@
 //! interface, in Leptos; [`io`] is the browser's files and storage.
 //!
 //! The rules editor edits a backend's rules (conditional distributions): [`rules_doc`] is the rule
-//! file as it holds it, and [`rules_app`] its interface.
+//! file as it holds it, and [`rules_app`] its interface; [`graph_app`] edits
+//! the same rules as a factor graph.
 
 pub mod app;
 pub mod binding;
@@ -14,6 +15,7 @@ pub mod binding_app;
 pub mod check;
 pub mod doc;
 pub mod forms;
+pub mod graph_app;
 pub mod icons;
 pub mod io;
 pub mod rules_app;

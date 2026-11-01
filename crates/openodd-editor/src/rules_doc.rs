@@ -150,6 +150,146 @@ impl PartDoc {
     }
 }
 
+impl PartDoc {
+    /// Read `input` too, at `points` (increasing): a new last axis, the
+    /// distribution the same along it.
+    pub fn add_axis(&mut self, input: String, points: Vec<f64>) {
+        let old = self.core();
+        let Some(axes) = &mut self.axes else { return };
+        axes.push(AxisDoc {
+            id: fresh_id(),
+            input,
+            points,
+        });
+        let grid = grid(axes);
+        if let (Some(old), Some(dist)) = (old, &mut self.dist) {
+            let fresh: Vec<Dist> = grid
+                .iter()
+                .map(|at| old.dist(&at[..at.len() - 1]))
+                .collect();
+            for (j, p) in dist.params.iter_mut().enumerate() {
+                p.values = fresh.iter().map(|d| tidy(d.params()[j])).collect();
+            }
+        }
+    }
+
+    /// Stop reading axis `k`'s input: the distribution is the one at its
+    /// first point. A part's last axis stays.
+    pub fn remove_axis(&mut self, k: usize) -> bool {
+        let old = self.core();
+        let Some(axes) = &mut self.axes else {
+            return false;
+        };
+        if axes.len() < 2 || k >= axes.len() {
+            return false;
+        }
+        let at_k = axes[k].points[0];
+        axes.remove(k);
+        let grid = grid(axes);
+        if let (Some(old), Some(dist)) = (old, &mut self.dist) {
+            let fresh: Vec<Dist> = grid
+                .iter()
+                .map(|at| {
+                    let mut full = at.clone();
+                    full.insert(k, at_k);
+                    old.dist(&full)
+                })
+                .collect();
+            for (j, p) in dist.params.iter_mut().enumerate() {
+                p.values = fresh.iter().map(|d| tidy(d.params()[j])).collect();
+            }
+        }
+        true
+    }
+
+    /// The inputs its axes read, in order.
+    pub fn reads(&self) -> Vec<String> {
+        self.axes
+            .as_ref()
+            .map(|a| a.iter().map(|x| x.input.clone()).collect())
+            .unwrap_or_default()
+    }
+}
+
+impl RulesDoc {
+    /// Rename the quantity `old` to `new`, and every part reading it.
+    pub fn rename_quantity(&mut self, old: &str, new: &str) {
+        for q in &mut self.quantities {
+            if q.name == old {
+                q.name = new.to_string();
+            }
+        }
+        self.rename_reads(old, new);
+    }
+
+    /// Rename the input `old` to `new`: the file's description of it and
+    /// every axis reading it.
+    pub fn rename_input(&mut self, old: &str, new: &str) {
+        for i in &mut self.inputs {
+            if i.name == old {
+                i.name = new.to_string();
+            }
+        }
+        self.rename_reads(old, new);
+    }
+
+    fn rename_reads(&mut self, old: &str, new: &str) {
+        for q in &mut self.quantities {
+            for p in &mut q.parts {
+                for a in p.axes.iter_mut().flatten() {
+                    if a.input == old {
+                        a.input = new.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether `to` is `from` or reads it, through any chain of quantities:
+    /// so a part of `from` reading `to` would close a cycle.
+    pub fn reaches(&self, from: &str, to: &str) -> bool {
+        let mut stack = vec![from.to_string()];
+        let mut seen: Vec<String> = Vec::new();
+        while let Some(n) = stack.pop() {
+            if n == to {
+                return true;
+            }
+            if seen.contains(&n) {
+                continue;
+            }
+            seen.push(n.clone());
+            for q in &self.quantities {
+                if q.parts.iter().any(|p| p.reads().contains(&n)) {
+                    stack.push(q.name.clone());
+                }
+            }
+        }
+        false
+    }
+
+    /// The inputs the parts read that are not quantities, and the ones the
+    /// file describes, each once.
+    pub fn free_inputs(&self) -> Vec<String> {
+        let names: Vec<&str> = self.quantities.iter().map(|q| q.name.as_str()).collect();
+        let mut out: Vec<String> = Vec::new();
+        for q in &self.quantities {
+            for p in &q.parts {
+                for i in p.reads() {
+                    if !names.contains(&i.as_str()) && !out.contains(&i) {
+                        out.push(i);
+                    }
+                }
+            }
+        }
+        for i in &self.inputs {
+            if !names.contains(&i.name.as_str()) && !out.contains(&i.name) {
+                out.push(i.name.clone());
+            }
+        }
+        out
+    }
+}
+
 fn param(name: &str, values: Vec<f64>) -> ParamDoc {
     ParamDoc {
         name: name.to_string(),
@@ -728,6 +868,11 @@ pub fn values_at(set: &RuleSet, quantity: &str, probe: &[(String, f64)]) -> Inde
         return out;
     };
     for name in q.inputs() {
+        // A quantity read is worked out from its own inputs unless the probe
+        // names a value for it (observed).
+        if set.quantities.contains_key(&name) && !probe.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
         let v = probe
             .iter()
             .find(|(n, _)| *n == name)
@@ -745,6 +890,45 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = include_str!("../../../examples/wasm-viewer/sample_rules.yaml");
+
+    const CHAIN: &str = include_str!("../../../examples/wasm-viewer/chain_rules.yaml");
+
+    #[test]
+    fn an_axis_added_keeps_the_distribution_and_one_removed_takes_its_first_point() {
+        let mut doc = RulesDoc::from_yaml(SAMPLE).unwrap();
+        let part = &mut doc.quantities[0].parts[0];
+        part.add_axis("sun_altitude_angle".into(), vec![-6.0, 0.0]);
+        assert_eq!(part.reads(), ["water", "sun_altitude_angle"]);
+        let low = &part.dist.as_ref().unwrap().params[0].values;
+        // Each old value along the new axis, the last fastest.
+        assert_eq!(low, &[0.9, 0.9, 0.65, 0.65, 0.45, 0.45]);
+        assert!(check(&doc.to_yaml().unwrap(), "a.yaml", &[]).is_ok());
+        let part = &mut doc.quantities[0].parts[0];
+        assert!(part.remove_axis(0));
+        assert_eq!(part.reads(), ["sun_altitude_angle"]);
+        // At water's first point, 0: the dry road's.
+        assert_eq!(part.dist.as_ref().unwrap().params[0].values, [0.9, 0.9]);
+        assert!(!part.remove_axis(0), "a part keeps its last axis");
+    }
+
+    #[test]
+    fn renaming_follows_every_reader_and_reaches_finds_cycles() {
+        let mut doc = RulesDoc::from_yaml(CHAIN).unwrap();
+        assert!(doc.reaches("visibility", "sight_speed"));
+        assert!(doc.reaches("visibility", "visibility"));
+        assert!(!doc.reaches("sight_speed", "visibility"));
+        assert!(!doc.free_inputs().contains(&"visibility".to_string()));
+        doc.rename_quantity("visibility", "sight");
+        doc.rename_input("fog_density", "fog");
+        let yaml = doc.to_yaml().unwrap();
+        assert!(
+            yaml.contains("at: {sight: [15, 50, 100, 250, 400]}"),
+            "{yaml}"
+        );
+        assert!(yaml.contains("at: {fog: [0, 30, 70, 100]}"), "{yaml}");
+        let set = check(&yaml, "a.yaml", &[]).unwrap();
+        assert_eq!(set.upstream("sight_speed").unwrap(), ["sight"]);
+    }
 
     #[test]
     fn a_rule_file_reads_and_writes_back_to_the_same_rules() {

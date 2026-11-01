@@ -125,6 +125,7 @@ pub enum Mode {
     Odd,
     Binding,
     Rules,
+    Graph,
 }
 
 impl Mode {
@@ -135,6 +136,7 @@ impl Mode {
             .unwrap_or_default();
         match hash.as_str() {
             "#rules" => Mode::Rules,
+            "#graph" => Mode::Graph,
             "#binding" => Mode::Binding,
             _ => Mode::Odd,
         }
@@ -159,10 +161,12 @@ pub fn App() -> impl IntoView {
     provide_context(odd_context());
     provide_context(crate::rules_app::rules_context());
     provide_context(crate::binding_app::binding_context());
+    provide_context(crate::graph_app::graph_context());
     move || match mode.get() {
         Mode::Odd => view! { <OddStudio/> }.into_any(),
         Mode::Binding => view! { <crate::binding_app::BindingStudio/> }.into_any(),
         Mode::Rules => view! { <crate::rules_app::RulesStudio/> }.into_any(),
+        Mode::Graph => view! { <crate::graph_app::GraphStudio/> }.into_any(),
     }
 }
 
@@ -173,9 +177,12 @@ pub fn ModeSwitch() -> impl IntoView {
     let go = move |m: Mode| {
         mode.set(m);
         if let Some(w) = web_sys::window() {
-            let _ = w
-                .location()
-                .set_hash(if m == Mode::Rules { "rules" } else { "" });
+            let _ = w.location().set_hash(match m {
+                Mode::Odd => "",
+                Mode::Binding => "binding",
+                Mode::Rules => "rules",
+                Mode::Graph => "graph",
+            });
         }
     };
     view! {
@@ -188,6 +195,9 @@ pub fn ModeSwitch() -> impl IntoView {
             </button>
             <button class:active=move || mode.get() == Mode::Rules on:click=move |_| go(Mode::Rules)>
                 <Icon name="func"/>"Rules"
+            </button>
+            <button class:active=move || mode.get() == Mode::Graph on:click=move |_| go(Mode::Graph)>
+                <Icon name="graph"/>"Graph"
             </button>
         </div>
     }

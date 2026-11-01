@@ -566,3 +566,54 @@ svg.membership .band-edge { fill: none; stroke: var(--accent); stroke-width: 1.2
 .legend-line .key.median-key { background: var(--text); opacity: .6; }
 .legend-line .key.atp-key { background: var(--outside); }
 input.points { width: 100%; min-width: 180px; }
+
+/* ---- Factor graph ------------------------------------------------------ */
+.graph-layout { grid-template-columns: minmax(420px, 1fr) minmax(380px, 40%); }
+@media (max-width: 900px) { .graph-layout { grid-template-columns: 1fr; } }
+.canvas-wrap { display: flex; flex-direction: column; min-height: 0; min-width: 0; padding: 12px 14px 0; gap: 10px; }
+.graph-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.graph-hint { color: var(--muted); font-size: 12.5px; flex: 1 1 260px; }
+.graph-key { display: inline-flex; gap: 10px; font-size: 12px; color: var(--muted); }
+.graph-key .key::before { content: ""; display: inline-block; width: 14px; height: 10px; margin-right: 4px; vertical-align: -1px; border-radius: 6px; border: 1.5px solid; }
+.graph-key .key.input::before { background: var(--surface); border-color: var(--muted); }
+.graph-key .key.quantity::before { background: var(--accent-soft); border-color: var(--accent); }
+.graph-key .key.factor::before { width: 10px; border-radius: 2px; background: var(--text); border-color: var(--text); }
+.graph-key .key.chain::before { height: 0; border-width: 2px 0 0; border-radius: 0; border-color: var(--carries); border-style: dashed; vertical-align: 3px; }
+.g-port-key, .g-factor-key { display: inline-block; vertical-align: -1px; }
+.g-port-key { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.g-factor-key { width: 10px; height: 10px; border-radius: 2px; background: var(--text); }
+.graph-scroll { flex: 1; min-height: 0; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  background-image: radial-gradient(var(--surface-3) 1px, transparent 1px); background-size: 20px 20px; }
+svg.graph { display: block; width: 100%; height: auto; overflow: visible; touch-action: none; user-select: none; }
+svg.graph.wiring { cursor: crosshair; }
+.g-node { cursor: grab; }
+.g-node.var rect { stroke-width: 1.5; }
+.g-node.input rect { fill: var(--surface); stroke: var(--muted); }
+.g-node.quantity rect { fill: var(--accent-soft); stroke: var(--accent); }
+.g-node.factor rect { fill: var(--text); stroke: var(--text); }
+.g-node.selected rect { stroke: var(--accent); stroke-width: 3; }
+.g-node.factor.selected rect { fill: var(--accent); }
+.g-label { text-anchor: middle; font-size: 13px; font-weight: 600; fill: var(--text); pointer-events: none; }
+.g-sub { text-anchor: middle; font-size: 11px; fill: var(--muted); font-family: var(--mono); pointer-events: none; }
+.g-port { fill: var(--accent); stroke: var(--surface); stroke-width: 2; cursor: crosshair; }
+.g-port:hover { r: 9; }
+.g-edge { fill: none; stroke: var(--muted); stroke-width: 1.6; pointer-events: none; }
+.g-edge.out { stroke: var(--text); }
+.g-edge.chain { stroke: var(--carries); stroke-dasharray: 6 4; stroke-width: 2; }
+.g-edge.selected { stroke: var(--accent); stroke-width: 3; }
+.g-edge.wire { stroke: var(--accent); stroke-dasharray: 4 4; }
+.g-edge-hit { fill: none; stroke: transparent; stroke-width: 12; cursor: pointer; }
+.g-arrowhead { fill: var(--text); }
+.graph-side { overflow: auto; }
+.graph-form { padding: 12px 14px; }
+.graph-form .card { margin-bottom: 12px; }
+.card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.title-input { font-size: 16px; font-weight: 600; flex: 1; min-width: 0; }
+.kind-chip { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.kind-chip.chain { color: var(--carries); border-color: var(--carries); }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+ul.plain { list-style: none; padding: 0; margin: 4px 0 10px; display: grid; gap: 4px; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.button.danger { color: var(--outside); }
+.button.danger:hover:not(:disabled) { border-color: var(--outside); }
+.button:disabled { opacity: .5; cursor: not-allowed; }
