@@ -119,7 +119,7 @@ impl Ctx {
     }
 }
 
-/// Which editor the studio shows: the ODD, or a backend's fuzzy rules.
+/// Which editor the studio shows: the ODD, its binding, or a backend's rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Odd,
@@ -141,7 +141,7 @@ impl Mode {
     }
 }
 
-/// The studio: an ODD, the binding that measures it, and a backend's fuzzy
+/// The studio: an ODD, the binding that measures it, and a backend's
 /// rules, each with its own editor and all three held at once, so that each
 /// can show how it meets the others.
 #[component]
@@ -187,7 +187,7 @@ pub fn ModeSwitch() -> impl IntoView {
                 <Icon name="link"/>"Binding"
             </button>
             <button class:active=move || mode.get() == Mode::Rules on:click=move |_| go(Mode::Rules)>
-                <Icon name="func"/>"Fuzzy rules"
+                <Icon name="func"/>"Rules"
             </button>
         </div>
     }

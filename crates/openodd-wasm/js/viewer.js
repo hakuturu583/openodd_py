@@ -16,10 +16,10 @@
 //   mount(cmp, el3, { view: "cases", background: "delta" });
 //   mount(cmp, el4, { view: "coverage" });
 //
-//   // A backend's fuzzy rules: the same mount. loadRules fetches a rule
-//   // file and every file it extends.
+//   // A backend's rules: the same mount. loadRules fetches a rule file and
+//   // every file it extends.
 //   const rules = await loadRules(RulesView, "https://example.com/rules/mini.yaml");
-//   mount(rules, el5, { view: "rules", quantity: "tire_friction", inputs: { water: 70 } });
+//   mount(rules, el5, { view: "rules", quantity: "tire_friction", inputs: { water: 70 }, p: 0.25 });
 //
 // No dependencies; every number is computed in WebAssembly.
 
@@ -113,15 +113,16 @@ export function mount(viewer, el, options = {}) {
 }
 
 /**
- * Render a `RulesView` in `el` and keep it live: its sliders (`inputs`) and
- * pickers (`quantity`, `x`) dispatch `openodd:rules`, handled here. `options`:
- * the query (`quantity`, `inputs`: `{name: value}`, `x`: the input the
- * response chart moves) and the component's options (`id`, `labels`,
- * `samples`). Each render dispatches `openodd:rendered` on `el`, as above.
+ * Render a `RulesView` in `el` and keep it live: its sliders (`inputs`, `p`)
+ * and pickers (`quantity`, `x`) dispatch `openodd:rules`, handled here.
+ * `options`: the query (`quantity`, `inputs`: `{name: value}`, `x`: the input
+ * the response chart moves, `p`: the quantile shown, 0 to 1) and the
+ * component's options (`id`, `labels`, `samples`). Each render dispatches
+ * `openodd:rendered` on `el`, as above.
  */
 function mountRules(viewer, el, options) {
   const state = {};
-  for (const k of ["quantity", "inputs", "x"]) if (options[k] !== undefined) state[k] = options[k];
+  for (const k of ["quantity", "inputs", "x", "p"]) if (options[k] !== undefined) state[k] = options[k];
   const opts = {};
   for (const k of ["id", "labels", "samples"]) if (options[k] !== undefined) opts[k] = options[k];
   if (!opts.id) opts.id = el.id ? el.id + "-view" : "oo-rules-" + Math.random().toString(36).slice(2, 8);
@@ -133,6 +134,7 @@ function mountRules(viewer, el, options) {
       // Keep the keyboard on the control just used: the render replaced it.
       const [kind, name] = focus.split(":");
       const sel = kind === "input" ? `input[data-oo-input="${CSS.escape(name)}"]`
+        : kind === "p" ? "input[data-oo-p]"
         : `select[data-oo-rules="${CSS.escape(name)}"]`;
       const again = el.querySelector(sel);
       if (again) again.focus({ preventScroll: true });
@@ -151,6 +153,7 @@ function mountRules(viewer, el, options) {
       delete state.x;                     // the next quantity's first input
     }
     if (d.x !== undefined) state.x = d.x;
+    if (d.p !== undefined) state.p = d.p;
     if (d.inputs) state.inputs = { ...(state.inputs || {}), ...d.inputs };
     render(d.focus);
   }

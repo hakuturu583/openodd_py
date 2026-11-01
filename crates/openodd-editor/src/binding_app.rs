@@ -1,11 +1,11 @@
 //! The binding editor: how each attribute of the ODD being edited is
 //! measured, and the connections from the ODD through the binding and the
-//! backend's manifest to its fuzzy rules.
+//! backend's manifest to its rules.
 //!
 //! The overview follows every attribute along that chain in one table; an
 //! attribute's page draws its chain -- the ODD's buckets, the probe that
 //! measures them, the values the backend's knob writes for each, the rule
-//! inputs that read those, and whether the rules' terms say the same as the
+//! inputs that read those, and what each bucket gives through the rules --
 //! buckets -- above the form of its binding.
 
 use leptos::prelude::*;
@@ -13,12 +13,12 @@ use leptos::task::spawn_local;
 use web_sys::HtmlInputElement;
 
 use crate::app::{ctx, event_target, Mode, ModeSwitch};
-use crate::binding::{self, alignment, BindingDoc, Entry, Link, Manifest, Source};
+use crate::binding::{self, bucket_ranges, BindingDoc, Entry, Link, Manifest, Source};
 use crate::doc::KindTag;
 use crate::icons::Icon;
 use crate::io;
-use crate::rules_app::{rctx, shape_of};
-use crate::rules_doc::{num, Shape};
+use crate::rules_app::rctx;
+use crate::rules_doc::{num, short};
 
 pub const WEATHER_ODD: &str = include_str!("../examples/weather.yaml");
 pub const WEATHER_BINDING: &str = include_str!("../examples/carla_weather.binding.yaml");
@@ -226,24 +226,19 @@ impl BCtx {
     }
 }
 
-/// A rule base reading an input: (quantity, rule base, the input's terms).
-type Reader = (String, String, Vec<(String, Shape)>);
+/// A part reading an input: (quantity, part, the part as read).
+type Reader = (String, String, openodd::rules::Part);
 
-/// The rule bases that read `input`.
+/// The parts that read `input`.
 fn readers_of(input: &str) -> Vec<Reader> {
     let r = rctx();
     r.good.with(|g| {
         let Some(set) = g else { return vec![] };
         let mut out = vec![];
         for q in set.quantities.values() {
-            for b in &q.rule_bases {
-                for i in b.inputs.iter().filter(|i| i.name == input) {
-                    let terms = i
-                        .terms
-                        .iter()
-                        .map(|(n, m)| (n.clone(), shape_of(m)))
-                        .collect();
-                    out.push((q.name.clone(), b.name.clone(), terms));
+            for p in &q.parts {
+                if p.axes.iter().any(|a| a.input == input) {
+                    out.push((q.name.clone(), p.name.clone(), p.clone()));
                 }
             }
         }
@@ -251,16 +246,16 @@ fn readers_of(input: &str) -> Vec<Reader> {
     })
 }
 
-/// Show rule base `base` of `quantity` in the rules editor.
-fn open_in_rules(quantity: &str, base: &str) {
+/// Show part `part` of `quantity` in the rules editor.
+fn open_in_rules(quantity: &str, part: &str) {
     let r = rctx();
     let ids = r.doc.with(|d| {
         let q = d.quantities.iter().find(|q| q.name == quantity)?;
-        let b = q.bases.iter().find(|b| b.name == base)?;
-        Some((q.id, b.id))
+        let p = q.parts.iter().find(|p| p.name == part)?;
+        Some((q.id, p.id))
     });
-    if let Some((q, b)) = ids {
-        r.sel.set(crate::rules_app::RSel::Base(q, b));
+    if let Some((q, p)) = ids {
+        r.sel.set(crate::rules_app::RSel::Part(q, p));
     }
     let mode = expect_context::<RwSignal<Mode>>();
     mode.set(Mode::Rules);
@@ -421,7 +416,7 @@ fn BindingOutline() -> impl IntoView {
                         <li class="row" class:selected=move || selected(sel.clone()) on:click=move |_| b.sel.set(sel2.clone())>
                             <span class="icon"><Icon name="ruler"/></span>
                             <span class="name">{n3}</span>
-                            {move || linked().then(|| view! { <span class="icon" title="Its knob feeds the fuzzy rules"><Icon name="func"/></span> })}
+                            {move || linked().then(|| view! { <span class="icon" title="Its knob feeds the rules"><Icon name="func"/></span> })}
                             <span class=move || if bound.get() { "truth-dot true" } else { "truth-dot" } title=move || if bound.get() { "measured" } else { "not measured" }></span>
                         </li>
                     }
@@ -506,7 +501,7 @@ fn Overview() -> impl IntoView {
                 <span class="arrow">"→"</span>
                 <div><b>"Backend"</b><span class="hint">"how a run sets each bucket: the knob and its values"</span></div>
                 <span class="arrow">"→"</span>
-                <div><b>"Fuzzy rules"</b><span class="hint">"the inputs that read what the knob writes"</span></div>
+                <div><b>"Rules"</b><span class="hint">"the inputs that read what the knob writes, and the values they give"</span></div>
             </div>
             {move || b.manifest.with(Option::is_none).then(|| view! {
                 <p class="hint">"Load the backend's manifest (what " <code>"Backend.manifest()"</code> " writes) to follow the attributes to the knobs and the rules, or try the CARLA weather example."</p>
@@ -676,7 +671,7 @@ fn Chain(name: String, link: Memo<Option<Link>>, entry: Memo<Option<Entry>>) -> 
                 </div>
                 <span class="arrow">"→"</span>
                 <div class="chain-box wide">
-                    <div class="chain-kind">"Fuzzy rules"</div>
+                    <div class="chain-kind">"Rules"</div>
                     {if inputs.is_empty() {
                         view! { <div class="hint">"no rule input reads what it sets"</div> }.into_any()
                     } else {
@@ -686,25 +681,25 @@ fn Chain(name: String, link: Memo<Option<Link>>, entry: Memo<Option<Entry>>) -> 
                             view! {
                                 <div class="mono strong">{input.clone()}</div>
                                 {if readers.is_empty() {
-                                    view! { <div class="hint">"no rule base reads it"</div> }.into_any()
+                                    view! { <div class="hint">"no part reads it"</div> }.into_any()
                                 } else {
-                                    readers.into_iter().map(|(q, base, terms)| {
-                                        let rows = alignment(&spans, &terms);
-                                        let all_same = rows.iter().all(|r| r.2);
-                                        let term_names = terms.iter().map(|t| t.0.clone()).collect::<Vec<_>>().join(", ");
-                                        let (q2, b2) = (q.clone(), base.clone());
+                                    readers.into_iter().map(|(q, name, part)| {
+                                        let held: Vec<f64> = part.axes.iter().map(|a| (a.points[0] + a.points[a.points.len() - 1]) / 2.0).collect();
+                                        let rows = bucket_ranges(&spans, &part, &input, &held);
+                                        let others = part.axes.len() > 1;
+                                        let (q2, n2) = (q.clone(), name.clone());
                                         view! {
                                             <div class="reader">
-                                                <button class="pill" on:click=move |_| open_in_rules(&q2, &b2)><Icon name="func"/>{format!("{q} · {base}")}</button>
-                                                <span class=if all_same { "tag ok" } else { "tag bad" }>{if all_same { "terms are the ODD's buckets" } else { "terms differ from the ODD's buckets" }}</span>
-                                                <div class="hint">{format!("terms: {term_names}")}</div>
+                                                <button class="pill" on:click=move |_| open_in_rules(&q2, &n2)><Icon name="func"/>{format!("{q} · {name}")}</button>
+                                                <div class="hint">{format!("{} over its points; what each bucket gives:", part.family.name())}</div>
                                                 <table class="mini-table">
-                                                    <tr><th>"ODD bucket"</th><th>"written as"</th><th>"strongest term there"</th></tr>
-                                                    {rows.into_iter().map(|(label, best, same)| {
-                                                        let span = spans.iter().find(|s| s.0 == label).map(|s| if s.1 == s.2 { num(s.1) } else { format!("{} – {}", num(s.1), num(s.2)) }).unwrap_or_default();
-                                                        view! { <tr class:bad=!same><td>{label}</td><td class="mono">{span}</td><td>{best.unwrap_or_else(|| "none fires".into())}</td></tr> }
+                                                    <tr><th>"ODD bucket"</th><th>"written as"</th><th>{format!("{q} (low – high)")}</th></tr>
+                                                    {rows.into_iter().map(|(label, a, b, lo, hi)| {
+                                                        let span = if a == b { num(a) } else { format!("{} – {}", num(a), num(b)) };
+                                                        view! { <tr><td>{label}</td><td class="mono">{span}</td><td class="mono">{format!("{} – {}", short(lo), short(hi))}</td></tr> }
                                                     }).collect_view()}
                                                 </table>
+                                                {others.then(|| view! { <div class="hint">"Its other inputs held at the middle of their points."</div> })}
                                             </div>
                                         }
                                     }).collect_view().into_any()

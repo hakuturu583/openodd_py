@@ -11,6 +11,10 @@ fn view() -> RulesView {
     RulesView::from_text(SAMPLE, "sample_rules.yaml").expect("the sample reads")
 }
 
+fn close(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-9
+}
+
 #[wasm_bindgen_test]
 #[test]
 fn it_reads_the_rules_and_refuses_bad_ones() {
@@ -28,14 +32,17 @@ fn it_reads_the_rules_and_refuses_bad_ones() {
         names,
         vec!["fog_density", "precipitation", "sun_altitude_angle"]
     );
+    // The universe: the outermost points; no default in the sample.
+    assert_eq!(inputs[2]["universe"], serde_json::json!([-6.0, 0.0]));
+    assert!(inputs[2]["default"].is_null());
     let e = RulesView::from_text(
-        &SAMPLE.replace("(water IS wet)", "(water IS soaked)"),
+        &SAMPLE.replace("low:  [0.90, 0.65, 0.45]", "low:  [0.90, 0.95, 0.45]"),
         "x.yaml",
     )
     .err()
     .unwrap();
     assert!(
-        e.contains("x.yaml: ") && e.contains("no term 'soaked'"),
+        e.contains("x.yaml: ") && e.contains("must not be above high"),
         "{e}"
     );
 }
@@ -47,42 +54,82 @@ fn it_evaluates_as_the_core_does() {
     let out: Json =
         serde_json::from_str(&v.evaluate_str("tire_friction", r#"{"water": 70}"#).unwrap())
             .unwrap();
-    assert!((out["low"].as_f64().unwrap() - 0.57).abs() < 1e-12);
-    assert!((out["high"].as_f64().unwrap() - 0.77).abs() < 1e-12);
+    assert!(close(out["low"].as_f64().unwrap(), 0.57));
+    assert!(close(out["high"].as_f64().unwrap(), 0.77));
+    assert!(close(out["median"].as_f64().unwrap(), 0.67));
+    assert!(close(out["mean"].as_f64().unwrap(), 0.67));
+    // The value at a quantile, and the share below a value.
+    let at = v
+        .quantile_value("tire_friction", r#"{"water": 70}"#, 0.25)
+        .unwrap();
+    assert!(close(at, 0.62));
+    let below = v
+        .cdf_value("tire_friction", r#"{"water": 70}"#, 0.67)
+        .unwrap();
+    assert!(close(below, 0.5));
+    // Parts move together: the least of fog's, rain's and light's.
+    let p = v
+        .cdf_value(
+            "visibility",
+            r#"{"fog_density": 0, "precipitation": 0, "sun_altitude_angle": -20}"#,
+            100.0,
+        )
+        .unwrap();
+    assert!(close(p, 0.5));
+    assert!(v
+        .quantile_value("tire_friction", "{}", 1.5)
+        .unwrap_err()
+        .contains("p must be from 0 to 1"));
+    assert!(v
+        .quantile_value("tire_friction", "{}", 0.5)
+        .unwrap_err()
+        .contains("reads water, which was not given and has no default"));
 }
 
 #[wasm_bindgen_test]
 #[test]
-fn the_component_shows_terms_rules_outputs_and_the_response() {
+fn the_component_shows_the_outputs_the_distribution_the_response_and_the_parts() {
     let v = view();
     let html = v
         .rules_html_str(
-            r#"{"quantity": "visibility", "inputs": {"fog_density": 100, "sun_altitude_angle": -30}, "x": "fog_density"}"#,
+            r#"{"quantity": "visibility", "inputs": {"fog_density": 100, "sun_altitude_angle": -30}, "x": "fog_density", "p": 0.5}"#,
             r#"{"id": "rv", "labels": {"response": "応答"}, "samples": 41}"#,
         )
         .unwrap();
     assert!(html
         .starts_with("<div class=\"oo-cov oo-rules\" id=\"rv\" data-oo-quantity=\"visibility\">"));
-    // A slider per input, at the value asked (or the default, or the middle).
+    // A slider per input (over its outermost points), and the quantile's.
     assert!(html.contains("data-oo-input=\"fog_density\" min=\"0\" max=\"100\""));
-    assert!(html.contains("data-oo-input=\"precipitation\""));
+    assert!(html.contains("data-oo-input=\"sun_altitude_angle\" min=\"-6\" max=\"0\""));
     assert_eq!(html.matches("data-oo-input=").count(), 3);
+    assert!(html.contains("data-oo-p min=\"0\" max=\"1\" step=\"0.01\" value=\"0.5\""));
     // Pickers: the quantity (two of them) and the input moved.
     assert!(html.contains("data-oo-rules=\"quantity\"") && html.contains("data-oo-rules=\"x\""));
-    // Dense fog at night: the fog bounds it (15-40 m), the winning rule base marked.
-    assert!(html.contains("<td class=\"oo-num oo-rules-value\">15</td>"));
-    assert!(html.contains("<td class=\"oo-num oo-win\">15</td>"));
-    // A membership chart per input of each rule base, each term a line.
-    assert_eq!(html.matches("<figure class=\"oo-rules-mf\">").count(), 3);
-    assert_eq!(html.matches("class=\"oo-rules-line ").count(), 4 + 4 + 2);
-    // Which rules fire: fog's dense alone.
+    // Dense fog at night: fog bounds it (15-40 m, median 27.5) and decides.
     assert!(html.contains(
-        "<tr class=\"oo-on\"><td class=\"oo-num\">4</td><td><code>(fog_density IS dense)</code>"
+        "<tr class=\"oo-rules-total\"><th>visibility</th><td class=\"oo-num oo-rules-value\">15</td>\
+         <td class=\"oo-num oo-rules-value\">40</td><td class=\"oo-num oo-rules-value\">27.5</td>"
     ));
-    assert!(html.contains("応答"));
-    // The response: the combined band, and each rule base dashed.
+    assert!(html.contains("<tr class=\"oo-rules-deciding\"><th><i class=\"oo-rules-key oo-rules-s0\"></i>fog <span class=\"oo-rules-tag\">decides</span></th>"));
+    assert!(html.contains("<td class=\"oo-num oo-win\">27.5</td>"));
+    assert_eq!(html.matches("oo-rules-tag").count(), 2); // the table's and fog's chart
+                                                         // The distribution: its CDF, each part's dashed, the value at p marked.
+    assert!(html.contains("<section class=\"oo-rules-dist\">"));
+    assert_eq!(html.matches("class=\"oo-rules-dot ").count(), 1);
+    // The response: the band, the median and the value at p, each part's
+    // low and high dashed.
     assert!(html.contains("class=\"oo-rules-band\""));
-    assert_eq!(html.matches("class=\"oo-rules-base ").count(), 3 * 2);
+    assert!(html.contains("応答"));
+    assert_eq!(html.matches("class=\"oo-rules-out ").count(), 1 + 2);
+    assert_eq!(html.matches("class=\"oo-rules-base ").count(), 3 + 3 * 2);
+    // A chart per part: its band, median, value at p, and the points written.
+    assert_eq!(html.matches("<figure class=\"oo-rules-part").count(), 3);
+    assert_eq!(html.matches("class=\"oo-rules-line ").count(), 3);
+    assert_eq!(html.matches("class=\"oo-rules-pline\"").count(), 3);
+    assert_eq!(
+        html.matches("class=\"oo-rules-pt ").count(),
+        (4 + 4 + 2) * 3
+    );
 }
 
 #[wasm_bindgen_test]
@@ -98,6 +145,10 @@ fn a_query_the_rules_cannot_answer_is_refused() {
         .unwrap_err()
         .contains("reads no input 'fog_density'"));
     assert!(v
+        .rules_html_str(r#"{"p": 2}"#, "{}")
+        .unwrap_err()
+        .contains("p: from 0 to 1"));
+    assert!(v
         .rules_html_str("{}", r#"{"labels": {"nope": "x"}}"#)
         .unwrap_err()
         .contains("no such label: nope"));
@@ -109,7 +160,7 @@ fn the_data_is_the_same_as_json() {
     let v = view();
     let data: Json = serde_json::from_str(
         &v.rules_json_str(
-            r#"{"quantity": "tire_friction", "inputs": {"water": 25}}"#,
+            r#"{"quantity": "tire_friction", "inputs": {"water": 25}, "p": 0.25}"#,
             r#"{"samples": 11}"#,
         )
         .unwrap(),
@@ -117,53 +168,63 @@ fn the_data_is_the_same_as_json() {
     .unwrap();
     assert_eq!(data["quantity"], "tire_friction");
     assert_eq!(data["combine"], "min");
-    let base = &data["rule_bases"][0];
-    let firing: Vec<f64> = base["rules"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| r["firing"].as_f64().unwrap())
-        .collect();
-    assert_eq!(firing, vec![0.5, 0.5, 0.0]);
-    assert_eq!(
-        base["inputs"][0]["terms"][0]["curve"]
-            .as_array()
-            .unwrap()
-            .len(),
-        11
-    );
+    assert_eq!(data["p"], 0.25);
+    let out = &data["outputs"];
+    assert!(close(out["low"].as_f64().unwrap(), 0.775));
+    assert!(close(out["high"].as_f64().unwrap(), 0.975));
+    assert!(close(out["at_p"].as_f64().unwrap(), 0.825));
+    assert_eq!(data["deciding"], "water");
+    let part = &data["parts"][0];
+    assert_eq!(part["family"], "uniform");
+    assert!(close(part["params"]["low"].as_f64().unwrap(), 0.775));
+    assert_eq!(part["chart"]["x"], "water");
+    assert_eq!(part["chart"]["xs"].as_array().unwrap().len(), 11);
+    assert_eq!(part["chart"]["points"].as_array().unwrap().len(), 3);
+    assert!(close(
+        part["chart"]["points"][1]["low"].as_f64().unwrap(),
+        0.65
+    ));
+    let cdf = data["distribution"]["cdf"].as_array().unwrap();
+    assert_eq!(cdf.len(), 11);
+    assert_eq!(cdf[0], 0.0);
+    assert_eq!(cdf[10], 1.0);
     assert_eq!(data["response"]["xs"].as_array().unwrap().len(), 11);
-    assert!((data["combined"]["low"].as_f64().unwrap() - 0.775).abs() < 1e-12);
+    assert!(close(
+        data["response"]["curves"]["high"][0].as_f64().unwrap(),
+        1.10
+    ));
 }
 
 #[wasm_bindgen_test]
 #[test]
-fn a_later_file_replaces_quantities() {
+fn a_later_file_changes_only_what_it_names() {
     let mut v = view();
-    // Only the rules it changes: the inputs are the sample's.
-    let grip_only = "version: 1\nquantities:\n  tire_friction:\n    rule_bases:\n      water:\n        rules:\n          - {if: (water IS dry), then: {low: 0.9, high: 1.1}}\n          - {if: (water IS wet), then: {low: 0.65, high: 0.85}}\n          - {if: (water IS flooded), then: {low: 0.3, high: 0.65}}\n";
+    // Only the part it changes: the visibility is the sample's.
+    let grip_only = "version: 2\nquantities:\n  tire_friction:\n    parts:\n      water:\n        uniform:\n          low: [0.9, 0.65, 0.3]\n          high: [1.1, 0.85, 0.65]\n";
     v.merge_str(grip_only, "measured.yaml", "").unwrap();
     let out: Json = serde_json::from_str(
         &v.evaluate_str("tire_friction", r#"{"water": 100}"#)
             .unwrap(),
     )
     .unwrap();
-    assert!((out["low"].as_f64().unwrap() - 0.30).abs() < 1e-12);
+    assert!(close(out["low"].as_f64().unwrap(), 0.30));
     let q: Vec<String> = serde_json::from_str(&v.quantities()).unwrap();
     assert_eq!(q.len(), 2);
+    let html = v.rules_html_str("{}", "{}").unwrap();
+    assert!(html.contains("measured.yaml"));
 }
 
 #[wasm_bindgen_test]
 #[test]
 fn the_page_assets_include_the_rules_view() {
     assert!(styles().contains(".oo-cov.oo-rules"));
-    assert!(script().contains("openodd:rules"));
+    assert!(script().contains("openodd:rules") && script().contains("data-oo-p"));
 }
 
 #[wasm_bindgen_test]
 #[test]
 fn a_file_extending_others_reads_them_from_what_the_page_fetched() {
-    let child = "version: 1\nextends: ../sample_rules.yaml\nquantities:\n  tire_friction:\n    rule_bases:\n      water:\n        rules:\n          - {if: (water IS dry), then: {low: 0.95, high: 1.05}}\n          - {if: (water IS wet), then: {low: 0.6, high: 0.8}}\n          - {if: (water IS flooded), then: {low: 0.3, high: 0.5}}\n";
+    let child = "version: 2\nextends: ../sample_rules.yaml\ninputs:\n  water: {default: 100}\nquantities:\n  tire_friction:\n    parts:\n      water:\n        uniform:\n          low: [0.95, 0.6, 0.3]\n          high: [1.05, 0.8, 0.5]\n";
     let source = "https://example.com/rules/vehicles/mini.yaml";
     let refs: Vec<String> =
         serde_json::from_str(&RulesView::references(child, source).unwrap()).unwrap();
@@ -171,12 +232,15 @@ fn a_file_extending_others_reads_them_from_what_the_page_fetched() {
     let files =
         serde_json::json!({ "https://example.com/rules/sample_rules.yaml": SAMPLE }).to_string();
     let v = RulesView::from_files(child, source, &files).unwrap();
-    let out: Json = serde_json::from_str(
-        &v.evaluate_str("tire_friction", r#"{"water": 100}"#)
-            .unwrap(),
-    )
-    .unwrap();
-    assert!((out["low"].as_f64().unwrap() - 0.3).abs() < 1e-12);
+    // The input's default: what an input not given reads, and the slider's.
+    let out: Json = serde_json::from_str(&v.evaluate_str("tire_friction", "{}").unwrap()).unwrap();
+    assert!(close(out["low"].as_f64().unwrap(), 0.3));
+    let inputs: Json = serde_json::from_str(&v.inputs_str("tire_friction").unwrap()).unwrap();
+    assert_eq!(inputs[0]["default"], 100.0);
+    let html = v.rules_html_str("{}", "{}").unwrap();
+    assert!(
+        html.contains("data-oo-input=\"water\" min=\"0\" max=\"100\" step=\"0.5\" value=\"100\"")
+    );
     // The visibility is the extended file's.
     let q: Vec<String> = serde_json::from_str(&v.quantities()).unwrap();
     assert_eq!(q, vec!["tire_friction", "visibility"]);

@@ -1,50 +1,44 @@
-//! Fuzzy rules: how a backend derives what a run sets from what it was given.
+//! Rules: how a backend derives what a run sets from what it was given.
 //!
 //! A backend's knobs set what an ODD names -- the rain, the sun. What those do
 //! to the rest of a run -- the road's grip, how far drivers see -- is the
-//! backend's own model, which it may write as rules: a [`RuleSet`], read from
-//! YAML.
-//!
-//! A rule set holds **quantities**, each one or more **rule bases**. A rule
-//! base reads some inputs, sorts each into fuzzy terms over its universe, and
-//! its rules give, per combination of terms, a value of each of its outputs:
+//! backend's own model, which it writes as rules: a [`RuleSet`], read from
+//! YAML. Each rule is a **conditional distribution**: given some inputs, the
+//! distribution of a quantity.
 //!
 //! ```yaml
-//! version: 1
+//! version: 2
 //! quantities:
 //!   tire_friction:
-//!     rule_bases:
+//!     parts:
 //!       water:
-//!         inputs:
-//!           water:
-//!             universe: [0, 100]
-//!             terms:
-//!               dry: {trapezoid: [0, 0, 0, 50]}
-//!               wet: {triangle: [0, 50, 100]}
-//!               flooded: {trapezoid: [50, 100, 100, 100]}
-//!         rules:
-//!           - if: (water IS dry)
-//!             then: {low: 0.90, high: 1.10}
-//!           - if: (water IS wet)
-//!             then: {low: 0.65, high: 0.85}
-//!           - if: (water IS flooded)
-//!             then: {low: 0.45, high: 0.65}
+//!         at: {water: [0, 50, 100]}       # the input, and the points written
+//!         uniform:                        # the distribution at each point
+//!           low:  [0.90, 0.65, 0.45]
+//!           high: [1.10, 0.85, 0.65]
 //! ```
 //!
-//! Inference is Sugeno's, zero order: an output is the rules' values of it,
-//! averaged by how strongly each rule fires. A rule fires as its antecedent
-//! holds: `AND` the least of its clauses, `OR` the greatest, `NOT` one less
-//! it -- simpful's operators, so a rule file reads the same in either. With
-//! more than one rule base, `combine` (`min`, the default, or `max`) joins
-//! their outputs, output by output.
+//! A quantity is one or more **parts**. A part reads the inputs `at` names
+//! and gives, at each combination of their points, a distribution's
+//! parameters: `uniform` (`low`, `high`), `triangular` (`low`, `mode`,
+//! `high`) or `normal` (`mean`, `sd`, truncated to `low`..`high`). Between
+//! the points each parameter is interpolated linearly (multilinearly over
+//! several inputs), and beyond the outermost points it holds. A parameter
+//! may be one number, the same at every point.
 //!
-//! A rule set is checked when read: every term and rule well formed, every
-//! input's universe covered by its terms, and some rule firing everywhere the
-//! inputs can be -- read at the terms' corners and between them, which finds
-//! any gap, since the terms are piecewise linear between their corners. A value outside an input's universe is
-//! clamped to it. Which inputs exist is the backend's to say
-//! ([`RuleSet::check_inputs`]); one an input names a `default` for may be left
-//! out.
+//! A run draws a value at a **quantile** `p` (0 to 1): the value the
+//! distribution has that share of its mass below ([`Dist::quantile`]). With
+//! several parts, `combine` (`min`, the default, or `max`) joins the values
+//! the parts give at the same quantile: the parts move together, as one
+//! common cause would move them, so a quantity's quantile `p` is the least
+//! (or greatest) of its parts' quantiles `p`.
+//!
+//! A rule set is checked when read: every part well formed, and every
+//! distribution valid at every point written (`low` not above `high`, a
+//! `mode` between them, a positive `sd`) -- which keeps it valid between
+//! them, since each parameter is interpolated linearly. Which inputs exist is
+//! the backend's to say ([`RuleSet::check_inputs`]); an input the file gives
+//! a `default` may be left out when a quantity is read.
 
 use std::path::{Path, PathBuf};
 
@@ -56,347 +50,627 @@ use crate::sources::GitSource;
 use crate::value::py_float_repr;
 use crate::yaml::{parse_all, Node, NodeExt};
 
-/// The rule file format this module reads.
-pub const VERSION: i64 = 1;
-/// Where `exp(-x)` is zero in f64: a bell's degree past `sigma * sqrt(2 * this)`.
-const EXP_UNDERFLOW: f64 = 745.2;
+/// The version of the rule file format this reads.
+pub const VERSION: i64 = 2;
 /// The deepest a chain of `extends` may go.
 pub const MAX_EXTENDS_DEPTH: usize = 32;
-/// The evenly spaced points per input the checks add to its terms' own.
-const CHECK_SPACED: usize = 11;
-/// The most points a rule base's firing check evaluates: one reading more
-/// inputs than that lets be checked is refused.
-pub const CHECK_LIMIT: usize = 1_000_000;
+/// The most points a part may write: the product of its inputs' points.
+pub const MAX_POINTS: usize = 1_000_000;
+/// Quantiles a combined quantity's mean is integrated over.
+const MEAN_STEPS: usize = 512;
 
-/// A fuzzy term: how much a value belongs to it, 0 to 1.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Membership {
-    /// `[a, b, c]`: rising from `a`, 1 at `b`, falling to `c`.
-    Triangle([f64; 3]),
-    /// `[a, b, c, d]`: rising from `a`, 1 from `b` to `c`, falling to `d`.
-    Trapezoid([f64; 4]),
-    /// A bell around `mean`, `sigma` wide.
-    Gaussian { mean: f64, sigma: f64 },
+// ---------------------------------------------------------------------------
+// Distributions
+// ---------------------------------------------------------------------------
+
+/// A distribution's family, and the parameters it is written with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    Uniform,
+    Triangular,
+    /// A normal distribution truncated to `low`..`high`.
+    Normal,
 }
 
-impl Membership {
-    /// How much `x` belongs to the term. An edge whose two points coincide is
-    /// a shoulder: 1 on the far side of it, as simpful reads it.
-    pub fn degree(&self, x: f64) -> f64 {
-        let raw = match *self {
-            Membership::Triangle([a, b, c]) => {
-                if x < b {
-                    rise(x, a, b)
-                } else {
-                    fall(x, b, c)
-                }
-            }
-            Membership::Trapezoid([a, b, c, d]) => {
-                if x < b {
-                    rise(x, a, b)
-                } else if x <= c {
-                    1.0
-                } else {
-                    fall(x, c, d)
-                }
-            }
-            Membership::Gaussian { mean, sigma } => {
-                (-(x - mean).powi(2) / (2.0 * sigma * sigma)).exp()
-            }
-        };
-        raw.clamp(0.0, 1.0)
-    }
-}
+impl Family {
+    pub const ALL: [Family; 3] = [Family::Uniform, Family::Triangular, Family::Normal];
 
-fn rise(x: f64, from: f64, to: f64) -> f64 {
-    if from == to {
-        1.0
-    } else {
-        (x - from) / (to - from)
-    }
-}
-
-fn fall(x: f64, from: f64, to: f64) -> f64 {
-    if from == to {
-        1.0
-    } else {
-        1.0 - (x - from) / (to - from)
-    }
-}
-
-/// An input of a rule base: its universe, its terms, and the value it reads
-/// when none is given.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Input {
-    pub name: String,
-    pub low: f64,
-    pub high: f64,
-    pub terms: IndexMap<String, Membership>,
-    pub default: Option<f64>,
-}
-
-impl Input {
-    /// `x` clamped to the universe.
-    pub fn clamp(&self, x: f64) -> f64 {
-        x.clamp(self.low, self.high)
-    }
-
-    /// The points the checks read the input at: its universe's ends, its
-    /// terms' corners (and a bell's centre) inside it, a few evenly spaced
-    /// ones, and the midpoint of each two neighbours. Its terms are piecewise
-    /// linear between their corners, so where none covers it, or where no
-    /// rule fires, begins and ends at a corner: one of these points is in it.
-    fn check_points(&self) -> Vec<f64> {
-        let mut corners: Vec<f64> = vec![self.low, self.high];
-        for m in self.terms.values() {
-            match m {
-                Membership::Triangle(p) => corners.extend(p),
-                Membership::Trapezoid(p) => corners.extend(p),
-                Membership::Gaussian { mean, sigma } => {
-                    // A bell is never zero, but its degree is, in floating
-                    // point, past where exp() underflows: those are its corners.
-                    let reach = sigma * (2.0 * EXP_UNDERFLOW).sqrt();
-                    corners.extend([mean - reach, *mean, mean + reach]);
-                }
-            }
-        }
-        let step = (self.high - self.low) / (CHECK_SPACED - 1) as f64;
-        corners.extend((0..CHECK_SPACED).map(|i| self.low + i as f64 * step));
-        corners.retain(|x| self.low <= *x && *x <= self.high);
-        corners.sort_by(f64::total_cmp);
-        corners.dedup();
-        let mut out = Vec::with_capacity(corners.len() * 2);
-        for w in corners.windows(2) {
-            out.push(w[0]);
-            out.push((w[0] + w[1]) / 2.0);
-        }
-        out.push(*corners.last().expect("the universe's ends"));
-        out
-    }
-}
-
-/// A rule's antecedent: clauses `(input IS term)`, by input index.
-#[derive(Debug, Clone, PartialEq)]
-enum Expr {
-    Is(usize, String),
-    Not(Box<Expr>),
-    And(Vec<Expr>),
-    Or(Vec<Expr>),
-}
-
-impl Expr {
-    fn holds(&self, inputs: &[Input], values: &[f64]) -> f64 {
+    pub fn name(self) -> &'static str {
         match self {
-            Expr::Is(i, term) => inputs[*i].terms[term].degree(values[*i]),
-            Expr::Not(e) => 1.0 - e.holds(inputs, values),
-            Expr::And(es) => es
-                .iter()
-                .map(|e| e.holds(inputs, values))
-                .fold(f64::INFINITY, f64::min),
-            Expr::Or(es) => es
-                .iter()
-                .map(|e| e.holds(inputs, values))
-                .fold(f64::NEG_INFINITY, f64::max),
+            Family::Uniform => "uniform",
+            Family::Triangular => "triangular",
+            Family::Normal => "normal",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Family> {
+        Family::ALL.into_iter().find(|f| f.name() == name)
+    }
+
+    /// The parameters it is written with, in order.
+    pub fn params(self) -> &'static [&'static str] {
+        match self {
+            Family::Uniform => &["low", "high"],
+            Family::Triangular => &["low", "mode", "high"],
+            Family::Normal => &["mean", "sd", "low", "high"],
+        }
+    }
+
+    /// The distribution of these parameters (in [`Family::params`]' order).
+    pub fn dist(self, p: &[f64]) -> Dist {
+        match self {
+            Family::Uniform => Dist::Uniform {
+                low: p[0],
+                high: p[1],
+            },
+            Family::Triangular => Dist::Triangular {
+                low: p[0],
+                mode: p[1],
+                high: p[2],
+            },
+            Family::Normal => Dist::Normal {
+                mean: p[0],
+                sd: p[1],
+                low: p[2],
+                high: p[3],
+            },
         }
     }
 }
 
-/// One rule: when it fires, and the value of each output it gives.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Rule {
-    pub antecedent: String,
-    expr: Expr,
-    pub then: IndexMap<String, f64>,
+/// A distribution of one value: what a part gives at its inputs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Dist {
+    Uniform {
+        low: f64,
+        high: f64,
+    },
+    Triangular {
+        low: f64,
+        mode: f64,
+        high: f64,
+    },
+    /// Normal, truncated to `low`..`high`.
+    Normal {
+        mean: f64,
+        sd: f64,
+        low: f64,
+        high: f64,
+    },
 }
 
-/// A rule base: inputs, and rules giving each of its outputs.
+impl Dist {
+    pub fn family(&self) -> Family {
+        match self {
+            Dist::Uniform { .. } => Family::Uniform,
+            Dist::Triangular { .. } => Family::Triangular,
+            Dist::Normal { .. } => Family::Normal,
+        }
+    }
+
+    /// Its parameters, in [`Family::params`]' order.
+    pub fn params(&self) -> Vec<f64> {
+        match *self {
+            Dist::Uniform { low, high } => vec![low, high],
+            Dist::Triangular { low, mode, high } => vec![low, mode, high],
+            Dist::Normal {
+                mean,
+                sd,
+                low,
+                high,
+            } => vec![mean, sd, low, high],
+        }
+    }
+
+    /// Why it is no distribution, if it is not.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        let (low, high) = self.support();
+        if low > high {
+            return Err(format!(
+                "low ({}) must not be above high ({})",
+                py_float_repr(low),
+                py_float_repr(high)
+            ));
+        }
+        match *self {
+            Dist::Triangular { mode, .. } if !(low <= mode && mode <= high) => Err(format!(
+                "mode ({}) must be between low and high",
+                py_float_repr(mode)
+            )),
+            Dist::Normal { sd, .. }
+                if sd.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) =>
+            {
+                Err(format!("sd ({}) must be positive", py_float_repr(sd)))
+            }
+            Dist::Normal { .. } if low == high => Err(
+                "a normal distribution is truncated to low..high, which must not be empty".into(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// The least and greatest value it gives.
+    pub fn support(&self) -> (f64, f64) {
+        match *self {
+            Dist::Uniform { low, high }
+            | Dist::Triangular { low, high, .. }
+            | Dist::Normal { low, high, .. } => (low, high),
+        }
+    }
+
+    /// The value with a share `p` (clamped to 0..1) of the mass below it.
+    pub fn quantile(&self, p: f64) -> f64 {
+        let p = if p.is_nan() { 0.5 } else { p.clamp(0.0, 1.0) };
+        match *self {
+            Dist::Uniform { low, high } => low + p * (high - low),
+            Dist::Triangular { low, mode, high } => {
+                let w = high - low;
+                if w <= 0.0 {
+                    return low;
+                }
+                let c = (mode - low) / w;
+                if p < c {
+                    low + (p * w * (mode - low)).sqrt()
+                } else {
+                    high - ((1.0 - p) * w * (high - mode)).sqrt()
+                }
+            }
+            Dist::Normal {
+                mean,
+                sd,
+                low,
+                high,
+            } => {
+                let (a, b) = ((low - mean) / sd, (high - mean) / sd);
+                // Work in the tail the interval sits in, for precision.
+                let z = if a > 0.0 {
+                    let (qa, qb) = (upper(a), upper(b));
+                    -inverse_phi(qa - p * (qa - qb))
+                } else {
+                    let (pa, pb) = (phi(a), phi(b));
+                    inverse_phi(pa + p * (pb - pa))
+                };
+                (mean + sd * z).clamp(low, high)
+            }
+        }
+    }
+
+    /// The share of its mass at or below `x`.
+    pub fn cdf(&self, x: f64) -> f64 {
+        let (low, high) = self.support();
+        if x < low {
+            return 0.0;
+        }
+        if x >= high {
+            return 1.0;
+        }
+        match *self {
+            Dist::Uniform { low, high } => (x - low) / (high - low),
+            Dist::Triangular { low, mode, high } => {
+                let w = high - low;
+                if mode > low && x <= mode {
+                    (x - low).powi(2) / (w * (mode - low))
+                } else {
+                    1.0 - (high - x).powi(2) / (w * (high - mode))
+                }
+            }
+            Dist::Normal {
+                mean,
+                sd,
+                low,
+                high,
+            } => {
+                let (a, b, z) = ((low - mean) / sd, (high - mean) / sd, (x - mean) / sd);
+                if a > 0.0 {
+                    (upper(a) - upper(z)) / (upper(a) - upper(b))
+                } else {
+                    (phi(z) - phi(a)) / (phi(b) - phi(a))
+                }
+            }
+        }
+        .clamp(0.0, 1.0)
+    }
+
+    /// Its density at `x` (infinite at a point mass).
+    pub fn pdf(&self, x: f64) -> f64 {
+        let (low, high) = self.support();
+        if x < low || x > high {
+            return 0.0;
+        }
+        if high <= low {
+            return f64::INFINITY;
+        }
+        match *self {
+            Dist::Uniform { low, high } => 1.0 / (high - low),
+            Dist::Triangular { low, mode, high } => {
+                let w = high - low;
+                if x < mode {
+                    2.0 * (x - low) / (w * (mode - low))
+                } else if x > mode {
+                    2.0 * (high - x) / (w * (high - mode))
+                } else {
+                    2.0 / w
+                }
+            }
+            Dist::Normal {
+                mean,
+                sd,
+                low,
+                high,
+            } => {
+                let (a, b, z) = ((low - mean) / sd, (high - mean) / sd, (x - mean) / sd);
+                let mass = if a > 0.0 {
+                    upper(a) - upper(b)
+                } else {
+                    phi(b) - phi(a)
+                };
+                density(z) / (sd * mass)
+            }
+        }
+    }
+
+    pub fn mean(&self) -> f64 {
+        match *self {
+            Dist::Uniform { low, high } => (low + high) / 2.0,
+            Dist::Triangular { low, mode, high } => (low + mode + high) / 3.0,
+            Dist::Normal {
+                mean,
+                sd,
+                low,
+                high,
+            } => {
+                let (a, b) = ((low - mean) / sd, (high - mean) / sd);
+                let mass = if a > 0.0 {
+                    upper(a) - upper(b)
+                } else {
+                    phi(b) - phi(a)
+                };
+                (mean + sd * (density(a) - density(b)) / mass).clamp(low, high)
+            }
+        }
+    }
+}
+
+const SQRT_2: f64 = std::f64::consts::SQRT_2;
+
+/// The standard normal's distribution function.
+fn phi(z: f64) -> f64 {
+    0.5 * libm::erfc(-z / SQRT_2)
+}
+
+/// Its upper tail, 1 - phi(z), without cancelling.
+fn upper(z: f64) -> f64 {
+    0.5 * libm::erfc(z / SQRT_2)
+}
+
+fn density(z: f64) -> f64 {
+    (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt()
+}
+
+/// The standard normal's quantile function: Acklam's approximation, then a
+/// Halley step, good to about 1e-15.
+fn inverse_phi(p: f64) -> f64 {
+    if p <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if p >= 1.0 {
+        return f64::INFINITY;
+    }
+    const A: [f64; 6] = [
+        -3.969683028665376e+01,
+        2.209460984245205e+02,
+        -2.759285104469687e+02,
+        1.383_577_518_672_69e2,
+        -3.066479806614716e+01,
+        2.506628277459239e+00,
+    ];
+    const B: [f64; 5] = [
+        -5.447609879822406e+01,
+        1.615858368580409e+02,
+        -1.556989798598866e+02,
+        6.680131188771972e+01,
+        -1.328068155288572e+01,
+    ];
+    const C: [f64; 6] = [
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e+00,
+        -2.549732539343734e+00,
+        4.374664141464968e+00,
+        2.938163982698783e+00,
+    ];
+    const D: [f64; 4] = [
+        7.784695709041462e-03,
+        3.224671290700398e-01,
+        2.445134137142996e+00,
+        3.754408661907416e+00,
+    ];
+    let low = 0.02425;
+    let x = if p < low {
+        let q = (-2.0 * p.ln()).sqrt();
+        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+    } else if p <= 1.0 - low {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+    } else {
+        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+    };
+    // One Halley step on phi(x) - p.
+    let e = phi(x) - p;
+    let u = e * (2.0 * std::f64::consts::PI).sqrt() * (x * x / 2.0).exp();
+    x - u / (1.0 + x * u / 2.0)
+}
+
+// ---------------------------------------------------------------------------
+// Parts and quantities
+// ---------------------------------------------------------------------------
+
+/// One input of a part, and the points its distributions are written at.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RuleBase {
+pub struct Axis {
+    pub input: String,
+    /// Increasing.
+    pub points: Vec<f64>,
+}
+
+/// A conditional distribution: given its inputs, a distribution's
+/// parameters, written at every combination of its axes' points and
+/// interpolated between them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Part {
     pub name: String,
-    pub inputs: Vec<Input>,
-    pub rules: Vec<Rule>,
-    pub outputs: Vec<String>,
+    pub axes: Vec<Axis>,
+    pub family: Family,
+    /// Per parameter (in [`Family::params`]' order), its value at every
+    /// combination of the axes' points, the last axis fastest.
+    pub values: Vec<Vec<f64>>,
+    pub text: String,
 }
 
-impl RuleBase {
-    /// Each output at `values` (one per input, in order), each clamped to its
-    /// input's universe.
-    pub fn evaluate(&self, values: &[f64]) -> Result<IndexMap<String, f64>> {
-        let clamped: Vec<f64> = self
-            .inputs
-            .iter()
-            .zip(values)
-            .map(|(i, v)| i.clamp(*v))
-            .collect();
-        let mut total = 0.0;
-        let mut sums: IndexMap<String, f64> =
-            self.outputs.iter().map(|o| (o.clone(), 0.0)).collect();
-        for rule in &self.rules {
-            let w = rule.expr.holds(&self.inputs, &clamped);
-            total += w;
-            for (output, value) in &rule.then {
-                sums[output] += w * value;
-            }
-        }
-        if !(total > 0.0) {
-            let at: Vec<String> = self
-                .inputs
-                .iter()
-                .zip(values)
-                .map(|(i, v)| format!("{}={}", i.name, py_float_repr(*v)))
-                .collect();
-            return Err(Error::value(format!("no rule fires at {}", at.join(", "))));
-        }
-        Ok(sums.into_iter().map(|(o, s)| (o, s / total)).collect())
+impl Part {
+    /// How many combinations of points it writes.
+    pub fn size(&self) -> usize {
+        self.axes.iter().map(|a| a.points.len()).product()
     }
 
-    /// How strongly each rule fires at `values` (one per input, in order),
-    /// each clamped to its input's universe.
-    pub fn firing(&self, values: &[f64]) -> Vec<f64> {
-        let clamped: Vec<f64> = self
-            .inputs
+    /// Its distribution at `values` (one per axis, in order), each held at
+    /// its axis' outermost points.
+    pub fn dist(&self, values: &[f64]) -> Dist {
+        // Each axis: the lower corner's index and the weight of the upper.
+        let cells: Vec<(usize, f64)> = self
+            .axes
             .iter()
             .zip(values)
-            .map(|(i, v)| i.clamp(*v))
+            .map(|(axis, v)| segment(&axis.points, *v))
             .collect();
-        self.rules
-            .iter()
-            .map(|r| r.expr.holds(&self.inputs, &clamped))
-            .collect()
-    }
-
-    /// Some rule fires everywhere the inputs can be: at every combination of
-    /// their check points ([`Input::check_points`]). A clause reads one input,
-    /// so where no rule fires is made of cells between those points.
-    fn check(&self) -> Result<()> {
-        let grids: Vec<Vec<f64>> = self.inputs.iter().map(Input::check_points).collect();
-        let total = grids
-            .iter()
-            .try_fold(1usize, |acc, g| acc.checked_mul(g.len()))
-            .filter(|t| *t <= CHECK_LIMIT);
-        if total.is_none() {
-            return Err(Error::value(format!(
-                "its {} inputs and their terms make more than {CHECK_LIMIT} points to check; \
-                 split it into rule bases reading fewer inputs",
-                self.inputs.len()
-            )));
-        }
-        let mut index = vec![0usize; grids.len()];
-        loop {
-            let point: Vec<f64> = index.iter().zip(&grids).map(|(k, g)| g[*k]).collect();
-            self.evaluate(&point)?;
-            // The next point, the last input fastest.
-            let mut d = grids.len();
-            loop {
-                if d == 0 {
-                    return Ok(());
-                }
-                d -= 1;
-                index[d] += 1;
-                if index[d] < grids[d].len() {
-                    break;
-                }
-                index[d] = 0;
+        let strides = self.strides();
+        let mut params = vec![0.0; self.values.len()];
+        for corner in 0..(1usize << cells.len()) {
+            let mut w = 1.0;
+            let mut index = 0;
+            for (d, &(i, t)) in cells.iter().enumerate() {
+                let up = corner >> d & 1 == 1;
+                let n = self.axes[d].points.len();
+                let j = if up { (i + 1).min(n - 1) } else { i };
+                w *= if up { t } else { 1.0 - t };
+                index += j * strides[d];
+            }
+            if w == 0.0 {
+                continue;
+            }
+            for (p, column) in params.iter_mut().zip(&self.values) {
+                *p += w * column[index];
             }
         }
+        self.family.dist(&params)
+    }
+
+    /// The distribution written at combination `index` (see [`Part::values`]).
+    pub fn dist_at(&self, index: usize) -> Dist {
+        let p: Vec<f64> = self.values.iter().map(|c| c[index]).collect();
+        self.family.dist(&p)
+    }
+
+    fn strides(&self) -> Vec<usize> {
+        let mut strides = vec![1; self.axes.len()];
+        for d in (0..self.axes.len().saturating_sub(1)).rev() {
+            strides[d] = strides[d + 1] * self.axes[d + 1].points.len();
+        }
+        strides
     }
 }
 
-/// How the outputs of a quantity's rule bases are joined.
+/// The segment of `points` (increasing) that `v` falls in: its lower
+/// point's index and how far along it `v` is, held at the ends.
+fn segment(points: &[f64], v: f64) -> (usize, f64) {
+    let n = points.len();
+    if n == 1 || v <= points[0] {
+        return (0, 0.0);
+    }
+    if v >= points[n - 1] {
+        return (n - 1, 0.0);
+    }
+    let i = points.partition_point(|p| *p <= v) - 1;
+    (i, (v - points[i]) / (points[i + 1] - points[i]))
+}
+
+/// How a quantity's parts are joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Combine {
     Min,
     Max,
 }
 
-/// A quantity: rule bases whose outputs `combine` joins.
+impl Combine {
+    pub fn name(self) -> &'static str {
+        match self {
+            Combine::Min => "min",
+            Combine::Max => "max",
+        }
+    }
+
+    fn join(self, a: f64, b: f64) -> f64 {
+        match self {
+            Combine::Min => a.min(b),
+            Combine::Max => a.max(b),
+        }
+    }
+}
+
+/// An input a rule file describes: the value it reads when none is given.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputInfo {
+    pub name: String,
+    pub default: Option<f64>,
+    pub text: String,
+}
+
+/// A quantity: parts whose values at one quantile `combine` joins.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quantity {
     pub name: String,
     /// Where it was read from, for messages.
     pub source: String,
     pub combine: Combine,
-    pub rule_bases: Vec<RuleBase>,
-    pub outputs: Vec<String>,
+    pub parts: Vec<Part>,
+    pub text: String,
+}
+
+/// A quantity's distribution at some inputs: its parts', joined.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Joined {
+    pub combine: Combine,
+    pub parts: Vec<(String, Dist)>,
+}
+
+impl Joined {
+    /// The value at quantile `p`: the parts' values at `p`, joined.
+    pub fn quantile(&self, p: f64) -> f64 {
+        self.parts
+            .iter()
+            .map(|(_, d)| d.quantile(p))
+            .reduce(|a, b| self.combine.join(a, b))
+            .expect("a quantity has a part")
+    }
+
+    /// The least and greatest value.
+    pub fn support(&self) -> (f64, f64) {
+        (self.quantile(0.0), self.quantile(1.0))
+    }
+
+    /// The share of its mass at or below `x`. The parts move together, so
+    /// the least of them is at or below `x` as soon as any one is.
+    pub fn cdf(&self, x: f64) -> f64 {
+        let each = self.parts.iter().map(|(_, d)| d.cdf(x));
+        match self.combine {
+            Combine::Min => each.fold(0.0, f64::max),
+            Combine::Max => each.fold(1.0, f64::min),
+        }
+    }
+
+    pub fn mean(&self) -> f64 {
+        if let [(_, d)] = self.parts.as_slice() {
+            return d.mean();
+        }
+        (0..MEAN_STEPS)
+            .map(|k| self.quantile((k as f64 + 0.5) / MEAN_STEPS as f64))
+            .sum::<f64>()
+            / MEAN_STEPS as f64
+    }
+
+    /// Which part gives the value at quantile `p` (the first, on a tie).
+    pub fn deciding(&self, p: f64) -> &str {
+        let v = self.quantile(p);
+        self.parts
+            .iter()
+            .find(|(_, d)| d.quantile(p) == v)
+            .map(|(n, _)| n.as_str())
+            .unwrap_or_default()
+    }
+
+    /// `low`, `high`, `median` and `mean`: what [`RuleSet::evaluate`] gives.
+    pub fn summary(&self) -> IndexMap<String, f64> {
+        let (low, high) = self.support();
+        let mut out = IndexMap::new();
+        out.insert("low".to_string(), low);
+        out.insert("high".to_string(), high);
+        out.insert("median".to_string(), self.quantile(0.5));
+        out.insert("mean".to_string(), self.mean());
+        out
+    }
 }
 
 impl Quantity {
-    /// The inputs its rule bases read, each once, in the order first read.
+    /// The inputs its parts read, each once, in the order first read.
     pub fn inputs(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for base in &self.rule_bases {
-            for i in &base.inputs {
-                if !out.contains(&i.name) {
-                    out.push(i.name.clone());
+        for part in &self.parts {
+            for a in &part.axes {
+                if !out.contains(&a.input) {
+                    out.push(a.input.clone());
                 }
             }
         }
         out
     }
 
-    /// Each output at `inputs`, by name; an input not given reads its default.
-    pub fn evaluate(&self, inputs: &IndexMap<String, f64>) -> Result<IndexMap<String, f64>> {
-        let mut joined: Option<IndexMap<String, f64>> = None;
-        for (_, out) in self.evaluate_each(inputs)? {
-            joined = Some(match joined {
-                None => out,
-                Some(mut acc) => {
-                    for (o, v) in out {
-                        let a = acc[&o];
-                        acc[&o] = match self.combine {
-                            Combine::Min => a.min(v),
-                            Combine::Max => a.max(v),
-                        };
-                    }
-                    acc
-                }
-            });
-        }
-        Ok(joined.expect("a quantity has a rule base"))
-    }
-
-    /// Each rule base's outputs at `inputs`, before `combine` joins them.
-    pub fn evaluate_each(
+    /// The values `part` reads of `inputs`, in its axes' order: each given
+    /// one, else its `default`.
+    pub fn values_of(
         &self,
+        part: &Part,
         inputs: &IndexMap<String, f64>,
-    ) -> Result<Vec<(String, IndexMap<String, f64>)>> {
-        let mut out = Vec::with_capacity(self.rule_bases.len());
-        for base in &self.rule_bases {
-            let values = self.values_of(base, inputs)?;
-            let outputs = base.evaluate(&values).map_err(|e| {
-                Error::value(format!("{}: {}.{}: {e}", self.source, self.name, base.name))
-            })?;
-            out.push((base.name.clone(), outputs));
-        }
-        Ok(out)
-    }
-
-    /// The values `base` reads of `inputs`, in its inputs' order: each given
-    /// one, else its default.
-    pub fn values_of(&self, base: &RuleBase, inputs: &IndexMap<String, f64>) -> Result<Vec<f64>> {
-        let mut values = Vec::with_capacity(base.inputs.len());
-        for i in &base.inputs {
-            match inputs.get(&i.name).copied().or(i.default) {
+        known: &IndexMap<String, InputInfo>,
+    ) -> Result<Vec<f64>> {
+        let mut values = Vec::with_capacity(part.axes.len());
+        for a in &part.axes {
+            let given = inputs
+                .get(&a.input)
+                .copied()
+                .or_else(|| known.get(&a.input).and_then(|i| i.default));
+            match given {
                 Some(v) if v.is_finite() => values.push(v),
                 Some(v) => {
                     return Err(Error::value(format!(
                         "{}: {}.{}: {} is {}, not a finite number",
                         self.source,
                         self.name,
-                        base.name,
-                        i.name,
+                        part.name,
+                        a.input,
                         py_float_repr(v)
                     )))
                 }
                 None => {
                     return Err(Error::value(format!(
                         "{}: {}.{} reads {}, which was not given and has no default",
-                        self.source, self.name, base.name, i.name
+                        self.source, self.name, part.name, a.input
                     )))
                 }
             }
         }
         Ok(values)
+    }
+
+    /// Its distribution at `inputs`.
+    pub fn joined(
+        &self,
+        inputs: &IndexMap<String, f64>,
+        known: &IndexMap<String, InputInfo>,
+    ) -> Result<Joined> {
+        let mut parts = Vec::with_capacity(self.parts.len());
+        for part in &self.parts {
+            let values = self.values_of(part, inputs, known)?;
+            parts.push((part.name.clone(), part.dist(&values)));
+        }
+        Ok(Joined {
+            combine: self.combine,
+            parts,
+        })
     }
 }
 
@@ -588,6 +862,8 @@ pub struct FileRead {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RuleSet {
     pub quantities: IndexMap<String, Quantity>,
+    /// The inputs the file describes (a `default`, a line saying what it is).
+    pub inputs: IndexMap<String, InputInfo>,
     /// Every file read, the files extended before those extending them.
     pub files: Vec<FileRead>,
     /// The rules as one document, every `extends` worked in: what a later
@@ -676,7 +952,15 @@ impl RuleSet {
 
     fn from_doc(doc: Node, source: &str) -> Result<Self> {
         let at = Where::new(source);
-        let map = mapping(&doc, &at, &["version", "quantities"])?;
+        let map = mapping(&doc, &at, &["version", "inputs", "quantities"])?;
+        let mut inputs = IndexMap::new();
+        if let Some(raw) = get(map, "inputs") {
+            let at = at.key("inputs");
+            for (name, entry) in mapping(raw, &at, &[])? {
+                let name = node_name(name, &at)?;
+                inputs.insert(name.clone(), read_input(&name, entry, &at.key(&name))?);
+            }
+        }
         let at = at.key("quantities");
         let quantities = required_mapping(map, "quantities", &at)?;
         let mut out = IndexMap::new();
@@ -687,15 +971,16 @@ impl RuleSet {
         }
         Ok(RuleSet {
             quantities: out,
+            inputs,
             files: Vec::new(),
             doc,
         })
     }
 
-    /// This rule set with `over`'s rules merged over it: a quantity, a rule
-    /// base and an input `over` names replaces this one's of that name, field
-    /// by field down to the rule base, and `null` removes one; a rule base's
-    /// `rules` are replaced whole.
+    /// This rule set with `over`'s rules merged over it: a quantity, a part
+    /// and an input `over` names merges over this one's of that name, field
+    /// by field (a part's `at` and its distribution replace), and `null`
+    /// removes one.
     pub fn merged(&self, over: &RuleSet) -> Result<RuleSet> {
         let source = over
             .files
@@ -728,27 +1013,39 @@ impl RuleSet {
         })
     }
 
-    /// Each output of `quantity` at `inputs` ([`Quantity::evaluate`]).
+    /// `quantity`'s distribution at `inputs`; an input not given reads its
+    /// `default`.
+    pub fn joined(&self, quantity: &str, inputs: &IndexMap<String, f64>) -> Result<Joined> {
+        self.quantity(quantity)?.joined(inputs, &self.inputs)
+    }
+
+    /// `low`, `high`, `median` and `mean` of `quantity` at `inputs`
+    /// ([`Joined::summary`]).
     pub fn evaluate(
         &self,
         quantity: &str,
         inputs: &IndexMap<String, f64>,
     ) -> Result<IndexMap<String, f64>> {
-        self.quantity(quantity)?.evaluate(inputs)
+        Ok(self.joined(quantity, inputs)?.summary())
+    }
+
+    /// `quantity`'s value at quantile `p` (0 to 1) at `inputs`.
+    pub fn quantile(&self, quantity: &str, inputs: &IndexMap<String, f64>, p: f64) -> Result<f64> {
+        Ok(self.joined(quantity, inputs)?.quantile(p))
     }
 
     /// Refuse an input that is not one of `allowed` (the backend's).
     pub fn check_inputs(&self, allowed: &[String]) -> Result<()> {
         for q in self.quantities.values() {
-            for base in &q.rule_bases {
-                for i in &base.inputs {
-                    if !allowed.contains(&i.name) {
+            for part in &q.parts {
+                for a in &part.axes {
+                    if !allowed.contains(&a.input) {
                         return Err(Error::value(format!(
-                            "{}: quantities.{}.rule_bases.{}.inputs: unknown input '{}'; the rules may read {}",
+                            "{}: quantities.{}.parts.{}.at: unknown input '{}'; the rules may read {}",
                             q.source,
                             q.name,
-                            base.name,
-                            i.name,
+                            part.name,
+                            a.input,
                             crate::model::py_list(allowed)
                         )));
                     }
@@ -773,9 +1070,13 @@ fn document(text: &str, source: &str) -> Result<Node> {
     doc.apply_merge()
         .map_err(|e| Error::value(format!("{source}: {e}")))?;
     let at = Where::new(source);
-    let map = mapping(&doc, &at, &["version", "extends", "quantities"])?;
+    let map = mapping(&doc, &at, &["version", "extends", "inputs", "quantities"])?;
     match get(map, "version").and_then(Node::as_i64) {
         Some(VERSION) => Ok(doc),
+        Some(1) => Err(at.error(
+            "version 1 (fuzzy rules) is no longer read: write each rule base as a part, its rules as \
+             the values at its inputs' points (docs/rules.md, \"From version 1\")",
+        )),
         _ => Err(at.error(format!(
             "version must be {VERSION}, got {}",
             get(map, "version")
@@ -907,53 +1208,255 @@ fn compose(
 
 /// Merge the rule document `over` into `base` (see [`RuleSet::merged`]).
 fn merge_doc(base: &mut Node, over: &Node) {
-    merge_level(base, over, &[("quantities", 0)]);
-}
-
-/// `over`'s entries into `base`'s, `depth` naming what the mapping holds:
-/// 0 quantities, 1 rule bases, 2 inputs. Down to the rule base an entry
-/// merges field by field; below it, it replaces.
-fn merge_level(base: &mut Node, over: &Node, named: &[(&str, usize)]) {
     let (Node::Mapping(b), Node::Mapping(o)) = (base, untag(over)) else {
         return;
     };
     for (k, v) in o {
-        let key = k.py_str();
-        let Some((_, depth)) = named.iter().find(|(n, _)| *n == key) else {
-            b.insert(k.clone(), v.clone());
-            continue;
-        };
-        let Node::Mapping(entries) = untag(v) else {
-            b.insert(k.clone(), v.clone());
-            continue;
-        };
-        if !matches!(b.get(k), Some(Node::Mapping(_))) {
-            b.insert(k.clone(), Node::Mapping(crate::yaml::Mapping::new()));
-        }
-        let Some(Node::Mapping(mine)) = b.get_mut(k) else {
-            continue;
-        };
-        for (name, entry) in entries {
-            if matches!(untag(entry), Node::Null) {
-                mine.remove(name);
-                continue;
-            }
-            let fields: &[(&str, usize)] = match depth {
-                0 => &[("rule_bases", 1)],
-                1 => &[("inputs", 2)],
-                _ => {
-                    mine.insert(name.clone(), entry.clone());
-                    continue;
-                }
-            };
-            match mine.get_mut(name) {
-                Some(existing @ Node::Mapping(_)) => merge_level(existing, entry, fields),
-                _ => {
-                    mine.insert(name.clone(), entry.clone());
-                }
+        match k.py_str().as_str() {
+            "quantities" => merge_named(b, k, v, merge_quantity),
+            "inputs" => merge_named(b, k, v, merge_fields),
+            _ => {
+                b.insert(k.clone(), v.clone());
             }
         }
     }
+}
+
+/// `over`'s named entries (quantities, parts, inputs) into `base`'s under
+/// `key`: each merged by `merge` over the one of its name, a new one added,
+/// and `null` removing one.
+fn merge_named(
+    base: &mut crate::yaml::Mapping,
+    key: &Node,
+    over: &Node,
+    merge: fn(&mut Node, &Node),
+) {
+    let Node::Mapping(entries) = untag(over) else {
+        base.insert(key.clone(), over.clone());
+        return;
+    };
+    if !matches!(base.get(key), Some(Node::Mapping(_))) {
+        base.insert(key.clone(), Node::Mapping(crate::yaml::Mapping::new()));
+    }
+    let Some(Node::Mapping(mine)) = base.get_mut(key) else {
+        return;
+    };
+    for (name, entry) in entries {
+        if matches!(untag(entry), Node::Null) {
+            mine.remove(name);
+            continue;
+        }
+        match mine.get_mut(name) {
+            Some(existing @ Node::Mapping(_)) => merge(existing, entry),
+            _ => {
+                mine.insert(name.clone(), entry.clone());
+            }
+        }
+    }
+}
+
+/// A quantity: field by field, its parts by name.
+fn merge_quantity(base: &mut Node, over: &Node) {
+    let (Node::Mapping(b), Node::Mapping(o)) = (base, untag(over)) else {
+        return;
+    };
+    for (k, v) in o {
+        if k.py_str() == "parts" {
+            merge_named(b, k, v, merge_part);
+        } else {
+            b.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// A part: field by field; a distribution it names replaces the one there.
+fn merge_part(base: &mut Node, over: &Node) {
+    let (Node::Mapping(b), Node::Mapping(o)) = (base, untag(over)) else {
+        return;
+    };
+    let names_family = o.keys().any(|k| Family::from_name(&k.py_str()).is_some());
+    if names_family {
+        for f in Family::ALL {
+            b.remove(f.name());
+        }
+    }
+    for (k, v) in o {
+        b.insert(k.clone(), v.clone());
+    }
+}
+
+/// An input: field by field.
+fn merge_fields(base: &mut Node, over: &Node) {
+    let (Node::Mapping(b), Node::Mapping(o)) = (base, untag(over)) else {
+        return;
+    };
+    for (k, v) in o {
+        b.insert(k.clone(), v.clone());
+    }
+}
+
+fn read_input(name: &str, node: &Node, at: &Where) -> Result<InputInfo> {
+    let map = mapping(node, at, &["default", "text"])?;
+    let default = get(map, "default")
+        .map(|d| number(d, &at.key("default")))
+        .transpose()?;
+    Ok(InputInfo {
+        name: name.to_string(),
+        default,
+        text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
+    })
+}
+
+fn read_quantity(name: &str, node: &Node, source: &str, at: &Where) -> Result<Quantity> {
+    let map = mapping(node, at, &["combine", "parts", "text"])?;
+    let combine = match get(map, "combine").map(NodeExt::py_str).as_deref() {
+        None | Some("min") => Combine::Min,
+        Some("max") => Combine::Max,
+        Some(other) => {
+            return Err(at
+                .key("combine")
+                .error(format!("expected min or max, got '{other}'")))
+        }
+    };
+    let parts_at = at.key("parts");
+    let mut parts = Vec::new();
+    for (part, raw) in required_mapping(map, "parts", &parts_at)? {
+        let part = node_name(part, &parts_at)?;
+        parts.push(read_part(&part, raw, &parts_at.key(&part))?);
+    }
+    if parts.is_empty() {
+        return Err(parts_at.error("no parts"));
+    }
+    Ok(Quantity {
+        name: name.to_string(),
+        source: source.to_string(),
+        combine,
+        parts,
+        text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
+    })
+}
+
+fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
+    let mut known = vec!["at", "text"];
+    known.extend(Family::ALL.iter().map(|f| f.name()));
+    let map = mapping(node, at, &known)?;
+    // Its axes: the inputs `at` names, in order, and their points.
+    let axes_at = at.key("at");
+    let mut axes = Vec::new();
+    for (input, raw) in required_mapping(map, "at", &axes_at)? {
+        let input = node_name(input, &axes_at)?;
+        let here = axes_at.key(&input);
+        let points = match untag(raw) {
+            Node::Sequence(_) => numbers(raw, &here)?,
+            _ => vec![number(raw, &here)?],
+        };
+        if points.is_empty() {
+            return Err(here.error("no points"));
+        }
+        if let Some(w) = points.windows(2).find(|w| w[0] >= w[1]) {
+            return Err(here.error(format!(
+                "points must increase: {} is not below {}",
+                py_float_repr(w[0]),
+                py_float_repr(w[1])
+            )));
+        }
+        axes.push(Axis { input, points });
+    }
+    let size = axes
+        .iter()
+        .try_fold(1usize, |acc, a| acc.checked_mul(a.points.len()))
+        .filter(|n| *n <= MAX_POINTS)
+        .ok_or_else(|| axes_at.error(format!("more than {MAX_POINTS} points")))?;
+    // Its distribution: exactly one family, every parameter given.
+    let families: Vec<Family> = Family::ALL
+        .into_iter()
+        .filter(|f| get(map, f.name()).is_some())
+        .collect();
+    let family = match families.as_slice() {
+        [f] => *f,
+        [] => return Err(at.error("no distribution: give one of uniform, triangular, normal")),
+        _ => {
+            return Err(
+                at.error("more than one distribution: give one of uniform, triangular, normal")
+            )
+        }
+    };
+    let dist_at = at.key(family.name());
+    let params = mapping(
+        get(map, family.name()).expect("found above"),
+        &dist_at,
+        family.params(),
+    )?;
+    let shape: Vec<usize> = axes.iter().map(|a| a.points.len()).collect();
+    let mut values = Vec::new();
+    for p in family.params() {
+        let here = dist_at.key(p);
+        let Some(raw) = get(params, p) else {
+            return Err(here.error("missing"));
+        };
+        values.push(read_grid(raw, &shape, size, &here)?);
+    }
+    let part = Part {
+        name: name.to_string(),
+        axes,
+        family,
+        values,
+        text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
+    };
+    for k in 0..size {
+        part.dist_at(k)
+            .check()
+            .map_err(|e| dist_at.error(format!("{} {e}", point_words(&part, k))))?;
+    }
+    Ok(part)
+}
+
+/// A parameter's values: one number for every point, or nested lists, one
+/// level per axis.
+fn read_grid(node: &Node, shape: &[usize], size: usize, at: &Where) -> Result<Vec<f64>> {
+    if let Node::Number(_) = untag(node) {
+        return Ok(vec![number(node, at)?; size]);
+    }
+    fn walk(node: &Node, shape: &[usize], at: &Where, out: &mut Vec<f64>) -> Result<()> {
+        let Some((&n, rest)) = shape.split_first() else {
+            out.push(number(node, at)?);
+            return Ok(());
+        };
+        let Node::Sequence(items) = untag(node) else {
+            return Err(at.error(format!(
+                "expected a list of {n} (one per point), got {}",
+                node.py_repr()
+            )));
+        };
+        if items.len() != n {
+            return Err(at.error(format!(
+                "expected {n} values (one per point), got {}",
+                items.len()
+            )));
+        }
+        for (k, item) in items.iter().enumerate() {
+            walk(item, rest, &at.index(k), out)?;
+        }
+        Ok(())
+    }
+    let mut out = Vec::with_capacity(size);
+    walk(node, shape, at, &mut out)?;
+    Ok(out)
+}
+
+/// Where combination `k` of a part's points is, in words: `at water=50:`.
+fn point_words(part: &Part, mut k: usize) -> String {
+    if part.axes.is_empty() {
+        return "everywhere:".into();
+    }
+    let mut words = Vec::new();
+    for a in part.axes.iter().rev() {
+        let n = a.points.len();
+        words.push(format!("{}={}", a.input, py_float_repr(a.points[k % n])));
+        k /= n;
+    }
+    words.reverse();
+    format!("at {}:", words.join(", "))
 }
 
 /// Where in a file a node is, for messages: `file: quantities.x.rules[0]`.
@@ -1080,469 +1583,198 @@ fn node_name(node: &Node, at: &Where) -> Result<String> {
     }
 }
 
-fn read_term(node: &Node, at: &Where) -> Result<Membership> {
-    let map = mapping(node, at, &[])?;
-    if map.len() != 1 {
-        return Err(at.error("expected one of triangle, trapezoid, gaussian"));
-    }
-    let (shape, raw) = map.iter().next().expect("one entry");
-    let shape = shape.py_str();
-    let at = at.key(&shape);
-    let size = match shape.as_str() {
-        "triangle" => 3,
-        "trapezoid" => 4,
-        "gaussian" => 2,
-        _ => {
-            return Err(at.error(format!(
-                "unknown term shape '{shape}' (triangle, trapezoid, gaussian)"
-            )))
-        }
-    };
-    let p = numbers(raw, &at)?;
-    if p.len() != size {
-        return Err(at.error(format!("expected {size} numbers, got {}", p.len())));
-    }
-    if shape == "gaussian" {
-        if !(p[1] > 0.0) {
-            return Err(at.error("sigma must be positive"));
-        }
-        return Ok(Membership::Gaussian {
-            mean: p[0],
-            sigma: p[1],
-        });
-    }
-    if p.windows(2).any(|w| w[0] > w[1]) {
-        return Err(at.error("the points must not decrease"));
-    }
-    Ok(if size == 3 {
-        Membership::Triangle([p[0], p[1], p[2]])
-    } else {
-        Membership::Trapezoid([p[0], p[1], p[2], p[3]])
-    })
-}
-
-fn read_input(name: &str, node: &Node, at: &Where) -> Result<Input> {
-    let map = mapping(node, at, &["universe", "terms", "default"])?;
-    let universe_at = at.key("universe");
-    let universe = match get(map, "universe") {
-        Some(n) => numbers(n, &universe_at)?,
-        None => return Err(universe_at.error("missing")),
-    };
-    let [low, high] = universe[..] else {
-        return Err(universe_at.error("expected [low, high]"));
-    };
-    if !(low < high) {
-        return Err(universe_at.error("low must be below high"));
-    }
-    let terms_at = at.key("terms");
-    let mut terms = IndexMap::new();
-    for (term, spec) in required_mapping(map, "terms", &terms_at)? {
-        let term = node_name(term, &terms_at)?;
-        let membership = read_term(spec, &terms_at.key(&term))?;
-        terms.insert(term, membership);
-    }
-    if terms.is_empty() {
-        return Err(terms_at.error("no terms"));
-    }
-    let default = match get(map, "default") {
-        None | Some(Node::Null) => None,
-        Some(n) => Some(number(n, &at.key("default"))?),
-    };
-    let input = Input {
-        name: name.to_string(),
-        low,
-        high,
-        terms,
-        default,
-    };
-    for x in input.check_points() {
-        let most = input
-            .terms
-            .values()
-            .map(|m| m.degree(x))
-            .fold(0.0, f64::max);
-        if !(most > 0.0) {
-            return Err(terms_at.error(format!(
-                "no term covers {name} = {}, within its universe",
-                py_float_repr(x)
-            )));
-        }
-    }
-    Ok(input)
-}
-
-fn read_quantity(name: &str, node: &Node, source: &str, at: &Where) -> Result<Quantity> {
-    let map = mapping(node, at, &["combine", "rule_bases"])?;
-    let combine = match get(map, "combine").map(NodeExt::py_str).as_deref() {
-        None | Some("min") => Combine::Min,
-        Some("max") => Combine::Max,
-        Some(other) => {
-            return Err(at
-                .key("combine")
-                .error(format!("expected min or max, got '{other}'")))
-        }
-    };
-    let bases_at = at.key("rule_bases");
-    let mut rule_bases = Vec::new();
-    for (base, raw) in required_mapping(map, "rule_bases", &bases_at)? {
-        let base = node_name(base, &bases_at)?;
-        rule_bases.push(read_rule_base(&base, raw, &bases_at.key(&base))?);
-    }
-    let Some(first) = rule_bases.first() else {
-        return Err(bases_at.error("no rule bases"));
-    };
-    let outputs = first.outputs.clone();
-    for base in &rule_bases {
-        let mut theirs = base.outputs.clone();
-        let mut ours = outputs.clone();
-        theirs.sort();
-        ours.sort();
-        if theirs != ours {
-            return Err(bases_at.error(format!(
-                "every rule base gives the same outputs: {} gives {}, {} gives {}",
-                first.name,
-                crate::model::py_list(&ours),
-                base.name,
-                crate::model::py_list(&theirs)
-            )));
-        }
-    }
-    Ok(Quantity {
-        name: name.to_string(),
-        source: source.to_string(),
-        combine,
-        rule_bases,
-        outputs,
-    })
-}
-
-fn read_rule_base(name: &str, node: &Node, at: &Where) -> Result<RuleBase> {
-    let map = mapping(node, at, &["inputs", "rules"])?;
-    let inputs_at = at.key("inputs");
-    let mut inputs = Vec::new();
-    for (input, raw) in required_mapping(map, "inputs", &inputs_at)? {
-        let input = node_name(input, &inputs_at)?;
-        inputs.push(read_input(&input, raw, &inputs_at.key(&input))?);
-    }
-    if inputs.is_empty() {
-        return Err(inputs_at.error("no inputs"));
-    }
-    let rules_at = at.key("rules");
-    let items = match get(map, "rules") {
-        Some(Node::Sequence(items)) if !items.is_empty() => items,
-        _ => return Err(rules_at.error("expected a list of rules")),
-    };
-    let mut rules = Vec::new();
-    for (k, raw) in items.iter().enumerate() {
-        rules.push(read_rule(raw, &inputs, &rules_at.index(k))?);
-    }
-    let outputs: Vec<String> = rules[0].then.keys().cloned().collect();
-    for (k, rule) in rules.iter().enumerate() {
-        let mut theirs: Vec<&String> = rule.then.keys().collect();
-        let mut ours: Vec<&String> = outputs.iter().collect();
-        theirs.sort();
-        ours.sort();
-        if theirs != ours {
-            return Err(rules_at.index(k).key("then").error(format!(
-                "every rule gives the same outputs: {}",
-                crate::model::py_list(&outputs)
-            )));
-        }
-    }
-    let base = RuleBase {
-        name: name.to_string(),
-        inputs,
-        rules,
-        outputs,
-    };
-    base.check().map_err(|e| at.error(e))?;
-    Ok(base)
-}
-
-fn read_rule(node: &Node, inputs: &[Input], at: &Where) -> Result<Rule> {
-    let map = mapping(node, at, &["if", "then"])?;
-    let if_at = at.key("if");
-    let antecedent = match get(map, "if") {
-        Some(Node::String(s)) if !s.trim().is_empty() => s.clone(),
-        _ => return Err(if_at.error("expected an antecedent")),
-    };
-    let expr = Parser::new(&antecedent, inputs)
-        .parse()
-        .map_err(|m| if_at.error(m))?;
-    let then_at = at.key("then");
-    let mut then = IndexMap::new();
-    for (output, value) in required_mapping(map, "then", &then_at)? {
-        let output = node_name(output, &then_at)?;
-        let v = number(value, &then_at.key(&output))?;
-        then.insert(output, v);
-    }
-    if then.is_empty() {
-        return Err(then_at.error("no outputs"));
-    }
-    if let (Some(low), Some(high)) = (then.get("low"), then.get("high")) {
-        if low > high {
-            return Err(then_at.error("low must not be above high"));
-        }
-    }
-    Ok(Rule {
-        antecedent,
-        expr,
-        then,
-    })
-}
-
-/// Reads an antecedent: clauses `(input IS term)`, `NOT`, and `AND` or `OR`
-/// (not both in one group: parenthesize).
-struct Parser<'a> {
-    tokens: Vec<String>,
-    at: usize,
-    inputs: &'a [Input],
-}
-
-impl<'a> Parser<'a> {
-    fn new(text: &str, inputs: &'a [Input]) -> Self {
-        let mut tokens = Vec::new();
-        let mut word = String::new();
-        for c in text.chars() {
-            if c == '(' || c == ')' || c.is_whitespace() {
-                if !word.is_empty() {
-                    tokens.push(std::mem::take(&mut word));
-                }
-                if !c.is_whitespace() {
-                    tokens.push(c.to_string());
-                }
-            } else {
-                word.push(c);
-            }
-        }
-        if !word.is_empty() {
-            tokens.push(word);
-        }
-        Parser {
-            tokens,
-            at: 0,
-            inputs,
-        }
-    }
-
-    fn peek(&self, ahead: usize) -> Option<&str> {
-        self.tokens.get(self.at + ahead).map(String::as_str)
-    }
-
-    fn next(&mut self) -> Option<String> {
-        let t = self.tokens.get(self.at).cloned();
-        self.at += 1;
-        t
-    }
-
-    fn parse(mut self) -> std::result::Result<Expr, String> {
-        let expr = self.expr()?;
-        match self.peek(0) {
-            None => Ok(expr),
-            Some(t) => Err(format!("unexpected '{t}'")),
-        }
-    }
-
-    fn expr(&mut self) -> std::result::Result<Expr, String> {
-        let first = self.unary()?;
-        let mut op: Option<String> = None;
-        let mut items = vec![first];
-        while let Some(t) = self.peek(0) {
-            if t != "AND" && t != "OR" {
-                break;
-            }
-            let t = t.to_string();
-            match &op {
-                Some(o) if *o != t => {
-                    return Err("AND and OR in one group: parenthesize one".into());
-                }
-                _ => op = Some(t),
-            }
-            self.at += 1;
-            items.push(self.unary()?);
-        }
-        Ok(match op.as_deref() {
-            None => items.pop().expect("one item"),
-            Some("AND") => Expr::And(items),
-            _ => Expr::Or(items),
-        })
-    }
-
-    fn unary(&mut self) -> std::result::Result<Expr, String> {
-        match self.peek(0) {
-            Some("NOT") => {
-                self.at += 1;
-                Ok(Expr::Not(Box::new(self.unary()?)))
-            }
-            Some("(") => {
-                self.at += 1;
-                let inner = if self.peek(1) == Some("IS") {
-                    self.clause()?
-                } else {
-                    self.expr()?
-                };
-                match self.next().as_deref() {
-                    Some(")") => Ok(inner),
-                    _ => Err("expected ')'".into()),
-                }
-            }
-            Some(t) => Err(format!(
-                "expected clauses such as (water IS wet), got '{t}'"
-            )),
-            None => Err("the antecedent ends too soon".into()),
-        }
-    }
-
-    fn clause(&mut self) -> std::result::Result<Expr, String> {
-        let variable = self.next().expect("peeked");
-        self.at += 1; // IS
-        let Some(term) = self.next() else {
-            return Err(format!("({variable} IS ...) names no term"));
-        };
-        let Some(index) = self.inputs.iter().position(|i| i.name == variable) else {
-            let known: Vec<String> = self.inputs.iter().map(|i| i.name.clone()).collect();
-            return Err(format!(
-                "'{variable}' is no input of this rule base ({})",
-                crate::model::py_list(&known)
-            ));
-        };
-        if !self.inputs[index].terms.contains_key(&term) {
-            let known: Vec<String> = self.inputs[index].terms.keys().cloned().collect();
-            return Err(format!(
-                "{variable} has no term '{term}' ({})",
-                crate::model::py_list(&known)
-            ));
-        }
-        Ok(Expr::Is(index, term))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const GRIP: &str = r#"
-version: 1
+    const GRIP: &str = r#"version: 2
 quantities:
   grip:
-    rule_bases:
+    parts:
       water:
-        inputs:
-          water:
-            universe: [0, 100]
-            terms:
-              dry: {trapezoid: [0, 0, 0, 50]}
-              wet: {triangle: [0, 50, 100]}
-              flooded: {trapezoid: [50, 100, 100, 100]}
-        rules:
-          - if: (water IS dry)
-            then: {low: 0.90, high: 1.10}
-          - if: (water IS wet)
-            then: {low: 0.65, high: 0.85}
-          - if: (water IS flooded)
-            then: {low: 0.45, high: 0.65}
+        at: {water: [0, 50, 100]}
+        uniform:
+          low: [0.90, 0.65, 0.45]
+          high: [1.10, 0.85, 0.65]
 "#;
 
-    fn at(rules: &RuleSet, q: &str, inputs: &[(&str, f64)]) -> Result<(f64, f64)> {
-        let inputs = inputs.iter().map(|(k, v)| (k.to_string(), *v)).collect();
-        let out = rules.evaluate(q, &inputs)?;
-        Ok((out["low"], out["high"]))
+    const OVER_WATER: &str = r#"version: 2
+extends: base.yaml
+quantities:
+  grip:
+    parts:
+      water:
+        uniform:
+          low: [0.95, 0.60, 0.30]
+          high: [1.05, 0.80, 0.50]
+"#;
+
+    fn inputs(values: &[(&str, f64)]) -> IndexMap<String, f64> {
+        values.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     }
 
-    fn close(a: (f64, f64), b: (f64, f64)) -> bool {
-        (a.0 - b.0).abs() < 1e-12 && (a.1 - b.1).abs() < 1e-12
+    fn at(rules: &RuleSet, q: &str, values: &[(&str, f64)]) -> Result<(f64, f64)> {
+        Ok(rules.joined(q, &inputs(values))?.support())
+    }
+
+    fn close(got: (f64, f64), want: (f64, f64)) -> bool {
+        (got.0 - want.0).abs() < 1e-9 && (got.1 - want.1).abs() < 1e-9
     }
 
     #[test]
-    fn one_term_rules_read_linearly_between_the_peaks() {
+    fn values_are_interpolated_between_the_points_and_held_beyond() {
         let rules = RuleSet::parse(GRIP, "grip.yaml").unwrap();
         assert!(close(
             at(&rules, "grip", &[("water", 0.0)]).unwrap(),
-            (0.9, 1.1)
+            (0.90, 1.10)
         ));
         assert!(close(
             at(&rules, "grip", &[("water", 25.0)]).unwrap(),
             (0.775, 0.975)
         ));
         assert!(close(
-            at(&rules, "grip", &[("water", 100.0)]).unwrap(),
-            (0.45, 0.65)
-        ));
-        // Clamped to the universe.
-        assert!(close(
-            at(&rules, "grip", &[("water", 150.0)]).unwrap(),
-            (0.45, 0.65)
+            at(&rules, "grip", &[("water", 70.0)]).unwrap(),
+            (0.57, 0.77)
         ));
         assert!(close(
             at(&rules, "grip", &[("water", -5.0)]).unwrap(),
-            (0.9, 1.1)
+            (0.90, 1.10)
         ));
-    }
-
-    #[test]
-    fn and_or_not_are_min_max_and_complement() {
-        let text = r#"
-version: 1
-quantities:
-  q:
-    rule_bases:
-      b:
-        inputs:
-          x:
-            universe: [0, 1]
-            terms: {lo: {trapezoid: [0, 0, 0, 1]}, hi: {trapezoid: [0, 1, 1, 1]}}
-          y:
-            universe: [0, 1]
-            terms: {lo: {trapezoid: [0, 0, 0, 1]}, hi: {trapezoid: [0, 1, 1, 1]}}
-        rules:
-          - if: (x IS hi) AND (y IS hi)
-            then: {v: 1}
-          - if: ((x IS lo) OR (y IS lo)) AND (NOT (x IS hi))
-            then: {v: 0}
-          - if: (x IS hi) AND (y IS lo)
-            then: {v: 0.5}
-"#;
-        let rules = RuleSet::parse(text, "q.yaml").unwrap();
-        let inputs: IndexMap<String, f64> = [("x".to_string(), 0.25), ("y".to_string(), 0.75)]
-            .into_iter()
-            .collect();
-        // The rules fire min(0.25, 0.75) = 0.25, min(max(0.75, 0.25), 1 - 0.25)
-        // = 0.75 and min(0.25, 0.25) = 0.25.
-        let v = rules.evaluate("q", &inputs).unwrap()["v"];
-        assert!((v - (0.25 * 1.0 + 0.25 * 0.5) / (0.25 + 0.75 + 0.25)).abs() < 1e-12);
-    }
-
-    #[test]
-    fn combine_joins_the_rule_bases_output_by_output() {
-        let base = |name: &str, low: f64| {
-            format!(
-                "      {name}:\n        inputs:\n          x:\n            universe: [0, 1]\n            terms: {{any: {{trapezoid: [0, 0, 1, 1]}}}}\n        rules:\n          - if: (x IS any)\n            then: {{low: {low}, high: 400}}\n"
-            )
-        };
-        for (combine, expected) in [("min", 100.0), ("max", 200.0)] {
-            let text = format!(
-                "version: 1\nquantities:\n  v:\n    combine: {combine}\n    rule_bases:\n{}{}",
-                base("a", 100.0),
-                base("b", 200.0)
-            );
-            let rules = RuleSet::parse(&text, "v.yaml").unwrap();
-            assert!(close(
-                at(&rules, "v", &[("x", 0.5)]).unwrap(),
-                (expected, 400.0)
-            ));
-        }
-    }
-
-    #[test]
-    fn a_later_set_replaces_quantities_by_name() {
-        let base = RuleSet::parse(GRIP, "base.yaml").unwrap();
-        let over = RuleSet::parse(&GRIP.replace("0.45", "0.30"), "over.yaml").unwrap();
-        let merged = base.merged(&over).unwrap();
         assert!(close(
-            at(&merged, "grip", &[("water", 100.0)]).unwrap(),
-            (0.30, 0.65)
+            at(&rules, "grip", &[("water", 140.0)]).unwrap(),
+            (0.45, 0.65)
         ));
-        assert_eq!(merged.quantity("grip").unwrap().source, "over.yaml");
+        let j = rules.joined("grip", &inputs(&[("water", 70.0)])).unwrap();
+        assert!((j.quantile(0.5) - 0.67).abs() < 1e-12);
+        assert!((j.quantile(0.25) - 0.62).abs() < 1e-12);
+        let s = rules.evaluate("grip", &inputs(&[("water", 70.0)])).unwrap();
+        assert_eq!(
+            s.keys().collect::<Vec<_>>(),
+            ["low", "high", "median", "mean"]
+        );
+        assert!((s["mean"] - 0.67).abs() < 1e-12);
+    }
+
+    #[test]
+    fn several_inputs_are_interpolated_multilinearly() {
+        let text = "version: 2\nquantities:\n  q:\n    parts:\n      p:\n        at: {a: [0, 10], b: [0, 1]}\n        uniform:\n          low: [[0, 10], [20, 30]]\n          high: 100\n";
+        let rules = RuleSet::parse(text, "q.yaml").unwrap();
+        let low = |a: f64, b: f64| at(&rules, "q", &[("a", a), ("b", b)]).unwrap().0;
+        assert_eq!(low(0.0, 0.0), 0.0);
+        assert_eq!(low(0.0, 1.0), 10.0);
+        assert_eq!(low(10.0, 0.0), 20.0);
+        assert!((low(5.0, 0.5) - 15.0).abs() < 1e-12);
+        assert!((low(2.5, 0.0) - 5.0).abs() < 1e-12);
+        assert_eq!(at(&rules, "q", &[("a", 5.0), ("b", 0.5)]).unwrap().1, 100.0);
+    }
+
+    #[test]
+    fn parts_move_together_and_combine_joins_them() {
+        let text = "version: 2\nquantities:\n  v:\n    combine: min\n    parts:\n      fog:\n        at: {fog: [0, 100]}\n        uniform: {low: [250, 15], high: [400, 40]}\n      light:\n        at: {sun: [-6, 0]}\n        uniform: {low: [50, 250], high: [150, 400]}\n";
+        let rules = RuleSet::parse(text, "v.yaml").unwrap();
+        // Clear night: light decides throughout.
+        let j = rules
+            .joined("v", &inputs(&[("fog", 0.0), ("sun", -20.0)]))
+            .unwrap();
+        assert_eq!(j.support(), (50.0, 150.0));
+        assert_eq!(j.deciding(0.5), "light");
+        // The parts cross: fog 70 gives 85.5..148, night 50..150.
+        let j = rules
+            .joined("v", &inputs(&[("fog", 70.0), ("sun", -20.0)]))
+            .unwrap();
+        assert!((j.quantile(0.0) - 50.0).abs() < 1e-9);
+        assert!((j.quantile(1.0) - 148.0).abs() < 1e-9);
+        assert!((j.quantile(0.5) - 100.0).abs() < 1e-9);
+        assert_eq!(j.deciding(0.5), "light");
+        assert_eq!(j.deciding(1.0), "fog");
+        // P(min <= x) is the larger of the parts': the least is there once any is.
+        assert!((j.cdf(100.0) - 0.5).abs() < 1e-9);
+        let max = RuleSet::parse(&text.replace("combine: min", "combine: max"), "v.yaml").unwrap();
+        let j = max
+            .joined("v", &inputs(&[("fog", 0.0), ("sun", -20.0)]))
+            .unwrap();
+        assert_eq!(j.support(), (250.0, 400.0));
+    }
+
+    #[test]
+    fn the_distributions_quantiles_and_cdfs_agree() {
+        let dists = [
+            Dist::Uniform {
+                low: 0.4,
+                high: 0.9,
+            },
+            Dist::Triangular {
+                low: 0.0,
+                mode: 2.0,
+                high: 10.0,
+            },
+            Dist::Triangular {
+                low: 0.0,
+                mode: 0.0,
+                high: 1.0,
+            },
+            Dist::Normal {
+                mean: 0.7,
+                sd: 0.05,
+                low: 0.5,
+                high: 0.9,
+            },
+            Dist::Normal {
+                mean: 0.0,
+                sd: 1.0,
+                low: 6.0,
+                high: 9.0,
+            },
+            Dist::Normal {
+                mean: 0.0,
+                sd: 1.0,
+                low: -9.0,
+                high: -6.0,
+            },
+        ];
+        for d in dists {
+            d.check().unwrap();
+            for k in 0..=20 {
+                let p = k as f64 / 20.0;
+                let x = d.quantile(p);
+                let (lo, hi) = d.support();
+                assert!(lo <= x && x <= hi, "{d:?} {p} {x}");
+                assert!(
+                    (d.cdf(x) - p).abs() < 1e-7,
+                    "{d:?} p={p} x={x} cdf={}",
+                    d.cdf(x)
+                );
+            }
+        }
+        // The standard normal's quantiles.
+        let n = Dist::Normal {
+            mean: 0.0,
+            sd: 1.0,
+            low: -40.0,
+            high: 40.0,
+        };
+        assert!((n.quantile(0.975) - 1.959963984540054).abs() < 1e-9);
+        assert!((n.quantile(0.5)).abs() < 1e-12);
+        assert!((inverse_phi(1e-10) + 6.361340902404056).abs() < 1e-8);
+        // A triangle's mean, a truncated normal's.
+        assert!(
+            (Dist::Triangular {
+                low: 0.0,
+                mode: 2.0,
+                high: 10.0
+            }
+            .mean()
+                - 4.0)
+                .abs()
+                < 1e-12
+        );
+        let half = Dist::Normal {
+            mean: 0.0,
+            sd: 1.0,
+            low: 0.0,
+            high: 40.0,
+        };
+        assert!((half.mean() - (2.0 / std::f64::consts::PI).sqrt()).abs() < 1e-12);
     }
 
     #[test]
@@ -1551,122 +1783,56 @@ quantities:
         let e = at(&rules, "grip", &[]).unwrap_err().to_string();
         assert!(e.contains("reads water, which was not given"), "{e}");
         let with_default = GRIP.replace(
-            "universe: [0, 100]",
-            "universe: [0, 100]\n            default: 100",
+            "quantities:",
+            "inputs:\n  water: {default: 100, text: road water}\nquantities:",
         );
         let rules = RuleSet::parse(&with_default, "grip.yaml").unwrap();
         assert!(close(at(&rules, "grip", &[]).unwrap(), (0.45, 0.65)));
+        assert_eq!(rules.inputs["water"].text, "road water");
     }
 
     #[test]
     fn malformed_rule_files_are_refused_saying_where() {
         let cases = [
-            (GRIP.replace("(water IS wet)", "(water IS soaked)"), "water has no term 'soaked'"),
-            (GRIP.replace("(water IS wet)", "(fog IS wet)"), "'fog' is no input"),
-            (GRIP.replace("(water IS wet)", "water IS wet"), "expected clauses such as"),
-            (
-                GRIP.replace("(water IS wet)", "(water IS wet) AND (water IS dry) OR (water IS dry)"),
-                "parenthesize",
-            ),
-            (GRIP.replace("low: 0.65", "low: 0.95"), "low must not be above high"),
-            (GRIP.replace("{low: 0.65, high: 0.85}", "{low: 0.65}"), "same outputs"),
-            (GRIP.replace("triangle: [0, 50, 100]", "triangle: [50, 0, 100]"), "must not decrease"),
-            (GRIP.replace("triangle: [0, 50, 100]", "bell: [0, 1]"), "unknown term shape 'bell'"),
-            (GRIP.replace("universe: [0, 100]", "universe: [100, 0]"), "low must be below high"),
-            (GRIP.replace("version: 1", "version: 2"), "version must be 1"),
-            (GRIP.replace("rule_bases:", "combine: mean\n    rule_bases:"), "expected min or max"),
-            // Nothing covers 50 exactly.
-            (
-                GRIP.replace("dry: {trapezoid: [0, 0, 0, 50]}", "dry: {trapezoid: [0, 0, 0, 40]}")
-                    .replace("wet: {triangle: [0, 50, 100]}", "wet: {triangle: [60, 70, 100]}"),
-                "no term covers water",
-            ),
-            // No rule for flooded: no rule fires on a flooded road.
-            (
-                GRIP.replace(
-                    "          - if: (water IS flooded)\n            then: {low: 0.45, high: 0.65}\n",
-                    "",
-                )
-                .replace("wet: {triangle: [0, 50, 100]}", "wet: {triangle: [0, 50, 90]}"),
-                "no rule fires at water=",
-            ),
+            (GRIP.replace("low: [0.90, 0.65, 0.45]", "low: [0.90, 0.95, 0.45]"), "uniform: at water=50.0: low (0.95) must not be above high (0.85)"),
+            (GRIP.replace("low: [0.90, 0.65, 0.45]", "low: [0.90, 0.65]"), "uniform.low: expected 3 values (one per point), got 2"),
+            (GRIP.replace("high: [1.10, 0.85, 0.65]", ""), "uniform.high: missing"),
+            (GRIP.replace("[0, 50, 100]", "[0, 50, 50]"), "points must increase: 50.0 is not below 50.0"),
+            (GRIP.replace("uniform:", "beta:"), "unknown fields ['beta']"),
+            (GRIP.replace("        uniform:\n          low: [0.90, 0.65, 0.45]\n          high: [1.10, 0.85, 0.65]\n", ""), "no distribution"),
+            (GRIP.replace("uniform:", "triangular:"), "triangular.mode: missing"),
+            (GRIP.replace("    parts:", "    combine: mean\n    parts:"), "expected min or max"),
+            (GRIP.replace("version: 2", "version: 3"), "version must be 2"),
+            (GRIP.replace("version: 2", "version: 1"), "version 1 (fuzzy rules) is no longer read"),
+            (GRIP.replace("water:\n        at", "1st:\n        at"), "is not a name"),
+            (GRIP.replace("at: {water: [0, 50, 100]}", "at: {water: []}"), "no points"),
         ];
-        for (text, expected) in cases {
+        for (text, want) in cases {
             let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
-            assert!(e.contains(expected), "expected {expected:?} in {e:?}");
+            assert!(e.contains(want), "want {want:?} in {e}");
             assert!(e.starts_with("grip.yaml: "), "{e}");
         }
-    }
-
-    #[test]
-    fn a_gap_between_the_evenly_spaced_points_is_found() {
-        // Nothing covers 33.3, which no evenly spaced point falls on.
-        let text = GRIP
-            .replace(
-                "dry: {trapezoid: [0, 0, 0, 50]}",
-                "dry: {triangle: [0, 0, 33.3]}",
-            )
-            .replace(
-                "wet: {triangle: [0, 50, 100]}",
-                "wet: {triangle: [33.3, 100, 100]}",
-            )
-            .replace(
-                "flooded: {trapezoid: [50, 100, 100, 100]}",
-                "flooded: {triangle: [99, 100, 100]}",
-            );
-        let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
-        assert!(e.contains("no term covers water = 33.3,"), "{e}");
-        // Covered there, but by a term no rule names: no rule fires.
-        let text = text.replace(
-            "flooded: {triangle: [99, 100, 100]}",
-            "flooded: {triangle: [33, 33.3, 33.6]}",
+        let normal = GRIP.replace(
+            "uniform:\n          low: [0.90, 0.65, 0.45]\n          high: [1.10, 0.85, 0.65]",
+            "normal: {mean: 0.7, sd: [0.05, 0, 0.05], low: 0.3, high: 1.2}",
         );
-        let text = text.replace(
-            "          - if: (water IS flooded)\n            then: {low: 0.45, high: 0.65}\n",
-            "",
-        );
-        let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
-        assert!(e.contains("no rule fires at water=33.3"), "{e}");
-    }
-
-    #[test]
-    fn a_rule_base_too_wide_to_check_is_refused_at_once() {
-        let mut inputs = String::new();
-        let mut clause = Vec::new();
-        for k in 0..25 {
-            inputs.push_str(&format!(
-                "          x{k}:\n            universe: [0, 1]\n            terms: {{any: {{trapezoid: [0, 0, 1, 1]}}}}\n"
-            ));
-            clause.push(format!("(x{k} IS any)"));
-        }
-        let text = format!(
-            "version: 1\nquantities:\n  q:\n    rule_bases:\n      wide:\n        inputs:\n{inputs}        rules:\n          - if: {}\n            then: {{v: 1}}\n",
-            clause.join(" AND ")
-        );
-        let started = std::time::Instant::now();
-        let e = RuleSet::parse(&text, "wide.yaml").unwrap_err().to_string();
+        let e = RuleSet::parse(&normal, "grip.yaml")
+            .unwrap_err()
+            .to_string();
         assert!(
-            e.contains("split it into rule bases reading fewer inputs"),
+            e.contains("normal: at water=50.0: sd (0.0) must be positive"),
             "{e}"
         );
-        assert!(started.elapsed().as_secs() < 1);
+        let mode = GRIP.replace(
+            "uniform:\n          low: [0.90, 0.65, 0.45]\n          high: [1.10, 0.85, 0.65]",
+            "triangular: {low: 0.4, mode: [0.5, 0.95, 0.5], high: 0.9}",
+        );
+        let e = RuleSet::parse(&mode, "grip.yaml").unwrap_err().to_string();
+        assert!(
+            e.contains("mode (0.95) must be between low and high"),
+            "{e}"
+        );
     }
-
-    const OVER_WATER: &str = r#"
-version: 1
-extends: base.yaml
-quantities:
-  grip:
-    rule_bases:
-      water:
-        rules:
-          - if: (water IS dry)
-            then: {low: 0.95, high: 1.05}
-          - if: (water IS wet)
-            then: {low: 0.60, high: 0.80}
-          - if: (water IS flooded)
-            then: {low: 0.30, high: 0.50}
-"#;
 
     fn files(dir: &Path, entries: &[(&str, &str)]) {
         for (name, text) in entries {
@@ -1694,7 +1860,7 @@ quantities:
             ],
         );
         let rules = load(&dir.path().join("vehicles/mini.yaml")).unwrap();
-        // The inputs are base.yaml's, the rules mini.yaml's.
+        // The points are base.yaml's, the distribution mini.yaml's.
         assert!(close(
             at(&rules, "grip", &[("water", 100.0)]).unwrap(),
             (0.30, 0.50)
@@ -1717,25 +1883,24 @@ quantities:
     }
 
     #[test]
-    fn extending_merges_down_to_the_rule_base_and_null_removes() {
+    fn extending_merges_parts_by_name_a_distribution_replaces_and_null_removes() {
         let dir = tempfile::tempdir().unwrap();
-        let two = GRIP.replace("    rule_bases:\n", "    combine: max\n    rule_bases:\n")
-            + &GRIP
-                .replace(
-                    "version: 1\nquantities:\n  grip:\n    rule_bases:\n      water:",
-                    "      water2:",
-                )
-                .replace("\nversion: 1\nquantities:\n  grip:\n    rule_bases:\n", "");
-        let child = "version: 1\nextends: base.yaml\nquantities:\n  grip:\n    combine: min\n    rule_bases:\n      water2: null\n      water:\n        inputs:\n          water:\n            universe: [0, 100]\n            default: 100\n            terms:\n              dry: {trapezoid: [0, 0, 0, 50]}\n              wet: {triangle: [0, 50, 100]}\n              flooded: {trapezoid: [50, 100, 100, 100]}\n";
+        let two = GRIP.replace("    parts:\n", "    combine: max\n    parts:\n")
+            + "      spare:\n        at: {water: [0, 100]}\n        uniform: {low: 0, high: 2}\n";
+        let child = "version: 2\nextends: base.yaml\ninputs:\n  water: {default: 100}\nquantities:\n  grip:\n    combine: min\n    parts:\n      spare: null\n      water:\n        normal: {mean: [1.0, 0.75, 0.55], sd: 0.04, low: [0.9, 0.65, 0.45], high: [1.1, 0.85, 0.65]}\n";
         files(dir.path(), &[("base.yaml", &two), ("child.yaml", child)]);
         let base = load(&dir.path().join("base.yaml")).unwrap();
-        assert_eq!(base.quantity("grip").unwrap().rule_bases.len(), 2);
+        assert_eq!(base.quantity("grip").unwrap().parts.len(), 2);
         let rules = load(&dir.path().join("child.yaml")).unwrap();
         let q = rules.quantity("grip").unwrap();
         assert_eq!(q.combine, Combine::Min);
-        assert_eq!(q.rule_bases.len(), 1);
-        // The input replaced (a default now), the rules kept.
-        assert!(close(at(&rules, "grip", &[]).unwrap(), (0.45, 0.65)));
+        assert_eq!(q.parts.len(), 1);
+        // The points kept, the distribution replaced (uniform's fields gone).
+        assert_eq!(q.parts[0].family, Family::Normal);
+        assert_eq!(q.parts[0].axes[0].points, [0.0, 50.0, 100.0]);
+        let j = rules.joined("grip", &IndexMap::new()).unwrap();
+        assert!(close(j.support(), (0.45, 0.65)));
+        assert!((j.quantile(0.5) - 0.55).abs() < 1e-9);
     }
 
     #[test]
@@ -1746,9 +1911,9 @@ quantities:
             &[("run.yaml", &OVER_WATER.replace("extends: base.yaml\n", ""))],
         );
         let origin = Origin::File(dir.path().join("run.yaml"));
-        // On its own it is no whole set: water has no inputs.
+        // On its own it is no whole set: water has no points.
         let e = load(&dir.path().join("run.yaml")).unwrap_err().to_string();
-        assert!(e.contains("inputs: missing"), "{e}");
+        assert!(e.contains("parts.water.at: missing"), "{e}");
         let base = RuleSet::parse(GRIP, "backend.yaml").unwrap();
         let rules = base.load_over(&origin, &mut Files { url: None }).unwrap();
         assert!(close(
@@ -1756,6 +1921,16 @@ quantities:
             (0.30, 0.50)
         ));
         assert_eq!(rules.files.len(), 2);
+        let over = RuleSet::parse(
+            &OVER_WATER.replace("extends: base.yaml\n", "").replace(
+                "water:\n        uniform",
+                "water:\n        at: {water: [0, 50, 100]}\n        uniform",
+            ),
+            "over.yaml",
+        )
+        .unwrap();
+        let merged = base.merged(&over).unwrap();
+        assert_eq!(merged.quantity("grip").unwrap().source, "over.yaml");
     }
 
     #[test]
@@ -1769,10 +1944,10 @@ quantities:
                 ("b.yaml", &OVER_WATER.replace("0.30", "0.32")),
                 (
                     "both.yaml",
-                    "version: 1\nextends: [a.yaml, b.yaml]\nquantities: {}\n",
+                    "version: 2\nextends: [a.yaml, b.yaml]\nquantities: {}\n",
                 ),
-                ("c1.yaml", "version: 1\nextends: c2.yaml\nquantities: {}\n"),
-                ("c2.yaml", "version: 1\nextends: c1.yaml\nquantities: {}\n"),
+                ("c1.yaml", "version: 2\nextends: c2.yaml\nquantities: {}\n"),
+                ("c2.yaml", "version: 2\nextends: c1.yaml\nquantities: {}\n"),
             ],
         );
         let rules = load(&dir.path().join("both.yaml")).unwrap();
@@ -1796,12 +1971,12 @@ quantities:
             &[
                 (
                     "a.yaml",
-                    "version: 1\nextends: sub/../a.yaml\nquantities: {}\n",
+                    "version: 2\nextends: sub/../a.yaml\nquantities: {}\n",
                 ),
                 ("sub/keep", ""),
                 (
                     "deep/b.yaml",
-                    "version: 1\nextends: ./../deep/./b.yaml\nquantities: {}\n",
+                    "version: 2\nextends: ./../deep/./b.yaml\nquantities: {}\n",
                 ),
             ],
         );
@@ -1818,7 +1993,7 @@ quantities:
         for k in 0..=MAX_EXTENDS_DEPTH + 1 {
             entries.push((
                 format!("f{k}.yaml"),
-                format!("version: 1\nextends: f{}.yaml\nquantities: {{}}\n", k + 1),
+                format!("version: 2\nextends: f{}.yaml\nquantities: {{}}\n", k + 1),
             ));
         }
         entries.push((format!("f{}.yaml", MAX_EXTENDS_DEPTH + 2), GRIP.to_string()));
@@ -1829,17 +2004,6 @@ quantities:
         files(dir.path(), &refs);
         let e = load(&dir.path().join("f0.yaml")).unwrap_err().to_string();
         assert!(e.contains("nests deeper than"), "{e}");
-    }
-
-    #[test]
-    fn where_a_bell_underflows_is_checked_too() {
-        // All four terms are zero at 33.5: the narrow bells underflow there.
-        let text = GRIP
-            .replace("dry: {trapezoid: [0, 0, 0, 50]}", "dry: {triangle: [0, 0, 33.4]}\n              b1: {gaussian: [33.4, 0.0001]}\n              b2: {gaussian: [33.8, 0.006]}")
-            .replace("wet: {triangle: [0, 50, 100]}", "wet: {triangle: [33.8, 100, 100]}")
-            .replace("flooded: {trapezoid: [50, 100, 100, 100]}", "flooded: {triangle: [99, 100, 100]}");
-        let e = RuleSet::parse(&text, "grip.yaml").unwrap_err().to_string();
-        assert!(e.contains("no term covers water"), "{e}");
     }
 
     #[test]
@@ -1967,8 +2131,8 @@ quantities:
     #[test]
     fn merge_keys_share_part_of_a_mapping() {
         let text = GRIP.replace(
-            "          water:\n            universe: [0, 100]\n",
-            "          water:\n            <<: &universe {universe: [0, 100]}\n",
+            "        at: {water: [0, 50, 100]}\n",
+            "        <<: &points {at: {water: [0, 50, 100]}}\n",
         );
         let rules = RuleSet::parse(&text, "grip.yaml").unwrap();
         assert!(close(
@@ -1986,20 +2150,5 @@ quantities:
             .unwrap_err()
             .to_string();
         assert!(e.contains("unknown input 'water'"), "{e}");
-    }
-
-    #[test]
-    fn a_shoulder_is_one_beyond_its_edge() {
-        assert_eq!(
-            Membership::Trapezoid([0.0, 0.0, 0.0, 50.0]).degree(-10.0),
-            1.0
-        );
-        assert_eq!(Membership::Triangle([0.0, 50.0, 100.0]).degree(120.0), 0.0);
-        assert_eq!(Membership::Triangle([0.0, 50.0, 100.0]).degree(25.0), 0.5);
-        let g = Membership::Gaussian {
-            mean: 0.0,
-            sigma: 1.0,
-        };
-        assert!((g.degree(1.0) - (-0.5f64).exp()).abs() < 1e-15);
     }
 }

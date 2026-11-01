@@ -5,7 +5,7 @@
 //! makes of each attribute and module; [`app`] and [`forms`] are the user
 //! interface, in Leptos; [`io`] is the browser's files and storage.
 //!
-//! The rules editor edits a backend's fuzzy rules: [`rules_doc`] is the rule
+//! The rules editor edits a backend's rules (conditional distributions): [`rules_doc`] is the rule
 //! file as it holds it, and [`rules_app`] its interface.
 
 pub mod app;

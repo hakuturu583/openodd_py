@@ -1,7 +1,9 @@
-//! The fuzzy rules of a backend, as a component: what each input's terms
-//! are, which rules fire at the inputs chosen, what each rule base and the
-//! quantity give there, and how the quantity answers one input moved across
-//! its universe.
+//! A backend's rules (conditional distributions), as a component: for one
+//! quantity at the inputs chosen, what each part and the quantity give there
+//! (the range, the median, the mean and the value at a quantile `p`, the part
+//! deciding it marked), the quantity's distribution there, how the quantity
+//! answers one input moved across its range, and each part over one of its
+//! inputs with the points written.
 //!
 //! [`html`] renders a fragment (`<div class="oo-cov oo-rules">`) on the
 //! coverage view's styles and theme variables, plus [`styles`] and
@@ -11,30 +13,39 @@
 //! draws it its own way.
 
 use indexmap::IndexMap;
-use openodd::rules::{Input, Membership, Quantity, RuleBase, RuleSet};
+use openodd::rules::{Dist, Joined, Part, Quantity, RuleSet};
 use openodd_coverage_view::html::escape;
 use serde_json::{json, Value as Json};
 
-/// Which quantity to show, at which inputs, moving which one.
+/// Which quantity to show, at which inputs and quantile, moving which input.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Query {
     /// The quantity (the first, if `None`).
     pub quantity: Option<String>,
     /// Input -> its value; one not given reads its default, else the middle
-    /// of its universe.
+    /// of its range.
     pub inputs: IndexMap<String, f64>,
     /// The input the response chart moves (the quantity's first, if `None`).
     pub x: Option<String>,
+    /// The quantile shown, 0 to 1 (0.5, if `None`).
+    pub p: Option<f64>,
 }
 
 impl Query {
-    /// From JSON: `{quantity, inputs: {name: value}, x}`.
+    /// From JSON: `{quantity, inputs: {name: value}, x, p}`.
     pub fn from_json(raw: &Json) -> Result<Self, String> {
         let mut q = Query {
             quantity: raw.get("quantity").and_then(Json::as_str).map(String::from),
             x: raw.get("x").and_then(Json::as_str).map(String::from),
             ..Default::default()
         };
+        if let Some(p) = raw.get("p").filter(|p| !p.is_null()) {
+            let p = p.as_f64().ok_or("p: not a number")?;
+            if !(0.0..=1.0).contains(&p) {
+                return Err("p: from 0 to 1".into());
+            }
+            q.p = Some(p);
+        }
         if let Some(map) = raw.get("inputs").and_then(Json::as_object) {
             for (k, v) in map {
                 let v = v
@@ -52,16 +63,21 @@ impl Query {
 pub struct Labels {
     pub inputs: String,
     pub outputs: String,
-    pub combined: String,
+    pub quantity: String,
     pub response: String,
     pub vary: String,
-    pub rules: String,
-    pub firing: String,
-    pub terms: String,
-    pub quantity: String,
+    pub distribution: String,
+    pub parts: String,
+    pub part: String,
     pub combine: String,
-    pub rule_base: String,
-    pub rule_bases: String,
+    pub quantile: String,
+    pub low: String,
+    pub high: String,
+    pub median: String,
+    pub mean: String,
+    pub at_p: String,
+    pub deciding: String,
+    pub points: String,
 }
 
 impl Default for Labels {
@@ -69,16 +85,21 @@ impl Default for Labels {
         Labels {
             inputs: "Inputs".into(),
             outputs: "Outputs".into(),
-            combined: "Combined".into(),
+            quantity: "Quantity".into(),
             response: "Response".into(),
             vary: "Vary".into(),
-            rules: "Rules".into(),
-            firing: "Firing".into(),
-            terms: "Terms".into(),
-            quantity: "Quantity".into(),
+            distribution: "Distribution".into(),
+            parts: "parts".into(),
+            part: "part".into(),
             combine: "combine".into(),
-            rule_base: "rule base".into(),
-            rule_bases: "rule bases".into(),
+            quantile: "quantile p".into(),
+            low: "low".into(),
+            high: "high".into(),
+            median: "median".into(),
+            mean: "mean".into(),
+            at_p: "at p".into(),
+            deciding: "decides".into(),
+            points: "points written".into(),
         }
     }
 }
@@ -89,16 +110,21 @@ impl Labels {
         let slot = match name {
             "inputs" => &mut self.inputs,
             "outputs" => &mut self.outputs,
-            "combined" => &mut self.combined,
+            "quantity" => &mut self.quantity,
             "response" => &mut self.response,
             "vary" => &mut self.vary,
-            "rules" => &mut self.rules,
-            "firing" => &mut self.firing,
-            "terms" => &mut self.terms,
-            "quantity" => &mut self.quantity,
+            "distribution" => &mut self.distribution,
+            "parts" => &mut self.parts,
+            "part" => &mut self.part,
             "combine" => &mut self.combine,
-            "rule_base" => &mut self.rule_base,
-            "rule_bases" => &mut self.rule_bases,
+            "quantile" => &mut self.quantile,
+            "low" => &mut self.low,
+            "high" => &mut self.high,
+            "median" => &mut self.median,
+            "mean" => &mut self.mean,
+            "at_p" => &mut self.at_p,
+            "deciding" => &mut self.deciding,
+            "points" => &mut self.points,
             _ => return false,
         };
         *slot = value.to_string();
@@ -156,21 +182,59 @@ impl Options {
     }
 }
 
-/// An input of a quantity, over every rule base reading it.
+/// An input of a quantity: its range (the outermost points of every part
+/// reading it), its default, and the value chosen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Slider {
     pub name: String,
     pub low: f64,
     pub high: f64,
+    pub default: Option<f64>,
     pub value: f64,
 }
 
-/// What a query resolves to: the quantity, its inputs' values, the input moved.
+/// A quantity's inputs, each with its range and default; `value` is the
+/// default, else the middle of the range.
+pub fn sliders(rules: &RuleSet, quantity: &Quantity) -> Vec<Slider> {
+    let mut out: Vec<Slider> = Vec::new();
+    for part in &quantity.parts {
+        for a in &part.axes {
+            let (lo, hi) = (a.points[0], a.points[a.points.len() - 1]);
+            match out.iter_mut().find(|s| s.name == a.input) {
+                Some(s) => {
+                    s.low = s.low.min(lo);
+                    s.high = s.high.max(hi);
+                }
+                None => out.push(Slider {
+                    name: a.input.clone(),
+                    low: lo,
+                    high: hi,
+                    default: rules.inputs.get(&a.input).and_then(|i| i.default),
+                    value: f64::NAN,
+                }),
+            }
+        }
+    }
+    for s in &mut out {
+        if s.high <= s.low {
+            // One point: a range around it (the value holds either side).
+            let pad = (s.low.abs() * 0.1).max(1.0);
+            s.low -= pad;
+            s.high += pad;
+        }
+        s.value = s.default.unwrap_or((s.low + s.high) / 2.0);
+    }
+    out
+}
+
+/// What a query resolves to: the quantity, its inputs' values, the input
+/// moved, the quantile.
 struct Resolved<'a> {
     quantity: &'a Quantity,
     sliders: Vec<Slider>,
     inputs: IndexMap<String, f64>,
     x: usize,
+    p: f64,
 }
 
 fn resolve<'a>(rules: &'a RuleSet, query: &Query) -> Result<Resolved<'a>, String> {
@@ -182,35 +246,11 @@ fn resolve<'a>(rules: &'a RuleSet, query: &Query) -> Result<Resolved<'a>, String
             .next()
             .ok_or("the rules have no quantities")?,
     };
-    let mut sliders: Vec<Slider> = Vec::new();
-    let mut defaults: IndexMap<String, f64> = IndexMap::new();
-    for base in &quantity.rule_bases {
-        for i in &base.inputs {
-            if let Some(d) = i.default {
-                defaults.entry(i.name.clone()).or_insert(d);
-            }
-            match sliders.iter_mut().find(|s| s.name == i.name) {
-                Some(s) => {
-                    s.low = s.low.min(i.low);
-                    s.high = s.high.max(i.high);
-                }
-                None => sliders.push(Slider {
-                    name: i.name.clone(),
-                    low: i.low,
-                    high: i.high,
-                    value: f64::NAN,
-                }),
-            }
-        }
-    }
+    let mut sliders = sliders(rules, quantity);
     let mut inputs = IndexMap::new();
     for s in &mut sliders {
-        let v = query
-            .inputs
-            .get(&s.name)
-            .or(defaults.get(&s.name))
-            .copied()
-            .unwrap_or((s.low + s.high) / 2.0);
+        let v = query.inputs.get(&s.name).copied().unwrap_or(s.value);
+        // Beyond the outermost points every value holds: nothing changes.
         s.value = v.clamp(s.low, s.high);
         inputs.insert(s.name.clone(), s.value);
     }
@@ -226,142 +266,291 @@ fn resolve<'a>(rules: &'a RuleSet, query: &Query) -> Result<Resolved<'a>, String
         sliders,
         inputs,
         x,
+        p: query.p.unwrap_or(0.5),
     })
 }
 
-/// The quantity's outputs, and each rule base's, along the input moved.
-struct Response {
-    xs: Vec<f64>,
-    combined: IndexMap<String, Vec<f64>>,
-    bases: Vec<(String, IndexMap<String, Vec<f64>>)>,
+/// Low, high, median, mean and the value at `p`.
+#[derive(Debug, Clone, Copy)]
+struct Summary {
+    low: f64,
+    high: f64,
+    median: f64,
+    mean: f64,
+    at_p: f64,
 }
 
-fn response(r: &Resolved, samples: usize) -> Result<Response, String> {
-    let s = &r.sliders[r.x];
-    let xs: Vec<f64> = (0..samples)
-        .map(|k| s.low + (s.high - s.low) * k as f64 / (samples - 1) as f64)
-        .collect();
-    let outputs = &r.quantity.outputs;
-    let mut combined: IndexMap<String, Vec<f64>> =
-        outputs.iter().map(|o| (o.clone(), Vec::new())).collect();
-    let mut bases: Vec<(String, IndexMap<String, Vec<f64>>)> = r
-        .quantity
-        .rule_bases
-        .iter()
-        .map(|b| {
-            (
-                b.name.clone(),
-                outputs.iter().map(|o| (o.clone(), Vec::new())).collect(),
-            )
+impl Summary {
+    fn of_dist(d: &Dist, p: f64) -> Self {
+        let (low, high) = d.support();
+        Summary {
+            low,
+            high,
+            median: d.quantile(0.5),
+            mean: d.mean(),
+            at_p: d.quantile(p),
+        }
+    }
+
+    fn of_joined(j: &Joined, p: f64) -> Self {
+        let (low, high) = j.support();
+        Summary {
+            low,
+            high,
+            median: j.quantile(0.5),
+            mean: j.mean(),
+            at_p: j.quantile(p),
+        }
+    }
+
+    fn json(&self) -> Json {
+        json!({
+            "low": self.low, "high": self.high, "median": self.median,
+            "mean": self.mean, "at_p": self.at_p,
         })
-        .collect();
-    let mut inputs = r.inputs.clone();
-    for x in &xs {
-        inputs.insert(s.name.clone(), *x);
-        let each = r
-            .quantity
-            .evaluate_each(&inputs)
-            .map_err(|e| e.to_string())?;
-        let joined = r.quantity.evaluate(&inputs).map_err(|e| e.to_string())?;
-        for o in outputs {
-            combined[o].push(joined[o]);
-        }
-        for (k, (_, out)) in each.iter().enumerate() {
-            for o in outputs {
-                bases[k].1[o].push(out[o]);
-            }
-        }
-    }
-    Ok(Response {
-        xs,
-        combined,
-        bases,
-    })
-}
-
-/// The component's data, as JSON: the quantity, its inputs, each rule base's
-/// terms (sampled), rules (with how strongly each fires) and outputs, and the
-/// response along the input moved.
-pub fn data(rules: &RuleSet, query: &Query, samples: usize) -> Result<Json, String> {
-    let r = resolve(rules, query)?;
-    let each = r
-        .quantity
-        .evaluate_each(&r.inputs)
-        .map_err(|e| e.to_string())?;
-    let combined = r.quantity.evaluate(&r.inputs).map_err(|e| e.to_string())?;
-    let resp = response(&r, samples)?;
-    let mut bases = Vec::new();
-    for (base, (_, outputs)) in r.quantity.rule_bases.iter().zip(&each) {
-        let values = r
-            .quantity
-            .values_of(base, &r.inputs)
-            .map_err(|e| e.to_string())?;
-        let firing = base.firing(&values);
-        let inputs: Vec<Json> = base
-            .inputs
-            .iter()
-            .zip(&values)
-            .map(|(i, v)| {
-                let xs = grid(i.low, i.high, samples);
-                json!({
-                    "name": i.name, "universe": [i.low, i.high], "default": i.default,
-                    "value": i.clamp(*v),
-                    "terms": i.terms.iter().map(|(t, m)| json!({
-                        "name": t, "shape": shape(m), "degree": m.degree(i.clamp(*v)),
-                        "curve": xs.iter().map(|x| [*x, m.degree(*x)]).collect::<Vec<_>>(),
-                    })).collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-        let rules: Vec<Json> = base
-            .rules
-            .iter()
-            .zip(&firing)
-            .map(|(rule, f)| json!({"if": rule.antecedent, "then": rule.then, "firing": f}))
-            .collect();
-        bases.push(json!({
-            "name": base.name, "inputs": inputs, "rules": rules, "outputs": outputs,
-        }));
-    }
-    Ok(json!({
-        "quantity": r.quantity.name,
-        "source": r.quantity.source,
-        "combine": combine_name(r.quantity),
-        "quantities": rules.quantities.keys().collect::<Vec<_>>(),
-        "outputs": r.quantity.outputs,
-        "inputs": r.sliders.iter().map(|s| json!({
-            "name": s.name, "range": [s.low, s.high], "value": s.value,
-        })).collect::<Vec<_>>(),
-        "combined": combined,
-        "rule_bases": bases,
-        "response": {
-            "x": r.sliders[r.x].name,
-            "xs": resp.xs,
-            "combined": resp.combined,
-            "rule_bases": resp.bases.iter().map(|(n, o)| json!({"name": n, "outputs": o})).collect::<Vec<_>>(),
-        },
-    }))
-}
-
-fn combine_name(q: &Quantity) -> &'static str {
-    match q.combine {
-        openodd::rules::Combine::Min => "min",
-        openodd::rules::Combine::Max => "max",
     }
 }
 
-fn shape(m: &Membership) -> Json {
-    match m {
-        Membership::Triangle(p) => json!({"triangle": p}),
-        Membership::Trapezoid(p) => json!({"trapezoid": p}),
-        Membership::Gaussian { mean, sigma } => json!({"gaussian": [mean, sigma]}),
+/// Low, high, median and the value at `p`, along an input.
+#[derive(Debug, Clone, Default)]
+struct Curves {
+    low: Vec<f64>,
+    high: Vec<f64>,
+    median: Vec<f64>,
+    at_p: Vec<f64>,
+}
+
+impl Curves {
+    fn push(&mut self, low: f64, high: f64, median: f64, at_p: f64) {
+        self.low.push(low);
+        self.high.push(high);
+        self.median.push(median);
+        self.at_p.push(at_p);
     }
+
+    fn json(&self) -> Json {
+        json!({"low": self.low, "high": self.high, "median": self.median, "at_p": self.at_p})
+    }
+
+    fn values(&self) -> impl Iterator<Item = f64> + '_ {
+        self.low.iter().chain(&self.high).copied()
+    }
+}
+
+/// A part over one of its inputs, the others held at the values chosen.
+struct PartChart {
+    /// Which of its axes it is drawn over.
+    axis: usize,
+    xs: Vec<f64>,
+    curves: Curves,
+    /// The points written on that axis: `(x, low, high, median)`.
+    points: Vec<[f64; 4]>,
+}
+
+struct PartView<'a> {
+    part: &'a Part,
+    dist: Dist,
+    summary: Summary,
+    deciding: bool,
+    /// The values it reads, in its axes' order.
+    values: Vec<f64>,
+    chart: PartChart,
+}
+
+/// Everything the component shows.
+struct View<'a> {
+    r: Resolved<'a>,
+    summary: Summary,
+    deciding: String,
+    parts: Vec<PartView<'a>>,
+    /// The quantity's distribution: values, its CDF, each part's.
+    cdf_xs: Vec<f64>,
+    cdf: Vec<f64>,
+    part_cdfs: Vec<Vec<f64>>,
+    /// The response along the input moved.
+    xs: Vec<f64>,
+    response: Curves,
+    part_responses: Vec<Curves>,
 }
 
 fn grid(low: f64, high: f64, n: usize) -> Vec<f64> {
     (0..n)
         .map(|k| low + (high - low) * k as f64 / (n - 1) as f64)
         .collect()
+}
+
+fn build<'a>(rules: &'a RuleSet, query: &Query, samples: usize) -> Result<View<'a>, String> {
+    let r = resolve(rules, query)?;
+    let q = r.quantity;
+    let p = r.p;
+    let joined = q
+        .joined(&r.inputs, &rules.inputs)
+        .map_err(|e| e.to_string())?;
+    let summary = Summary::of_joined(&joined, p);
+    let deciding = joined.deciding(p).to_string();
+    let x_name = &r.sliders[r.x].name;
+    let mut parts = Vec::new();
+    for (part, (_, dist)) in q.parts.iter().zip(&joined.parts) {
+        let values = q
+            .values_of(part, &r.inputs, &rules.inputs)
+            .map_err(|e| e.to_string())?;
+        // Over the input moved, if it reads it, else its first.
+        let axis = part
+            .axes
+            .iter()
+            .position(|a| &a.input == x_name)
+            .unwrap_or(0);
+        let s = r
+            .sliders
+            .iter()
+            .find(|s| s.name == part.axes[axis].input)
+            .expect("every input a part reads has a slider");
+        let xs = grid(s.low, s.high, samples);
+        let at = |v: f64| {
+            let mut vs = values.clone();
+            vs[axis] = v;
+            part.dist(&vs)
+        };
+        let mut curves = Curves::default();
+        for x in &xs {
+            let d = at(*x);
+            let (lo, hi) = d.support();
+            curves.push(lo, hi, d.quantile(0.5), d.quantile(p));
+        }
+        let points = part.axes[axis]
+            .points
+            .iter()
+            .map(|x| {
+                let d = at(*x);
+                let (lo, hi) = d.support();
+                [*x, lo, hi, d.quantile(0.5)]
+            })
+            .collect();
+        parts.push(PartView {
+            part,
+            dist: *dist,
+            summary: Summary::of_dist(dist, p),
+            deciding: q.parts.len() > 1 && part.name == deciding,
+            values,
+            chart: PartChart {
+                axis,
+                xs,
+                curves,
+                points,
+            },
+        });
+    }
+    // The distribution, a little beyond its support.
+    let (lo, hi) = (summary.low, summary.high);
+    let pad = ((hi - lo) * 0.06).max(lo.abs().max(1.0) * 1e-3);
+    let cdf_xs = grid(lo - pad, hi + pad, samples);
+    let cdf = cdf_xs.iter().map(|x| joined.cdf(*x)).collect();
+    let part_cdfs = joined
+        .parts
+        .iter()
+        .map(|(_, d)| cdf_xs.iter().map(|x| d.cdf(*x)).collect())
+        .collect();
+    // The response.
+    let s = &r.sliders[r.x];
+    let xs = grid(s.low, s.high, samples);
+    let mut response = Curves::default();
+    let mut part_responses = vec![Curves::default(); q.parts.len()];
+    let mut inputs = r.inputs.clone();
+    for x in &xs {
+        inputs.insert(s.name.clone(), *x);
+        let j = q
+            .joined(&inputs, &rules.inputs)
+            .map_err(|e| e.to_string())?;
+        let (lo, hi) = j.support();
+        response.push(lo, hi, j.quantile(0.5), j.quantile(p));
+        for (c, (_, d)) in part_responses.iter_mut().zip(&j.parts) {
+            let (lo, hi) = d.support();
+            c.push(lo, hi, d.quantile(0.5), d.quantile(p));
+        }
+    }
+    Ok(View {
+        r,
+        summary,
+        deciding,
+        parts,
+        cdf_xs,
+        cdf,
+        part_cdfs,
+        xs,
+        response,
+        part_responses,
+    })
+}
+
+/// The component's data, as JSON: the quantity, its inputs, what it and each
+/// part give at them, its distribution there (the CDF), the response along
+/// the input moved, and each part over one of its inputs.
+pub fn data(rules: &RuleSet, query: &Query, samples: usize) -> Result<Json, String> {
+    let v = build(rules, query, samples)?;
+    let q = v.r.quantity;
+    let parts: Vec<Json> = v
+        .parts
+        .iter()
+        .map(|pv| {
+            let params: serde_json::Map<String, Json> = pv
+                .dist
+                .family()
+                .params()
+                .iter()
+                .zip(pv.dist.params())
+                .map(|(k, x)| (k.to_string(), json!(x)))
+                .collect();
+            let axis = &pv.part.axes[pv.chart.axis];
+            json!({
+                "name": pv.part.name,
+                "text": pv.part.text,
+                "family": pv.dist.family().name(),
+                "reads": pv.part.axes.iter().zip(&pv.values).map(|(a, x)| json!({
+                    "input": a.input, "points": a.points, "value": x,
+                })).collect::<Vec<_>>(),
+                "params": params,
+                "outputs": pv.summary.json(),
+                "deciding": pv.part.name == v.deciding,
+                "chart": {
+                    "x": axis.input,
+                    "xs": pv.chart.xs,
+                    "curves": pv.chart.curves.json(),
+                    "points": pv.chart.points.iter().map(|[x, lo, hi, m]| json!({
+                        "x": x, "low": lo, "high": hi, "median": m,
+                    })).collect::<Vec<_>>(),
+                },
+            })
+        })
+        .collect();
+    Ok(json!({
+        "quantity": q.name,
+        "source": q.source,
+        "text": q.text,
+        "combine": q.combine.name(),
+        "quantities": rules.quantities.keys().collect::<Vec<_>>(),
+        "p": v.r.p,
+        "inputs": v.r.sliders.iter().map(|s| json!({
+            "name": s.name, "range": [s.low, s.high], "default": s.default, "value": s.value,
+        })).collect::<Vec<_>>(),
+        "outputs": v.summary.json(),
+        "deciding": v.deciding,
+        "parts": parts,
+        "distribution": {
+            "xs": v.cdf_xs,
+            "cdf": v.cdf,
+            "parts": v.parts.iter().zip(&v.part_cdfs).map(|(pv, c)| json!({
+                "name": pv.part.name, "cdf": c,
+            })).collect::<Vec<_>>(),
+        },
+        "response": {
+            "x": v.r.sliders[v.r.x].name,
+            "xs": v.xs,
+            "curves": v.response.json(),
+            "parts": v.parts.iter().zip(&v.part_responses).map(|(pv, c)| json!({
+                "name": pv.part.name, "curves": c.json(),
+            })).collect::<Vec<_>>(),
+        },
+    }))
 }
 
 /// A number as the component writes it: four significant digits at most.
@@ -412,6 +601,15 @@ fn nice_ticks(lo: f64, hi: f64, n: usize) -> Vec<f64> {
         t += step;
     }
     out
+}
+
+/// The least and greatest of `values`, padded a little.
+fn y_range(values: impl Iterator<Item = f64>) -> (f64, f64) {
+    let (y0, y1) = values.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+        (a.min(v), b.max(v))
+    });
+    let pad = ((y1 - y0) * 0.08).max(y0.abs().max(1.0) * 1e-3);
+    (y0 - pad, y1 + pad)
 }
 
 /// A chart's frame: the plot area inside the viewBox, and its scales.
@@ -508,12 +706,33 @@ impl Frame {
         d
     }
 
+    /// The area between `lo` and `hi` along `xs`.
+    fn band(&self, xs: &[f64], lo: &[f64], hi: &[f64]) -> String {
+        let mut d = self.path(xs, hi);
+        for (x, y) in xs.iter().zip(lo).rev() {
+            d.push_str(&format!("L{:.1},{:.1}", self.px(*x), self.py(*y)));
+        }
+        d.push('Z');
+        d
+    }
+
+    /// A vertical line at `x`.
     fn marker(&self, out: &mut String, x: f64) {
         let px = self.px(x);
         out.push_str(&format!(
             "<line class=\"oo-rules-at\" x1=\"{px:.1}\" x2=\"{px:.1}\" y1=\"{:.1}\" y2=\"{:.1}\"/>",
             self.top,
             self.h - self.bottom
+        ));
+    }
+
+    /// A horizontal line at `y`.
+    fn level(&self, out: &mut String, y: f64) {
+        let py = self.py(y);
+        out.push_str(&format!(
+            "<line class=\"oo-rules-at\" x1=\"{:.1}\" x2=\"{:.1}\" y1=\"{py:.1}\" y2=\"{py:.1}\"/>",
+            self.left,
+            self.w - self.right
         ));
     }
 }
@@ -533,84 +752,295 @@ fn picker(out: &mut String, what: &str, label: &str, options: &[String], chosen:
     out.push_str("</select></label>");
 }
 
-fn membership_chart(out: &mut String, input: &Input, value: f64, samples: usize, labels: &Labels) {
-    let f = Frame::new(320.0, 150.0, (input.low, input.high), (0.0, 1.0));
-    out.push_str("<figure class=\"oo-rules-mf\">");
+fn summary_cells(out: &mut String, s: &Summary, class: &str, win: bool) {
+    for v in [s.low, s.high, s.median, s.mean] {
+        out.push_str(&format!("<td class=\"oo-num{class}\">{}</td>", num(v)));
+    }
     out.push_str(&format!(
-        "<figcaption><span class=\"oo-rules-name\">{}</span> <span class=\"oo-hint\">[{}, {}]</span></figcaption>",
-        escape(&input.name),
-        num(input.low),
-        num(input.high)
+        "<td class=\"oo-num{class}{}\">{}</td>",
+        if win { " oo-win" } else { "" },
+        num(s.at_p)
     ));
-    f.open(out, &format!("{}: {}", input.name, labels.terms));
-    let xs = grid(input.low, input.high, samples);
-    for (k, m) in input.terms.values().enumerate() {
-        let ys: Vec<f64> = xs.iter().map(|x| m.degree(*x)).collect();
-        let line = f.path(&xs, &ys);
-        let base = f.py(0.0);
-        out.push_str(&format!(
-            "<path class=\"oo-rules-area oo-rules-s{s}\" d=\"{line}L{:.1},{base:.1}L{:.1},{base:.1}Z\"/>\
-             <path class=\"oo-rules-line oo-rules-s{s}\" d=\"{line}\"/>",
-            f.px(input.high),
-            f.px(input.low),
-            s = k % 8
-        ));
-    }
-    f.marker(out, value);
-    out.push_str("</svg><ul class=\"oo-rules-legend\">");
-    for (k, (t, m)) in input.terms.iter().enumerate() {
-        let d = m.degree(value);
-        out.push_str(&format!(
-            "<li class=\"{}\"><i class=\"oo-rules-s{}\"></i>{} <b>{}</b></li>",
-            if d > 0.0 { "oo-on" } else { "oo-off" },
-            k % 8,
-            escape(t),
-            num(d)
-        ));
-    }
-    out.push_str("</ul></figure>");
 }
 
-fn rule_table(out: &mut String, base: &RuleBase, firing: &[f64], labels: &Labels) {
+fn outputs_table(out: &mut String, v: &View, labels: &Labels) {
     out.push_str(&format!(
-        "<table class=\"oo-rules-table\"><thead><tr><th>#</th><th>{}</th><th>{}</th>",
-        escape(&labels.rules),
-        escape(&labels.firing)
+        "<h4>{}</h4><table class=\"oo-rules-table\"><thead><tr><th></th>",
+        escape(&labels.outputs)
     ));
-    for o in &base.outputs {
-        out.push_str(&format!("<th class=\"oo-num\">{}</th>", escape(o)));
+    for l in [&labels.low, &labels.high, &labels.median, &labels.mean] {
+        out.push_str(&format!("<th class=\"oo-num\">{}</th>", escape(l)));
     }
-    out.push_str("</tr></thead><tbody>");
-    let total: f64 = firing.iter().sum();
-    for (k, (rule, f)) in base.rules.iter().zip(firing).enumerate() {
-        let share = if total > 0.0 { f / total } else { 0.0 };
-        out.push_str(&format!(
-            "<tr class=\"{}\"><td class=\"oo-num\">{}</td><td><code>{}</code></td>\
-             <td><span class=\"oo-rules-bar\" title=\"{}\"><i style=\"width:{:.1}%\"></i></span>\
-             <span class=\"oo-rules-w\">{}</span></td>",
-            if *f > 0.0 { "oo-on" } else { "oo-off" },
-            k + 1,
-            escape(&rule.antecedent),
-            num(share),
-            f * 100.0,
-            num(*f)
-        ));
-        for o in &base.outputs {
-            out.push_str(&format!("<td class=\"oo-num\">{}</td>", num(rule.then[o])));
+    out.push_str(&format!(
+        "<th class=\"oo-num\">{} = {}</th></tr></thead><tbody>",
+        escape(&labels.at_p),
+        num(v.r.p)
+    ));
+    out.push_str(&format!(
+        "<tr class=\"oo-rules-total\"><th>{}</th>",
+        escape(&v.r.quantity.name)
+    ));
+    summary_cells(out, &v.summary, " oo-rules-value", false);
+    out.push_str("</tr>");
+    if v.parts.len() > 1 {
+        for (k, pv) in v.parts.iter().enumerate() {
+            out.push_str(&format!(
+                "<tr{}><th><i class=\"oo-rules-key oo-rules-s{}\"></i>{}{}</th>",
+                if pv.deciding {
+                    " class=\"oo-rules-deciding\""
+                } else {
+                    ""
+                },
+                k % 8,
+                escape(&pv.part.name),
+                if pv.deciding {
+                    format!(
+                        " <span class=\"oo-rules-tag\">{}</span>",
+                        escape(&labels.deciding)
+                    )
+                } else {
+                    String::new()
+                }
+            ));
+            summary_cells(out, &pv.summary, "", pv.deciding);
+            out.push_str("</tr>");
         }
-        out.push_str("</tr>");
     }
     out.push_str("</tbody></table>");
 }
 
+fn distribution_chart(out: &mut String, v: &View, labels: &Labels) {
+    let q = v.r.quantity;
+    out.push_str(&format!(
+        "<section class=\"oo-rules-dist\"><h4>{}</h4>",
+        escape(&labels.distribution)
+    ));
+    let f = Frame::new(
+        640.0,
+        180.0,
+        (v.cdf_xs[0], v.cdf_xs[v.cdf_xs.len() - 1]),
+        (0.0, 1.0),
+    );
+    f.open(out, &format!("{}: {}", q.name, labels.distribution));
+    if v.parts.len() > 1 {
+        for (k, (pv, c)) in v.parts.iter().zip(&v.part_cdfs).enumerate() {
+            out.push_str(&format!(
+                "<path class=\"oo-rules-base oo-rules-s{}\" d=\"{}\"><title>{}</title></path>",
+                k % 8,
+                f.path(&v.cdf_xs, c),
+                escape(&pv.part.name)
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "<path class=\"oo-rules-out oo-rules-o0\" d=\"{}\"><title>{}</title></path>",
+        f.path(&v.cdf_xs, &v.cdf),
+        escape(&q.name)
+    ));
+    f.level(out, v.r.p);
+    f.marker(out, v.summary.at_p);
+    out.push_str(&format!(
+        "<circle class=\"oo-rules-dot oo-rules-o1\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\"><title>{} = {}: {}</title></circle>",
+        f.px(v.summary.at_p),
+        f.py(v.r.p),
+        escape(&labels.at_p),
+        num(v.r.p),
+        num(v.summary.at_p)
+    ));
+    out.push_str("</svg><ul class=\"oo-rules-legend\">");
+    out.push_str(&format!(
+        "<li><i class=\"oo-rules-o0\"></i>{} (CDF)</li><li><i class=\"oo-rules-o1\"></i>{} = {} <b>{}</b></li>",
+        escape(&q.name),
+        escape(&labels.at_p),
+        num(v.r.p),
+        num(v.summary.at_p)
+    ));
+    if v.parts.len() > 1 {
+        for (k, pv) in v.parts.iter().enumerate() {
+            out.push_str(&format!(
+                "<li class=\"oo-rules-dash\"><i class=\"oo-rules-s{}\"></i>{}</li>",
+                k % 8,
+                escape(&pv.part.name)
+            ));
+        }
+    }
+    out.push_str("</ul></section>");
+}
+
+fn response_chart(out: &mut String, v: &View, labels: &Labels) {
+    let q = v.r.quantity;
+    let x = &v.r.sliders[v.r.x];
+    out.push_str("<section class=\"oo-rules-response\"><div class=\"oo-rules-row\">");
+    out.push_str(&format!("<h4>{}</h4>", escape(&labels.response)));
+    let names: Vec<String> = v.r.sliders.iter().map(|s| s.name.clone()).collect();
+    picker(out, "x", &labels.vary, &names, &x.name);
+    out.push_str("</div>");
+    let several = v.parts.len() > 1;
+    let (y0, y1) = y_range(
+        v.response.values().chain(
+            v.part_responses
+                .iter()
+                .filter(|_| several)
+                .flat_map(Curves::values),
+        ),
+    );
+    let f = Frame::new(640.0, 220.0, (x.low, x.high), (y0, y1));
+    f.open(out, &format!("{} / {}", q.name, x.name));
+    out.push_str(&format!(
+        "<path class=\"oo-rules-band\" d=\"{}\"/>",
+        f.band(&v.xs, &v.response.low, &v.response.high)
+    ));
+    if several {
+        for (k, (pv, c)) in v.parts.iter().zip(&v.part_responses).enumerate() {
+            for (what, ys) in [(&labels.low, &c.low), (&labels.high, &c.high)] {
+                out.push_str(&format!(
+                    "<path class=\"oo-rules-base oo-rules-s{}\" d=\"{}\"><title>{} · {}</title></path>",
+                    k % 8,
+                    f.path(&v.xs, ys),
+                    escape(&pv.part.name),
+                    escape(what)
+                ));
+            }
+        }
+    }
+    for (k, (what, ys)) in [
+        (&labels.median, &v.response.median),
+        (&labels.at_p, &v.response.at_p),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        out.push_str(&format!(
+            "<path class=\"oo-rules-out oo-rules-o{k}\" d=\"{}\"><title>{}</title></path>",
+            f.path(&v.xs, ys),
+            escape(what)
+        ));
+    }
+    f.marker(out, x.value);
+    out.push_str("</svg><ul class=\"oo-rules-legend\">");
+    out.push_str(&format!(
+        "<li class=\"oo-rules-swatch\"><i></i>{}–{} <b>{} – {}</b></li>\
+         <li><i class=\"oo-rules-o0\"></i>{} <b>{}</b></li>\
+         <li><i class=\"oo-rules-o1\"></i>{} = {} <b>{}</b></li>",
+        escape(&labels.low),
+        escape(&labels.high),
+        num(v.summary.low),
+        num(v.summary.high),
+        escape(&labels.median),
+        num(v.summary.median),
+        escape(&labels.at_p),
+        num(v.r.p),
+        num(v.summary.at_p)
+    ));
+    if several {
+        for (k, pv) in v.parts.iter().enumerate() {
+            out.push_str(&format!(
+                "<li class=\"oo-rules-dash\"><i class=\"oo-rules-s{}\"></i>{}</li>",
+                k % 8,
+                escape(&pv.part.name)
+            ));
+        }
+    }
+    out.push_str("</ul></section>");
+}
+
+fn part_chart(out: &mut String, pv: &PartView, k: usize, v: &View, labels: &Labels) {
+    let part = pv.part;
+    let axis = &part.axes[pv.chart.axis];
+    let s =
+        v.r.sliders
+            .iter()
+            .find(|s| s.name == axis.input)
+            .expect("every input a part reads has a slider");
+    let c = &pv.chart.curves;
+    out.push_str(&format!(
+        "<figure class=\"oo-rules-part{}\"><figcaption><span class=\"oo-rules-name\">{}</span> \
+         <span class=\"oo-hint\">{} · {}</span>",
+        if pv.deciding {
+            " oo-rules-deciding"
+        } else {
+            ""
+        },
+        escape(&part.name),
+        pv.dist.family().name(),
+        part.axes
+            .iter()
+            .zip(&pv.values)
+            .map(|(a, x)| format!("{} = {}", escape(&a.input), num(*x)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    if pv.deciding {
+        out.push_str(&format!(
+            " <span class=\"oo-rules-tag\">{}</span>",
+            escape(&labels.deciding)
+        ));
+    }
+    if !part.text.is_empty() {
+        out.push_str(&format!("<p class=\"oo-hint\">{}</p>", escape(&part.text)));
+    }
+    out.push_str("</figcaption>");
+    let (y0, y1) = y_range(c.values());
+    let f = Frame::new(320.0, 170.0, (s.low, s.high), (y0, y1));
+    f.open(out, &format!("{} / {}", part.name, axis.input));
+    let xs = &pv.chart.xs;
+    out.push_str(&format!(
+        "<path class=\"oo-rules-area oo-rules-s{s}\" d=\"{}\"/>\
+         <path class=\"oo-rules-line oo-rules-s{s}\" d=\"{}\"><title>{}</title></path>\
+         <path class=\"oo-rules-pline\" d=\"{}\"><title>{} = {}</title></path>",
+        f.band(xs, &c.low, &c.high),
+        f.path(xs, &c.median),
+        escape(&labels.median),
+        f.path(xs, &c.at_p),
+        escape(&labels.at_p),
+        num(v.r.p),
+        s = k % 8
+    ));
+    for [x, lo, hi, m] in &pv.chart.points {
+        let title = format!(
+            "{} = {}: {} – {}, {} {}",
+            axis.input,
+            num(*x),
+            num(*lo),
+            num(*hi),
+            labels.median,
+            num(*m)
+        );
+        for y in [lo, hi, m] {
+            out.push_str(&format!(
+                "<circle class=\"oo-rules-pt oo-rules-s{}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"3\"><title>{}</title></circle>",
+                k % 8,
+                f.px(*x),
+                f.py(*y),
+                escape(&title)
+            ));
+        }
+    }
+    f.marker(out, pv.values[pv.chart.axis]);
+    out.push_str("</svg><ul class=\"oo-rules-legend\">");
+    let params: Vec<String> = pv
+        .dist
+        .family()
+        .params()
+        .iter()
+        .zip(pv.dist.params())
+        .map(|(n, x)| format!("{n} <b>{}</b>", num(x)))
+        .collect();
+    out.push_str(&format!(
+        "<li class=\"oo-rules-swatch\"><i class=\"oo-rules-part-key oo-rules-s{s}\"></i>{}</li>\
+         <li class=\"oo-rules-dots\"><i class=\"oo-rules-s{s}\"></i>{}</li>",
+        params.join(" "),
+        escape(&labels.points),
+        s = k % 8
+    ));
+    out.push_str("</ul></figure>");
+}
+
 /// The component, rendered at `query`.
 pub fn html(rules: &RuleSet, query: &Query, opts: &Options) -> Result<String, String> {
-    let r = resolve(rules, query)?;
-    let q = r.quantity;
+    let v = build(rules, query, opts.samples)?;
+    let q = v.r.quantity;
     let labels = &opts.labels;
-    let each = q.evaluate_each(&r.inputs).map_err(|e| e.to_string())?;
-    let combined = q.evaluate(&r.inputs).map_err(|e| e.to_string())?;
-    let resp = response(&r, opts.samples)?;
     let mut out = String::new();
     out.push_str(&format!(
         "<div class=\"oo-cov oo-rules\"{} data-oo-quantity=\"{}\">",
@@ -623,18 +1053,22 @@ pub fn html(rules: &RuleSet, query: &Query, opts: &Options) -> Result<String, St
     ));
     // Head.
     out.push_str(&format!(
-        "<div class=\"oo-head\"><h3>{}</h3><p class=\"oo-hint\">{} · {} {} · {} {}</p></div>",
+        "<div class=\"oo-head\"><h3>{}</h3><p class=\"oo-hint\">{} · {} {} · {} {}</p>",
         escape(&q.name),
         escape(&q.source),
-        q.rule_bases.len(),
-        escape(if q.rule_bases.len() == 1 {
-            &labels.rule_base
+        q.parts.len(),
+        escape(if q.parts.len() == 1 {
+            &labels.part
         } else {
-            &labels.rule_bases
+            &labels.parts
         }),
         escape(&labels.combine),
-        combine_name(q)
+        q.combine.name()
     ));
+    if !q.text.is_empty() {
+        out.push_str(&format!("<p class=\"oo-hint\">{}</p>", escape(&q.text)));
+    }
+    out.push_str("</div>");
     if rules.quantities.len() > 1 {
         out.push_str("<div class=\"oo-rules-bar-top\">");
         let names: Vec<String> = rules.quantities.keys().cloned().collect();
@@ -644,7 +1078,7 @@ pub fn html(rules: &RuleSet, query: &Query, opts: &Options) -> Result<String, St
     // Inputs and outputs.
     out.push_str("<div class=\"oo-rules-io\"><section class=\"oo-rules-inputs\">");
     out.push_str(&format!("<h4>{}</h4>", escape(&labels.inputs)));
-    for s in &r.sliders {
+    for s in &v.r.sliders {
         let step = (s.high - s.low) / 200.0;
         out.push_str(&format!(
             "<label class=\"oo-rules-slider\"><span class=\"oo-rules-name\">{0}</span>\
@@ -658,129 +1092,25 @@ pub fn html(rules: &RuleSet, query: &Query, opts: &Options) -> Result<String, St
             num(s.value)
         ));
     }
-    out.push_str("</section><section class=\"oo-rules-result\">");
     out.push_str(&format!(
-        "<h4>{}</h4><table class=\"oo-rules-table\"><thead><tr><th></th><th class=\"oo-num\">{}</th>",
-        escape(&labels.outputs),
-        escape(&labels.combined)
+        "<label class=\"oo-rules-slider oo-rules-p\"><span>{}</span>\
+         <input type=\"range\" data-oo-p min=\"0\" max=\"1\" step=\"0.01\" value=\"{}\">\
+         <output>{}</output></label>",
+        escape(&labels.quantile),
+        v.r.p,
+        num(v.r.p)
     ));
-    if each.len() > 1 {
-        for (name, _) in &each {
-            out.push_str(&format!("<th class=\"oo-num\">{}</th>", escape(name)));
-        }
+    out.push_str("</section><section class=\"oo-rules-result\">");
+    outputs_table(&mut out, &v, labels);
+    out.push_str("</section></div>");
+    distribution_chart(&mut out, &v, labels);
+    response_chart(&mut out, &v, labels);
+    // Parts.
+    out.push_str("<section class=\"oo-rules-parts\"><div class=\"oo-rules-grid\">");
+    for (k, pv) in v.parts.iter().enumerate() {
+        part_chart(&mut out, pv, k, &v, labels);
     }
-    out.push_str("</tr></thead><tbody>");
-    for o in &q.outputs {
-        out.push_str(&format!(
-            "<tr><th>{}</th><td class=\"oo-num oo-rules-value\">{}</td>",
-            escape(o),
-            num(combined[o])
-        ));
-        if each.len() > 1 {
-            for (_, outs) in &each {
-                let wins = (outs[o] - combined[o]).abs() <= 1e-12 * combined[o].abs().max(1.0);
-                out.push_str(&format!(
-                    "<td class=\"oo-num{}\">{}</td>",
-                    if wins { " oo-win" } else { "" },
-                    num(outs[o])
-                ));
-            }
-        }
-        out.push_str("</tr>");
-    }
-    out.push_str("</tbody></table></section></div>");
-    // Response.
-    let x = &r.sliders[r.x];
-    let all: Vec<f64> = resp
-        .combined
-        .values()
-        .chain(resp.bases.iter().flat_map(|(_, o)| o.values()))
-        .flatten()
-        .copied()
-        .collect();
-    let (mut y0, mut y1) = all
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
-            (a.min(*v), b.max(*v))
-        });
-    let pad = ((y1 - y0) * 0.08).max(1e-9);
-    y0 -= pad;
-    y1 += pad;
-    out.push_str("<section class=\"oo-rules-response\"><div class=\"oo-rules-row\">");
-    out.push_str(&format!("<h4>{}</h4>", escape(&labels.response)));
-    let names: Vec<String> = r.sliders.iter().map(|s| s.name.clone()).collect();
-    picker(&mut out, "x", &labels.vary, &names, &x.name);
-    out.push_str("</div>");
-    let f = Frame::new(640.0, 220.0, (x.low, x.high), (y0, y1));
-    f.open(&mut out, &format!("{} / {}", q.name, x.name));
-    let band = q.outputs.iter().any(|o| o == "low") && q.outputs.iter().any(|o| o == "high");
-    if band {
-        let lo = &resp.combined["low"];
-        let hi = &resp.combined["high"];
-        let mut d = f.path(&resp.xs, hi);
-        for (xv, yv) in resp.xs.iter().zip(lo).rev() {
-            d.push_str(&format!("L{:.1},{:.1}", f.px(*xv), f.py(*yv)));
-        }
-        d.push('Z');
-        out.push_str(&format!("<path class=\"oo-rules-band\" d=\"{d}\"/>"));
-    }
-    if resp.bases.len() > 1 {
-        for (k, (name, outs)) in resp.bases.iter().enumerate() {
-            for o in &q.outputs {
-                out.push_str(&format!(
-                    "<path class=\"oo-rules-base oo-rules-s{}\" d=\"{}\"><title>{} · {}</title></path>",
-                    (k + 1) % 8,
-                    f.path(&resp.xs, &outs[o]),
-                    escape(name),
-                    escape(o)
-                ));
-            }
-        }
-    }
-    for (k, o) in q.outputs.iter().enumerate() {
-        out.push_str(&format!(
-            "<path class=\"oo-rules-out oo-rules-o{}\" d=\"{}\"><title>{}</title></path>",
-            k % 4,
-            f.path(&resp.xs, &resp.combined[o]),
-            escape(o)
-        ));
-    }
-    f.marker(&mut out, x.value);
-    out.push_str("</svg><ul class=\"oo-rules-legend\">");
-    for (k, o) in q.outputs.iter().enumerate() {
-        out.push_str(&format!(
-            "<li><i class=\"oo-rules-o{}\"></i>{} <b>{}</b></li>",
-            k % 4,
-            escape(o),
-            num(combined[o])
-        ));
-    }
-    if resp.bases.len() > 1 {
-        for (k, (name, _)) in resp.bases.iter().enumerate() {
-            out.push_str(&format!(
-                "<li class=\"oo-rules-dash\"><i class=\"oo-rules-s{}\"></i>{}</li>",
-                (k + 1) % 8,
-                escape(name)
-            ));
-        }
-    }
-    out.push_str("</ul></section>");
-    // Rule bases.
-    for base in &q.rule_bases {
-        let values = q.values_of(base, &r.inputs).map_err(|e| e.to_string())?;
-        let firing = base.firing(&values);
-        out.push_str(&format!(
-            "<section class=\"oo-rules-rb\"><h4>{}</h4><div class=\"oo-rules-mfs\">",
-            escape(&base.name)
-        ));
-        for (input, v) in base.inputs.iter().zip(&values) {
-            membership_chart(&mut out, input, input.clamp(*v), opts.samples, labels);
-        }
-        out.push_str("</div>");
-        rule_table(&mut out, base, &firing, labels);
-        out.push_str("</section>");
-    }
-    out.push_str("</div>");
+    out.push_str("</div></section></div>");
     Ok(out)
 }
 

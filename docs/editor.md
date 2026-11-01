@@ -75,14 +75,14 @@ draft is kept in the browser's local storage. *Download YAML* saves the file.
 
 The studio holds three documents at once, each with its own editor, chosen in
 the toolbar: the **ODD** (`#` in the address), its **Binding** (`#binding`),
-and a backend's **Fuzzy rules** (`#rules`). They describe one chain:
+and a backend's **Rules** (`#rules`). They describe one chain:
 
 | | Says | Example |
 |---|---|---|
 | ODD | what is talked about | `environment.rain` is `none`, `light`, `moderate` or `heavy` |
 | Binding | how each attribute is measured | by the backend's probe `rain` |
 | Backend manifest | how a run sets each bucket, and which rule inputs that writes | the knob `environment.rain` writes 70-100 for `heavy`; the rules read it as `precipitation` |
-| Fuzzy rules | what follows from those inputs | `precipitation` is `dry`, `light`, `heavy` or `torrential` |
+| Rules | what follows from those inputs | at `precipitation` 70, visibility is 100 to 220 m |
 
 The manifest is what Python's `Backend.manifest()` writes ([rules.md](rules.md#the-backends-manifest)).
 Load it with *Backend manifest*. Then the binding's probes are checked against
@@ -92,64 +92,70 @@ it, its manifest, and its weather rules.
 
 - **Connections** (the binding editor's home) follows every attribute along
   the chain in one table. Its columns are the buckets, the probe, the knob and
-  what it writes per bucket, the rule inputs, and the rule bases that read
-  them. An attribute without a probe has a *Bind* button.
-- **An attribute** shows its chain, ODD → binding → backend knob → fuzzy
-  rules, and the form of its binding. The form has the probe (or a reader
-  such as `measure`), unit, bucket edges or values, cover measure, least stay
-  and text. Under the rules, a table compares each bucket with the term
-  strongest at the middle of what its knob writes. It is marked when they
-  differ: the rules' `heavy` may not be the ODD's `heavy`.
+  what it writes per bucket, the rule inputs, and the parts that read them.
+  An attribute without a probe has a *Bind* button.
+- **An attribute** shows its chain, ODD → binding → backend knob → rules, and
+  the form of its binding. The form has the probe (or a reader such as
+  `measure`), unit, bucket edges or values, cover measure, least stay and
+  text. Under the rules, a table says what each bucket gives through each
+  part reading its input: the least and greatest value of the quantity over
+  the values the knob writes for that bucket (heavy rain, 70 to 100: a
+  visibility of 60 to 220 m).
 - **Binding & backend** sets the binding's name and the ODD files it
   measures, and lists the manifest's probes, knobs and rule inputs.
 
 In the rules editor, *ODD names* names each input by the attribute that sets
-it (`environment.rain` for `precipitation`), and each term chart gets a strip
-of the ODD's buckets under it. The chart shows where each bucket's values
-fall among the terms, with a line saying whether the terms are the buckets.
-The file keeps the backend's names: those are what the backend's rules read.
+it (`environment.rain` for `precipitation`), and each part's chart gets a
+strip of the ODD's buckets under its input, with what each bucket gives
+written beside it. The file keeps the backend's names: those are what the
+backend's rules read.
 
 The models are `binding.rs` (the binding and the manifest read and written,
 and the chain followed, tested natively) and the interface `binding_app.rs`.
 
-## Editing fuzzy rules
+## Editing rules
 
-The **Fuzzy rules** switch in the toolbar (or `#rules` in the address) turns
-the page into an editor of a backend's [fuzzy rules](rules.md): the rule file
-a backend derives quantities from, such as the road's grip from how wet it
-is. Every edit is read back by openodd's own reader, so the toolbar says
-whether the Python package would accept the file, and where it would not.
+The **Rules** switch in the toolbar (or `#rules` in the address) turns the
+page into an editor of a backend's [rules](rules.md): conditional
+distributions, the rule file a backend derives quantities from, such as the
+road's grip from how wet it is. Every edit is read back by openodd's own
+reader, so the toolbar says whether the Python package would accept the file,
+and where it would not.
 
-- **The outline** lists the quantities and their rule bases. *Rule file*
-  holds what the file `extends`, the files it extends (the browser cannot
-  fetch them: load them there, found by their file name), and the files read
-  with the SHA-256 of each.
-- **A quantity** sets its name and `combine` (`min`, the default, or `max`),
-  and shows each rule base's outputs at the tested values, the one `combine`
-  takes in bold.
-- **A rule base** has its inputs and its rules:
-  - each input's universe and default, and its terms drawn over the universe.
-    **Drag a corner** of a term to move it (corners keep their order); click
-    the chart to test a value. Each term's shape (triangle, trapezoid,
-    gaussian) and corners are in the table under it. *Spread evenly* lays the
-    terms out so that each peaks where its neighbours end: rules naming one
-    term each then read linearly between the peaks;
-  - the rules as a table: a **term picker per input** (blank: any input
-    value), a value per output, and how strongly the rule fires at the tested
-    values. An antecedent with `OR`, `NOT` or nesting is edited as text (the
-    `</>` button switches a row to text). Renaming an input or a term renames
-    it in the rules; *A rule per term* adds one for each term of a lone input.
-- **Test drive** (the panel): a slider per input of the quantity, each rule
-  base's outputs and the combined ones, and the quantity's response as one
-  input moves, the others held (combined solid, each rule base dashed).
+- **The outline** lists the quantities and their parts. *Rule file* holds the
+  inputs the file describes (a default, a line saying what each is), what the
+  file `extends`, the files it extends (the browser cannot fetch them: load
+  them there, found by their file name), and the files read with the SHA-256
+  of each.
+- **A quantity** sets its name, a line saying what it is, and `combine`
+  (`min`, the default, or `max`). It shows each part's low, high, median and
+  value at the tested quantile, and the quantity's; the part that gives the
+  quantity's value at the quantile is marked.
+- **A part** has its inputs and points, and its distribution:
+  - the inputs it reads and the **points** of each, increasing. Changing the
+    points reads the values at the new points from the old ones, so adding a
+    point keeps the part as it was;
+  - the distribution's family (uniform, triangular, normal). Switching makes
+    each point's distribution from the one there (a uniform's ends become a
+    triangle's, its mode the middle);
+  - a **chart** over the first input, the others held at the tested values:
+    the range low to high, the median, and the value at the tested quantile.
+    For a part over one input, each value written at a point is a handle:
+    **drag it up or down** (`low` stays below `mode` and `high`). Click the
+    chart to test an input value;
+  - the **values** as a table: a row per point over one input, a grid per
+    parameter over two. A part over more inputs is edited in the YAML.
+- **Test drive** (the panel): a slider per input of the quantity and one for
+  the quantile `p`, each part's and the quantity's values, and the quantity's
+  response as one input moves, the others held (the range shaded, the value
+  at `p` solid, each part's value at `p` dashed).
 
-A file that extends others may leave a rule base's inputs or rules to them:
-the form says so, and *Write them here* copies what the extended files give
-so they can be changed. A `null` that removes a quantity is not written by
-the form; edit the YAML for it. Comments are not kept. **YAML** shows what the
-form writes (each term and each rule's `then` on one line), and *Apply*
-reads edited YAML back. The draft is kept in the browser apart from the ODD
-editor's.
+A file that extends others may leave a part's points or distribution to them:
+the form says so, and *Write them here* copies what the extended files give so
+they can be changed. A `null` that removes a quantity is not written by the
+form; edit the YAML for it. Comments are not kept. **YAML** shows what the
+form writes (each parameter's values on one line), and *Apply* reads edited
+YAML back. The draft is kept in the browser apart from the ODD editor's.
 
 The model is `rules_doc.rs` (the rule file read and written, tested natively)
 and the interface `rules_app.rs`.

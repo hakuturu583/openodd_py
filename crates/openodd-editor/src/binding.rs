@@ -550,24 +550,35 @@ pub fn links(
         .collect()
 }
 
-/// How a rule input's terms meet the ODD's buckets: per bucket, the term
-/// strongest at its middle, and whether its name is the bucket's.
-pub fn alignment(
+/// What each of the ODD's buckets gives through a part: per bucket, the
+/// span its knob writes into `input` and the part's least and greatest value
+/// over that span, its other inputs held at `held` (one per axis; the
+/// `input` axis' value is ignored).
+pub fn bucket_ranges(
     spans: &[(String, f64, f64)],
-    terms: &[(String, crate::rules_doc::Shape)],
-) -> Vec<(String, Option<String>, bool)> {
+    part: &openodd::rules::Part,
+    input: &str,
+    held: &[f64],
+) -> Vec<(String, f64, f64, f64, f64)> {
+    let Some(k) = part.axes.iter().position(|a| a.input == input) else {
+        return vec![];
+    };
     spans
         .iter()
         .map(|(label, a, b)| {
-            let mid = (a + b) / 2.0;
-            let best = terms
-                .iter()
-                .map(|(n, s)| (n, s.degree(mid)))
-                .filter(|(_, d)| *d > 0.0)
-                .max_by(|x, y| x.1.total_cmp(&y.1))
-                .map(|(n, _)| n.clone());
-            let same = best.as_deref() == Some(label.as_str());
-            (label.clone(), best, same)
+            // The distribution's ends are linear between the points: their
+            // extremes over the span are at its ends or at a point inside.
+            let mut xs = vec![*a, *b];
+            xs.extend(part.axes[k].points.iter().filter(|p| *a < **p && **p < *b));
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for x in xs {
+                let mut values = held.to_vec();
+                values[k] = x;
+                let (l, h) = part.dist(&values).support();
+                lo = lo.min(l);
+                hi = hi.max(h);
+            }
+            (label.clone(), *a, *b, lo, hi)
         })
         .collect()
 }
@@ -575,7 +586,6 @@ pub fn alignment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules_doc::Shape;
 
     const MANIFEST: &str = include_str!("../examples/carla.manifest.yaml");
     const BINDING: &str = include_str!("../examples/carla_weather.binding.yaml");
@@ -679,18 +689,17 @@ mod tests {
         assert_eq!(ls.len(), 1);
         assert_eq!(ls[0].inputs, ["precipitation"]);
         assert_eq!(ls[0].spans()[3], ("heavy".into(), 70.0, 100.0));
-        // The sample rules' rain terms peak where the ODD's buckets end.
-        let terms = vec![
-            ("dry".to_string(), Shape::Trapezoid([0.0, 0.0, 0.0, 30.0])),
-            ("light".to_string(), Shape::Triangle([0.0, 30.0, 70.0])),
-            ("heavy".to_string(), Shape::Triangle([30.0, 70.0, 100.0])),
-            (
-                "torrential".to_string(),
-                Shape::Trapezoid([70.0, 100.0, 100.0, 100.0]),
-            ),
-        ];
-        let a = alignment(&ls[0].spans(), &terms);
-        assert_eq!(a[0], ("none".into(), Some("dry".into()), false));
-        assert_eq!(a[1], ("light".into(), Some("light".into()), true));
+        // Through the sample rules' rain part: heavy rain is 100..220 m to
+        // 60..150 m of sight, a range of 60..220 m.
+        let rules = crate::rules_doc::check(
+            include_str!("../../../examples/wasm-viewer/sample_rules.yaml"),
+            "sample.yaml",
+            &[],
+        )
+        .unwrap();
+        let rain = &rules.quantities["visibility"].parts[1];
+        let r = bucket_ranges(&ls[0].spans(), rain, "precipitation", &[0.0]);
+        assert_eq!(r[3], ("heavy".into(), 70.0, 100.0, 60.0, 220.0));
+        assert_eq!(r[0], ("none".into(), 0.0, 0.0, 250.0, 400.0));
     }
 }

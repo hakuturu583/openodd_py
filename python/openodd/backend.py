@@ -27,7 +27,8 @@ application -- the editor in the browser -- can connect an ODD's attributes,
 the binding that measures them, and the backend's rules.
 
 What a run's settings do to the rest of it -- a simulator's rain to the
-road's grip -- a backend may write as fuzzy rules (:mod:`.rules`): its own
+road's grip -- a backend may write as rules (:mod:`.rules`), conditional
+distributions: its own
 (:attr:`Backend.rules`), which a run may read another file over
 (:meth:`Backend.use_rules`), and which it asks for a quantity at what the run
 set (:meth:`Backend.derived`).
@@ -101,8 +102,8 @@ class Backend:
             scenario's ``controls``, keyed as the backend likes) -> a knob,
             or ``None``. Asked before *knobs*.
         allow_imports: Whether ``probe: package.module:function`` imports.
-        rules: The fuzzy rules the backend derives quantities with
-            (:mod:`.rules`), if any.
+        rules: The rules the backend derives quantities with (:mod:`.rules`):
+            conditional distributions, if any.
         rule_inputs: The inputs those rules may read (any, if empty): what
             :meth:`rule_values` hands them.
         rule_input_knobs: Rule input -> the key of the knob whose written
@@ -249,7 +250,8 @@ class Backend:
         return {str(k): float(v) for k, v in values.items()}
 
     def derived(self, quantity: str, values: Mapping[str, float]) -> dict[str, float]:
-        """Each output of *quantity* at *values*, by :attr:`active_rules`.
+        """``low``, ``high``, ``median`` and ``mean`` of *quantity* at
+        *values*, by :attr:`active_rules`.
 
         Raises:
             RulesError: When the backend has no rules, or they cannot give
@@ -263,12 +265,22 @@ class Backend:
     def derived_range(
         self, quantity: str, values: Mapping[str, float]
     ) -> tuple[float, float]:
-        """``(low, high)`` of a quantity whose outputs are ``low`` and ``high``
-        (:meth:`derived`)."""
+        """``(low, high)``: the least and greatest value of *quantity* at
+        *values* (:meth:`derived`)."""
         rules = self.active_rules
         if rules is None:
             raise RulesError(f"the {self.name} backend has no rules")
         return rules.range(quantity, self.rule_values(values))
+
+    def derived_at(
+        self, quantity: str, values: Mapping[str, float], quantile: float
+    ) -> float:
+        """The value of *quantity* at *quantile* (0 to 1) at *values*: what a
+        run that drew *quantile* sets (:meth:`.Rules.quantile`)."""
+        rules = self.active_rules
+        if rules is None:
+            raise RulesError(f"the {self.name} backend has no rules")
+        return rules.quantile(quantity, self.rule_values(values), quantile)
 
 
     # -- what the backend says of itself ----------------------------------------

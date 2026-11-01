@@ -1,14 +1,15 @@
-//! The rules editor: a backend's fuzzy rules ([docs/rules.md](../../../docs/rules.md))
-//! edited as forms. The outline lists the quantities and their rule bases; a
-//! rule base's form holds its inputs, each with its terms drawn and their
-//! corners draggable, and its rules as a table of term pickers and outputs;
-//! the panel tests the rules at chosen inputs and draws a quantity's
-//! response. Every edit is read back by openodd's own reader.
+//! The rules editor: a backend's rules ([docs/rules.md](../../../docs/rules.md)),
+//! conditional distributions, edited as forms. The outline lists the
+//! quantities and their parts; a part's form holds its inputs and the points
+//! written on them, and the distribution at each point: drawn over the input
+//! with each value draggable, and as a table. The panel tests the rules at
+//! chosen inputs and a quantile, and draws a quantity's response. Every edit
+//! is read back by openodd's own reader.
 
 use indexmap::IndexMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use openodd::rules::{Membership, RuleSet};
+use openodd::rules::{Family, Joined, RuleSet};
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 
@@ -17,8 +18,7 @@ use crate::doc::fresh_id;
 use crate::icons::Icon;
 use crate::io;
 use crate::rules_doc::{
-    self, clauses, num, tidy, when_of, BaseDoc, InputDoc, QuantityDoc, RuleDoc, RulesDoc, Shape,
-    Term, SHAPES,
+    self, num, short, tidy, AxisDoc, DistDoc, InputDoc, ParamDoc, PartDoc, QuantityDoc, RulesDoc,
 };
 
 pub const SAMPLE: &str = include_str!("../../../examples/wasm-viewer/sample_rules.yaml");
@@ -28,7 +28,7 @@ pub const SAMPLE: &str = include_str!("../../../examples/wasm-viewer/sample_rule
 pub enum RSel {
     File,
     Quantity(u64),
-    Base(u64, u64),
+    Part(u64, u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +54,8 @@ pub struct RCtx {
     pub good: RwSignal<Option<RuleSet>>,
     /// The values being tested, by input.
     pub probe: RwSignal<Vec<(String, f64)>>,
+    /// The quantile being tested.
+    pub p: RwSignal<f64>,
     /// The quantity the panel tests, and the input its response moves.
     pub tested: RwSignal<Option<String>>,
     pub x: RwSignal<Option<String>>,
@@ -70,10 +72,6 @@ pub fn rctx() -> RCtx {
 impl RCtx {
     /// Replace the rules with those read from `text`.
     pub fn open_text(&self, name: &str, text: &str) -> bool {
-        self.open(name, text)
-    }
-
-    fn open(&self, name: &str, text: &str) -> bool {
         match RulesDoc::from_yaml(text) {
             Ok(doc) => {
                 let first = doc.quantities.first().map(|q| q.name.clone());
@@ -93,26 +91,10 @@ impl RCtx {
         }
     }
 
-    fn base_update(&self, q: u64, b: u64, f: impl FnOnce(&mut BaseDoc)) {
+    fn part_update(&self, q: u64, p: u64, f: impl FnOnce(&mut PartDoc)) {
         self.doc.update(|d| {
-            if let Some(x) = d.base_mut(q, b) {
+            if let Some(x) = d.part_mut(q, p) {
                 f(x)
-            }
-        })
-    }
-
-    fn input_update(&self, q: u64, b: u64, i: u64, f: impl FnOnce(&mut InputDoc)) {
-        self.base_update(q, b, |base| {
-            if let Some(input) = base.inputs.iter_mut().flatten().find(|x| x.id == i) {
-                f(input)
-            }
-        })
-    }
-
-    fn rule_update(&self, q: u64, b: u64, r: u64, f: impl FnOnce(&mut RuleDoc)) {
-        self.base_update(q, b, |base| {
-            if let Some(rule) = base.rules.iter_mut().flatten().find(|x| x.id == r) {
-                f(rule)
             }
         })
     }
@@ -132,51 +114,67 @@ impl RCtx {
         })
     }
 
-    /// The names of quantity `q` and rule base `b`.
-    fn names(&self, q: u64, b: u64) -> Option<(String, String)> {
+    /// The names of quantity `q` and part `p`.
+    fn names(&self, q: u64, p: u64) -> Option<(String, String)> {
         self.doc.with(|d| {
             let qd = d.quantity(q)?;
-            let bd = qd.bases.iter().find(|x| x.id == b)?;
-            Some((qd.name.clone(), bd.name.clone()))
+            let pd = qd.parts.iter().find(|x| x.id == p)?;
+            Some((qd.name.clone(), pd.name.clone()))
         })
     }
 
-    /// Rule base `b` of `q` as openodd read it last: its inputs and rules,
-    /// the extended files' included.
-    fn read_base(&self, q: u64, b: u64) -> Option<openodd::rules::RuleBase> {
-        let (qn, bn) = self.names(q, b)?;
+    /// Part `p` of `q` as openodd read it last, the extended files' included.
+    fn read_part(&self, q: u64, p: u64) -> Option<openodd::rules::Part> {
+        let (qn, pn) = self.names(q, p)?;
         self.good.with(|g| {
             g.as_ref()?
                 .quantities
                 .get(&qn)?
-                .rule_bases
+                .parts
                 .iter()
-                .find(|x| x.name == bn)
+                .find(|x| x.name == pn)
                 .cloned()
         })
     }
 
-    /// How strongly each rule of `b` fires at the tested values.
-    fn firing(&self, q: u64, b: u64) -> Option<Vec<f64>> {
-        let (qn, bn) = self.names(q, b)?;
+    /// Quantity `name`'s distribution at the tested values.
+    fn joined(&self, name: &str) -> Option<Joined> {
         let probe = self.probe.get();
         self.good.with(|g| {
             let set = g.as_ref()?;
-            let quantity = set.quantities.get(&qn)?;
-            let base = quantity.rule_bases.iter().find(|x| x.name == bn)?;
-            let values = quantity
-                .values_of(base, &rules_doc::values_at(set, &qn, &probe))
-                .ok()?;
-            Some(base.firing(&values))
+            let at = rules_doc::values_at(set, name, &probe);
+            set.joined(name, &at).ok()
         })
     }
+
+    /// The value input `name` is tested at, for quantity `quantity`.
+    fn tested_value(&self, quantity: &str, name: &str) -> f64 {
+        self.probe_value(name).unwrap_or_else(|| {
+            self.good.with(|g| {
+                g.as_ref()
+                    .and_then(|s| rules_doc::values_at(s, quantity, &[]).get(name).copied())
+                    .unwrap_or(0.0)
+            })
+        })
+    }
+}
+
+fn parse_num(s: &str) -> Option<f64> {
+    s.trim().parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+fn parse_points(s: &str) -> Option<Vec<f64>> {
+    let mut out = vec![];
+    for t in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        out.push(parse_num(t)?);
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// How an input is named: by the ODD attribute that sets it, when asked and
 /// known, else as the rules name it.
 fn shown(name: &str) -> String {
-    let r = rctx();
-    if r.odd_names.get() {
+    if rctx().odd_names.get() {
         if let Some(a) = crate::binding_app::bctx().attribute_of_input(name) {
             return a;
         }
@@ -194,35 +192,36 @@ fn other_name(name: &str) -> Option<String> {
     })
 }
 
-fn parse_num(s: &str) -> Option<f64> {
-    s.trim().parse::<f64>().ok().filter(|v| v.is_finite())
-}
-
-pub fn shape_of(m: &Membership) -> Shape {
-    match *m {
-        Membership::Triangle(p) => Shape::Triangle(p),
-        Membership::Trapezoid(p) => Shape::Trapezoid(p),
-        Membership::Gaussian { mean, sigma } => Shape::Gaussian { mean, sigma },
-    }
-}
-
-/// An input as openodd read it, as the form holds one.
-fn input_doc(i: &openodd::rules::Input) -> InputDoc {
-    InputDoc {
+/// A part as openodd read it, as the form holds one.
+fn part_doc(p: &openodd::rules::Part) -> PartDoc {
+    PartDoc {
         id: fresh_id(),
-        name: i.name.clone(),
-        low: i.low,
-        high: i.high,
-        default: i.default,
-        terms: i
-            .terms
-            .iter()
-            .map(|(n, m)| Term {
-                id: fresh_id(),
-                name: n.clone(),
-                shape: shape_of(m),
-            })
-            .collect(),
+        name: p.name.clone(),
+        axes: Some(
+            p.axes
+                .iter()
+                .map(|a| AxisDoc {
+                    id: fresh_id(),
+                    input: a.input.clone(),
+                    points: a.points.clone(),
+                })
+                .collect(),
+        ),
+        dist: Some(DistDoc {
+            family: p.family,
+            params: p
+                .family
+                .params()
+                .iter()
+                .zip(&p.values)
+                .map(|(n, v)| ParamDoc {
+                    name: n.to_string(),
+                    values: v.clone(),
+                    constant: false,
+                })
+                .collect(),
+        }),
+        text: p.text.clone(),
     }
 }
 
@@ -257,6 +256,7 @@ pub fn rules_context() -> RCtx {
         checked,
         good,
         probe: RwSignal::new(vec![]),
+        p: RwSignal::new(0.5),
         tested: RwSignal::new(first),
         x: RwSignal::new(None),
         notice: RwSignal::new(None),
@@ -271,7 +271,7 @@ pub fn rules_context() -> RCtx {
     // Test the quantity being edited.
     Effect::new(move |_| {
         let q = match ctx.sel.get() {
-            RSel::Quantity(q) | RSel::Base(q, _) => Some(q),
+            RSel::Quantity(q) | RSel::Part(q, _) => Some(q),
             RSel::File => None,
         };
         if let Some(n) = q.and_then(|q| doc.with(|d| d.quantity(q).map(|x| x.name.clone()))) {
@@ -296,7 +296,7 @@ pub fn RulesStudio() -> impl IntoView {
                     {move || match ctx.sel.get() {
                         RSel::File => view! { <FileView/> }.into_any(),
                         RSel::Quantity(q) => view! { <QuantityView q=q/> }.into_any(),
-                        RSel::Base(q, b) => view! { <BaseView q=q b=b/> }.into_any(),
+                        RSel::Part(q, p) => view! { <PartView q=q p=p/> }.into_any(),
                     }}
                 </section>
                 <aside class="panel">
@@ -314,17 +314,17 @@ fn RulesToolbar() -> impl IntoView {
         let input: HtmlInputElement = event_target(&ev);
         spawn_local(async move {
             if let Some((name, text)) = io::read_files(&input).await.into_iter().next() {
-                ctx.open(&name, &text);
+                ctx.open_text(&name, &text);
             }
         });
     };
     let example = move |ev: leptos::ev::Event| {
         match event_target_value(&ev).as_str() {
             "weather" => {
-                ctx.open("sample_rules.yaml", SAMPLE);
+                ctx.open_text("sample_rules.yaml", SAMPLE);
             }
             "empty" => {
-                ctx.open("rules.yaml", "version: 1\nquantities: {}\n");
+                ctx.open_text("rules.yaml", "version: 2\nquantities: {}\n");
             }
             _ => {}
         }
@@ -421,14 +421,15 @@ fn add_quantity() {
     let mut sel = None;
     ctx.doc.update(|d| {
         let taken: Vec<String> = d.quantities.iter().map(|q| q.name.clone()).collect();
-        let base = BaseDoc::new("base".into(), "x".into(), &[]);
+        let part = PartDoc::new("part".into(), "x".into());
         let q = QuantityDoc {
             id: fresh_id(),
             name: unique("quantity", &taken),
             combine: None,
-            bases: vec![base],
+            parts: vec![part],
+            text: String::new(),
         };
-        sel = Some(RSel::Base(q.id, q.bases[0].id));
+        sel = Some(RSel::Part(q.id, q.parts[0].id));
         d.quantities.push(q);
     });
     if let Some(s) = sel {
@@ -436,20 +437,15 @@ fn add_quantity() {
     }
 }
 
-fn add_base(q: u64) {
+fn add_part(q: u64) {
     let ctx = rctx();
     let mut sel = None;
     ctx.doc.update(|d| {
         let Some(qd) = d.quantity_mut(q) else { return };
-        let taken: Vec<String> = qd.bases.iter().map(|b| b.name.clone()).collect();
-        let outputs = qd
-            .bases
-            .first()
-            .map(|b| b.outputs.clone())
-            .unwrap_or_default();
-        let b = BaseDoc::new(unique("base", &taken), "x".into(), &outputs);
-        sel = Some(RSel::Base(q, b.id));
-        qd.bases.push(b);
+        let taken: Vec<String> = qd.parts.iter().map(|b| b.name.clone()).collect();
+        let p = PartDoc::new(unique("part", &taken), "x".into());
+        sel = Some(RSel::Part(q, p.id));
+        qd.parts.push(p);
     });
     if let Some(s) = sel {
         ctx.sel.set(s);
@@ -464,9 +460,9 @@ fn RulesOutline() -> impl IntoView {
             d.quantities
                 .iter()
                 .map(|q| {
-                    let bases: Vec<(u64, String)> =
-                        q.bases.iter().map(|b| (b.id, b.name.clone())).collect();
-                    (q.id, q.name.clone(), bases)
+                    let parts: Vec<(u64, String)> =
+                        q.parts.iter().map(|b| (b.id, b.name.clone())).collect();
+                    (q.id, q.name.clone(), parts)
                 })
                 .collect::<Vec<_>>()
         })
@@ -485,20 +481,20 @@ fn RulesOutline() -> impl IntoView {
                 <button class="mini add" title="Add a quantity" on:click=move |_| add_quantity()><Icon name="plus"/></button>
             </div>
             <ul class="tree">
-                {move || tree.get().into_iter().map(|(q, name, bases)| {
+                {move || tree.get().into_iter().map(|(q, name, parts)| {
                     view! {
                         <li class="row group" class:selected=move || selected(RSel::Quantity(q)) on:click=move |_| ctx.sel.set(RSel::Quantity(q))>
                             <span class="icon"><Icon name="func"/></span>
                             <span class="name">{name}</span>
-                            <button class="mini add" title="Add a rule base" on:click=move |ev| {
+                            <button class="mini add" title="Add a part" on:click=move |ev| {
                                 ev.stop_propagation();
-                                add_base(q);
+                                add_part(q);
                             }><Icon name="plus"/></button>
                         </li>
-                        {bases.into_iter().map(|(b, bn)| view! {
-                            <li class="row" style="padding-left: 32px" class:selected=move || selected(RSel::Base(q, b)) on:click=move |_| ctx.sel.set(RSel::Base(q, b))>
-                                <span class="icon"><Icon name="list"/></span>
-                                <span class="name">{bn}</span>
+                        {parts.into_iter().map(|(p, pn)| view! {
+                            <li class="row" style="padding-left: 32px" class:selected=move || selected(RSel::Part(q, p)) on:click=move |_| ctx.sel.set(RSel::Part(q, p))>
+                                <span class="icon"><Icon name="graph"/></span>
+                                <span class="name">{pn}</span>
                             </li>
                         }).collect_view()}
                     }
@@ -562,31 +558,59 @@ fn FileView() -> impl IntoView {
         ctx.doc.with(|d| {
             d.quantities
                 .iter()
-                .map(|q| (q.id, q.name.clone(), q.bases.len()))
+                .map(|q| (q.id, q.name.clone(), q.parts.len()))
                 .collect::<Vec<_>>()
         })
     });
+    let input_ids = Memo::new(move |_| {
+        ctx.doc
+            .with(|d| d.inputs.iter().map(|i| i.id).collect::<Vec<_>>())
+    });
+    let add_input = move |_| {
+        ctx.doc.update(|d| {
+            let taken: Vec<String> = d.inputs.iter().map(|i| i.name.clone()).collect();
+            d.inputs.push(InputDoc {
+                id: fresh_id(),
+                name: unique("input", &taken),
+                default: None,
+                text: String::new(),
+            });
+        })
+    };
     view! {
         <div class="editor-head">
             <div class="big-icon root"><Icon name="doc"/></div>
             <div class="head-text">
                 <div class="crumbs"><span class="last">{move || ctx.name.get()}</span></div>
-                <div class="kind-line">"A backend's fuzzy rules: quantities, each made of rule bases"</div>
+                <div class="kind-line">"A backend's rules: quantities, each one or more conditional distributions"</div>
             </div>
         </div>
         <div class="card">
             <div class="card-title"><Icon name="func"/>"Quantities"</div>
-            <p class="hint">"A quantity is what a backend reads a range of (the road's grip, how far drivers see). Its rule bases each read some inputs; " <code>"combine"</code> " joins their outputs."</p>
+            <p class="hint">"A quantity is what a backend reads a value of (the road's grip, how far drivers see). Each of its parts gives a distribution of it, given some inputs; a run draws the value at a quantile, and " <code>"combine"</code> " joins the parts' values."</p>
             <ul class="list">
                 {move || quantities.get().into_iter().map(|(q, n, k)| view! {
                     <li class="line">
                         <button class="pill" on:click=move |_| ctx.sel.set(RSel::Quantity(q))><Icon name="func"/>{n}</button>
-                        <span class="hint">{format!("{k} rule base{}", if k == 1 { "" } else { "s" })}</span>
+                        <span class="hint">{format!("{k} part{}", if k == 1 { "" } else { "s" })}</span>
                     </li>
                 }).collect_view()}
             </ul>
             <div class="actions">
                 <button class="button subtle" on:click=move |_| add_quantity()><Icon name="plus"/>"Add a quantity"</button>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-title"><Icon name="ruler"/>"Inputs"</div>
+            <p class="hint">"The value an input reads when the caller gives none, and a line saying what it is. An input not listed here must be given."</p>
+            <table class="terms-table">
+                <thead><tr><th>"Input"</th><th>"Default"</th><th>"Says"</th><th></th></tr></thead>
+                <tbody>
+                    <For each=move || input_ids.get() key=|id| *id children=move |i| view! { <InputRow i=i/> }/>
+                </tbody>
+            </table>
+            <div class="actions">
+                <button class="button subtle" on:click=add_input><Icon name="plus"/>"Describe an input"</button>
             </div>
         </div>
         <div class="card">
@@ -623,9 +647,89 @@ fn FileView() -> impl IntoView {
     }
 }
 
+#[component]
+fn InputRow(i: u64) -> impl IntoView {
+    let ctx = rctx();
+    let input = Memo::new(move |_| {
+        ctx.doc
+            .with(|d| d.inputs.iter().find(|x| x.id == i).cloned())
+    });
+    let update = move |f: Box<dyn FnOnce(&mut InputDoc)>| {
+        ctx.doc.update(|d| {
+            if let Some(x) = d.inputs.iter_mut().find(|x| x.id == i) {
+                f(x)
+            }
+        })
+    };
+    view! {
+        <tr>
+            <td><input class="term-name" prop:value=move || input.with(|x| x.as_ref().map(|x| x.name.clone()).unwrap_or_default())
+                on:change=move |ev| { let n = event_target_value(&ev).trim().to_string(); if !n.is_empty() { update(Box::new(move |x| x.name = n)); } }/></td>
+            <td><input class="corner" inputmode="decimal" placeholder="none" prop:value=move || input.with(|x| x.as_ref().and_then(|x| x.default).map(num).unwrap_or_default())
+                on:change=move |ev| { let v = parse_num(&event_target_value(&ev)); update(Box::new(move |x| x.default = v)); }/></td>
+            <td><input prop:value=move || input.with(|x| x.as_ref().map(|x| x.text.clone()).unwrap_or_default())
+                on:change=move |ev| { let t = event_target_value(&ev); update(Box::new(move |x| x.text = t)); }/></td>
+            <td><button class="mini danger" title="Forget the input" on:click=move |_| ctx.doc.update(|d| d.inputs.retain(|x| x.id != i))><Icon name="x"/></button></td>
+        </tr>
+    }
+}
+
 // ---------------------------------------------------------------------------
 // A quantity
 // ---------------------------------------------------------------------------
+
+/// A table of each part's and the quantity's values at the tested inputs.
+fn summary_table(name: &str, j: &Joined, p: f64, link: Option<u64>) -> AnyView {
+    let ctx = rctx();
+    let deciding = j.deciding(p).to_string();
+    let rows = j
+        .parts
+        .iter()
+        .map(|(pn, d)| {
+            let (lo, hi) = d.support();
+            let id = link.and_then(|q| {
+                ctx.doc.with(|doc| {
+                    doc.quantity(q)?
+                        .parts
+                        .iter()
+                        .find(|x| x.name == *pn)
+                        .map(|x| x.id)
+                })
+            });
+            let wins = *pn == deciding && j.parts.len() > 1;
+            let label = pn.clone();
+            view! {
+                <tr>
+                    <td>{match (link, id) {
+                        (Some(q), Some(pid)) => view! { <button class="pill" on:click=move |_| ctx.sel.set(RSel::Part(q, pid))><Icon name="graph"/>{label.clone()}</button> }.into_any(),
+                        _ => view! { <span>{label.clone()}</span> }.into_any(),
+                    }}</td>
+                    <td class="num">{short(lo)}</td>
+                    <td class="num">{short(hi)}</td>
+                    <td class="num">{short(d.quantile(0.5))}</td>
+                    <td class="num" class:wins=wins>{short(d.quantile(p))}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let (lo, hi) = j.support();
+    view! {
+        <table class="rules-table">
+            <thead><tr><th>"Part"</th><th class="num">"low"</th><th class="num">"high"</th><th class="num">"median"</th><th class="num">{format!("at p = {}", num(p))}</th></tr></thead>
+            <tbody>
+                {rows}
+                <tr class="total">
+                    <td>{format!("{name} ({})", j.combine.name())}</td>
+                    <td class="num">{short(lo)}</td>
+                    <td class="num">{short(hi)}</td>
+                    <td class="num">{short(j.quantile(0.5))}</td>
+                    <td class="num">{short(j.quantile(p))}</td>
+                </tr>
+            </tbody>
+        </table>
+    }
+    .into_any()
+}
 
 #[component]
 fn QuantityView(q: u64) -> impl IntoView {
@@ -662,28 +766,18 @@ fn QuantityView(q: u64) -> impl IntoView {
             >{label}</button>
         }
     };
-    let outputs_at = Memo::new(move |_| {
-        let name = quantity.with(|x| x.as_ref().map(|x| x.name.clone()))?;
-        let probe = ctx.probe.get();
-        ctx.good.with(|g| {
-            let set = g.as_ref()?;
-            let qd = set.quantities.get(&name)?;
-            let values = rules_doc::values_at(set, &name, &probe);
-            let each = qd.evaluate_each(&values).ok()?;
-            let joined = qd.evaluate(&values).ok()?;
-            Some((qd.outputs.clone(), each, joined))
-        })
-    });
     move || {
         let Some(qd) = quantity.get() else {
             return view! { <p class="hint">"This quantity is gone."</p> }.into_any();
         };
+        let name = qd.name.clone();
+        let n2 = name.clone();
         view! {
             <div class="editor-head">
                 <div class="big-icon"><Icon name="func"/></div>
                 <div class="head-text">
                     <div class="crumbs"><span class="last">{qd.name.clone()}</span></div>
-                    <div class="kind-line">{format!("quantity · {} rule base{}", qd.bases.len(), if qd.bases.len() == 1 { "" } else { "s" })}</div>
+                    <div class="kind-line">{format!("quantity · {} part{}", qd.parts.len(), if qd.parts.len() == 1 { "" } else { "s" })}</div>
                 </div>
                 <div class="actions">
                     <button class="mini danger" on:click=remove><Icon name="trash"/>"Remove"</button>
@@ -696,7 +790,7 @@ fn QuantityView(q: u64) -> impl IntoView {
                         <input prop:value=qd.name.clone() on:change=rename/>
                     </label>
                     <div class="field">
-                        <span>"Combine the rule bases' outputs by"</span>
+                        <span>"Join the parts' values by"</span>
                         <div class="segmented">
                             {combine_button(None, "min (default)")}
                             {combine_button(Some("min"), "min")}
@@ -704,44 +798,25 @@ fn QuantityView(q: u64) -> impl IntoView {
                         </div>
                     </div>
                 </div>
-                <p class="hint">"Output by output: " <b>"min"</b> " takes the lowest of the rule bases (the shortest view of fog, rain and night), " <b>"max"</b> " the highest."</p>
+                <label class="field"><span>"Says"</span>
+                    <input prop:value=qd.text.clone() on:change=move |ev| {
+                        let t = event_target_value(&ev);
+                        ctx.doc.update(|d| if let Some(x) = d.quantity_mut(q) { x.text = t });
+                    }/>
+                </label>
+                <p class="hint">"The parts move together: each gives its value at the same quantile, and " <b>"min"</b> " takes the least (the shortest view of fog, rain and night), " <b>"max"</b> " the greatest."</p>
             </div>
             <div class="card">
-                <div class="card-title"><Icon name="list"/>"Rule bases at the tested values"</div>
-                {move || match outputs_at.get() {
+                <div class="card-title"><Icon name="graph"/>"Parts at the tested values"</div>
+                {move || match ctx.joined(&n2) {
                     None => view! { <p class="hint">"Not read yet."</p> }.into_any(),
-                    Some((outputs, each, joined)) => view! {
-                        <table class="rules-table">
-                            <thead><tr><th>"Rule base"</th>{outputs.iter().map(|o| view! { <th class="num">{o.clone()}</th> }).collect_view()}</tr></thead>
-                            <tbody>
-                                {each.into_iter().map(|(bn, out)| {
-                                    let b = qd.bases.iter().find(|x| x.name == bn).map(|x| x.id);
-                                    let cells = outputs.iter().map(|o| {
-                                        let v = out.get(o).copied().unwrap_or(f64::NAN);
-                                        let wins = joined.get(o).is_some_and(|j| (*j - v).abs() < 1e-12);
-                                        view! { <td class="num" class:wins=wins>{num(v)}</td> }
-                                    }).collect_view();
-                                    view! {
-                                        <tr>
-                                            <td>{match b {
-                                                Some(b) => view! { <button class="pill" on:click=move |_| ctx.sel.set(RSel::Base(q, b))><Icon name="list"/>{bn.clone()}</button> }.into_any(),
-                                                None => view! { <span>{bn.clone()}</span> }.into_any(),
-                                            }}</td>
-                                            {cells}
-                                        </tr>
-                                    }
-                                }).collect_view()}
-                                <tr class="total">
-                                    <td>"combined"</td>
-                                    {outputs.iter().map(|o| view! { <td class="num">{num(joined.get(o).copied().unwrap_or(f64::NAN))}</td> }).collect_view()}
-                                </tr>
-                            </tbody>
-                        </table>
-                        <p class="hint">"Bold: the rule base " <code>"combine"</code> " takes. Set the values in the panel's test drive."</p>
+                    Some(j) => view! {
+                        {summary_table(&name, &j, ctx.p.get(), Some(q))}
+                        <p class="hint">"Bold: the part that gives the value at the tested quantile. Set the values and the quantile in the panel's test drive."</p>
                     }.into_any(),
                 }}
                 <div class="actions">
-                    <button class="button subtle" on:click=move |_| add_base(q)><Icon name="plus"/>"Add a rule base"</button>
+                    <button class="button subtle" on:click=move |_| add_part(q)><Icon name="plus"/>"Add a part"</button>
                 </div>
             </div>
         }
@@ -750,318 +825,232 @@ fn QuantityView(q: u64) -> impl IntoView {
 }
 
 // ---------------------------------------------------------------------------
-// A rule base
+// A part
 // ---------------------------------------------------------------------------
 
 #[component]
-fn BaseView(q: u64, b: u64) -> impl IntoView {
+fn PartView(q: u64, p: u64) -> impl IntoView {
     let ctx = rctx();
-    let base = Memo::new(move |_| ctx.doc.with(|d| d.base(q, b).cloned()));
+    let part = Memo::new(move |_| ctx.doc.with(|d| d.part(q, p).cloned()));
     let qname = Memo::new(move |_| {
         ctx.doc
             .with(|d| d.quantity(q).map(|x| x.name.clone()).unwrap_or_default())
     });
-    let input_ids = Memo::new(move |_| {
-        base.with(|x| {
-            x.as_ref()
-                .and_then(|x| x.inputs.as_ref())
-                .map(|is| is.iter().map(|i| i.id).collect::<Vec<_>>())
-        })
-    });
+    let name_value = move || part.with(|x| x.as_ref().map(|x| x.name.clone()).unwrap_or_default());
     let rename = move |ev: leptos::ev::Event| {
         let n = event_target_value(&ev).trim().to_string();
         if !n.is_empty() {
-            ctx.base_update(q, b, |x| x.name = n);
+            ctx.part_update(q, p, |x| x.name = n);
         }
     };
     let remove = move |_| {
         ctx.doc.update(|d| {
             if let Some(x) = d.quantity_mut(q) {
-                x.bases.retain(|y| y.id != b);
+                x.parts.retain(|y| y.id != p);
             }
         });
         ctx.sel.set(RSel::Quantity(q));
     };
-    let add_input = move |_| {
-        ctx.base_update(q, b, |x| {
-            let inputs = x.inputs.get_or_insert_with(Vec::new);
-            let taken: Vec<String> = inputs.iter().map(|i| i.name.clone()).collect();
-            inputs.push(InputDoc::new(unique("input", &taken)));
-        })
-    };
-    let take_inputs = move |_| {
-        if let Some(read) = ctx.read_base(q, b) {
-            let inputs: Vec<InputDoc> = read.inputs.iter().map(input_doc).collect();
-            ctx.base_update(q, b, |x| x.inputs = Some(inputs));
+    let has_axes = Memo::new(move |_| part.with(|x| x.as_ref().map(|x| x.axes.is_some())));
+    let has_dist = Memo::new(move |_| part.with(|x| x.as_ref().map(|x| x.dist.is_some())));
+    let take = move |_| {
+        if let Some(read) = ctx.read_part(q, p) {
+            let full = part_doc(&read);
+            ctx.part_update(q, p, |x| {
+                if x.axes.is_none() {
+                    x.axes = full.axes.clone();
+                }
+                if x.dist.is_none() {
+                    x.dist = full.dist.clone();
+                }
+            });
         }
     };
-    let name_value = move || base.with(|x| x.as_ref().map(|x| x.name.clone()).unwrap_or_default());
     view! {
         <div class="editor-head">
-            <div class="big-icon"><Icon name="list"/></div>
+            <div class="big-icon"><Icon name="graph"/></div>
             <div class="head-text">
                 <div class="crumbs">
                     <span>{move || qname.get()}</span>
                     <span class="sep">"›"</span>
                     <span class="last">{name_value}</span>
                 </div>
-                <div class="kind-line">"rule base: inputs sorted into terms, and rules giving the outputs"</div>
+                <div class="kind-line">"part: a distribution of the quantity, given its inputs"</div>
             </div>
             <div class="actions">
                 <button class="mini danger" on:click=remove><Icon name="trash"/>"Remove"</button>
             </div>
         </div>
         <div class="card">
-            <label class="field">
-                <span>"Name"</span>
-                <input prop:value=name_value on:change=rename/>
-            </label>
+            <div class="grid2">
+                <label class="field"><span>"Name"</span><input prop:value=name_value on:change=rename/></label>
+                <label class="field"><span>"Says"</span>
+                    <input prop:value=move || part.with(|x| x.as_ref().map(|x| x.text.clone()).unwrap_or_default())
+                        on:change=move |ev| { let t = event_target_value(&ev); ctx.part_update(q, p, |x| x.text = t); }/>
+                </label>
+            </div>
         </div>
-        <h3>"Inputs"</h3>
-        {move || match input_ids.get() {
-            None => view! {
-                <div class="card">
-                    <p class="hint">"This file does not name the inputs: the file it extends gives them."</p>
-                    <button class="button subtle" on:click=take_inputs><Icon name="plus"/>"Write them here to change them"</button>
-                </div>
-            }.into_any(),
-            Some(_) => view! {
-                <For
-                    each=move || input_ids.get().unwrap_or_default()
-                    key=|id| *id
-                    children=move |i| view! { <InputCard q=q b=b i=i/> }
-                />
-                <div class="actions">
-                    <button class="button subtle" on:click=add_input><Icon name="plus"/>"Add an input"</button>
-                </div>
-            }.into_any(),
-        }}
-        <h3>"Rules"</h3>
-        <RulesCard q=q b=b/>
+        {move || (has_axes.get() == Some(false) || has_dist.get() == Some(false)).then(|| view! {
+            <div class="card">
+                <p class="hint">{move || match (has_axes.get(), has_dist.get()) {
+                    (Some(false), Some(false)) => "This file names neither the points nor the distribution: the file it extends gives them.",
+                    (Some(false), _) => "This file does not name the points: the file it extends gives them.",
+                    _ => "This file does not name the distribution: the file it extends gives it.",
+                }}</p>
+                <button class="button subtle" on:click=take><Icon name="plus"/>"Write them here to change them"</button>
+            </div>
+        })}
+        <Show when=move || has_axes.get() == Some(true)>
+            <h3>"Inputs and points"</h3>
+            <AxesCard q=q p=p part=part/>
+        </Show>
+        <Show when=move || has_axes.get() == Some(true) && has_dist.get() == Some(true)>
+            <h3>"Distribution"</h3>
+            <DistCard q=q p=p part=part/>
+        </Show>
     }
 }
 
 #[component]
-fn InputCard(q: u64, b: u64, i: u64) -> impl IntoView {
+fn AxesCard(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
     let ctx = rctx();
-    let input = Memo::new(move |_| {
-        ctx.doc.with(|d| {
-            d.base(q, b)?
-                .inputs
-                .as_ref()?
-                .iter()
-                .find(|x| x.id == i)
-                .cloned()
-        })
-    });
-    let get = move |f: fn(&InputDoc) -> String| {
-        move || input.with(|x| x.as_ref().map(f).unwrap_or_default())
-    };
-    let rename = move |ev: leptos::ev::Event| {
-        let new = event_target_value(&ev).trim().to_string();
-        let Some(old) = input.with_untracked(|x| x.as_ref().map(|x| x.name.clone())) else {
-            return;
-        };
-        if new.is_empty() || new == old {
-            return;
-        }
-        ctx.base_update(q, b, |x| x.rename_input(&old, &new));
-        if let Some(v) = ctx.probe_value(&old) {
-            ctx.set_probe(&new, v);
-        }
-    };
-    let set_low = move |ev: leptos::ev::Event| {
-        if let Some(v) = parse_num(&event_target_value(&ev)) {
-            ctx.input_update(q, b, i, |x| x.low = v);
-        }
-    };
-    let set_high = move |ev: leptos::ev::Event| {
-        if let Some(v) = parse_num(&event_target_value(&ev)) {
-            ctx.input_update(q, b, i, |x| x.high = v);
-        }
-    };
-    let set_default = move |ev: leptos::ev::Event| {
-        let t = event_target_value(&ev);
-        let v = parse_num(&t);
-        ctx.input_update(q, b, i, |x| x.default = v);
-    };
-    let remove = move |_| {
-        ctx.base_update(q, b, |x| {
-            if let Some(is) = &mut x.inputs {
-                is.retain(|y| y.id != i)
+    let axes = move || part.with(|x| x.as_ref().and_then(|x| x.axes.clone()).unwrap_or_default());
+    let add_axis = move |_| {
+        ctx.part_update(q, p, |x| {
+            if let Some(axes) = &mut x.axes {
+                let taken: Vec<String> = axes.iter().map(|a| a.input.clone()).collect();
+                axes.push(AxisDoc {
+                    id: fresh_id(),
+                    input: unique("input", &taken),
+                    points: vec![0.0],
+                });
             }
         })
     };
-    let add_term = move |_| {
-        ctx.input_update(q, b, i, |x| {
-            let taken: Vec<String> = x.terms.iter().map(|t| t.name.clone()).collect();
-            let mid = (x.low + x.high) / 2.0;
-            let w = (x.high - x.low) / 4.0;
-            x.terms.push(Term {
-                id: fresh_id(),
-                name: unique("term", &taken),
-                shape: Shape::Triangle([tidy(mid - w), tidy(mid), tidy(mid + w)]),
-            });
+    let remove_axis = move |k: usize| {
+        ctx.part_update(q, p, |x| {
+            // Keep the values at the axis' first point.
+            if let Some(first) = x.axes.as_ref().and_then(|a| a.get(k)).map(|a| a.points[0]) {
+                x.set_points(k, vec![first]);
+            }
+            if let Some(axes) = &mut x.axes {
+                axes.remove(k);
+            }
         })
     };
-    let spread = move |_| ctx.input_update(q, b, i, InputDoc::spread);
-    let term_ids = Memo::new(move |_| {
-        input.with(|x| {
-            x.as_ref()
-                .map(|x| x.terms.iter().map(|t| t.id).collect::<Vec<_>>())
-                .unwrap_or_default()
-        })
-    });
     view! {
-        <div class="card input-card">
-            <div class="card-head">
-                <div class="card-title"><Icon name="ruler"/>{move || shown(&get(|x| x.name.clone())())}
-                    {move || other_name(&get(|x| x.name.clone())()).map(|o| view! { <span class="hint mono">{o}</span> })}
-                </div>
-                <div class="actions">
-                    <button class="mini" title="Lay the terms out evenly, each peaking where its neighbours end" on:click=spread><Icon name="sparkle"/>"Spread evenly"</button>
-                    <button class="mini danger" on:click=remove><Icon name="trash"/></button>
-                </div>
-            </div>
-            <div class="grid4">
-                <label class="field"><span>"Name"</span><input prop:value=get(|x| x.name.clone()) on:change=rename/></label>
-                <label class="field"><span>"Universe from"</span><input inputmode="decimal" prop:value=get(|x| num(x.low)) on:change=set_low/></label>
-                <label class="field"><span>"to"</span><input inputmode="decimal" prop:value=get(|x| num(x.high)) on:change=set_high/></label>
-                <label class="field"><span>"Default"</span><input inputmode="decimal" placeholder="none" prop:value=get(|x| x.default.map(num).unwrap_or_default()) on:change=set_default/></label>
-            </div>
-            <MembershipChart q=q b=b i=i input=input/>
-            <AlignmentNote input=input/>
-            <p class="hint">"Drag a term's corners. Click the chart to test a value."</p>
+        <div class="card">
+            <p class="hint">"The inputs the part reads, and the points of each the distribution is written at, increasing. Between the points each value is interpolated linearly; beyond them it holds. Changing the points reads the values at the new points from the old ones."</p>
             <table class="terms-table">
-                <thead><tr><th></th><th>"Term"</th><th>"Shape"</th><th>"Corners"</th><th></th></tr></thead>
+                <thead><tr><th>"Input"</th><th>"Points"</th><th></th></tr></thead>
                 <tbody>
-                    <For each=move || term_ids.get() key=|id| *id children=move |t| view! { <TermRow q=q b=b i=i t=t input=input/> }/>
+                    {move || {
+                        let all = axes();
+                        let count = all.len();
+                        all.into_iter().enumerate().map(|(k, a)| {
+                            let other = other_name(&a.input);
+                            let points_text = a.points.iter().map(|v| num(*v)).collect::<Vec<String>>().join(", ");
+                            view! {
+                                <tr>
+                                    <td>
+                                        <input class="term-name" prop:value=a.input.clone() on:change=move |ev| {
+                                            let n = event_target_value(&ev).trim().to_string();
+                                            if !n.is_empty() {
+                                                ctx.part_update(q, p, |x| {
+                                                    if let Some(axes) = &mut x.axes {
+                                                        axes[k].input = n;
+                                                    }
+                                                });
+                                            }
+                                        }/>
+                                        {other.map(|o| view! { <div class="hint mono">{o}</div> })}
+                                    </td>
+                                    <td>
+                                        <input class="points mono" prop:value=points_text
+                                            on:change=move |ev| {
+                                                match parse_points(&event_target_value(&ev)) {
+                                                    Some(points) if points.windows(2).all(|w| w[0] < w[1]) => {
+                                                        ctx.part_update(q, p, |x| x.set_points(k, points));
+                                                    }
+                                                    _ => ctx.notice.set(Some((false, "Points are numbers, increasing, separated by commas".into()))),
+                                                }
+                                            }/>
+                                    </td>
+                                    <td>
+                                        {(count > 1).then(|| view! {
+                                            <button class="mini danger" title="Stop reading this input" on:click=move |_| remove_axis(k)><Icon name="x"/></button>
+                                        })}
+                                    </td>
+                                </tr>
+                            }
+                        }).collect_view()
+                    }}
                 </tbody>
             </table>
             <div class="actions">
-                <button class="button subtle" on:click=add_term><Icon name="plus"/>"Add a term"</button>
+                <button class="button subtle" on:click=add_axis><Icon name="plus"/>"Read another input"</button>
             </div>
         </div>
     }
 }
 
-/// How the input's terms meet the ODD's buckets, where the binding and the
-/// manifest say which attribute sets the input.
-#[component]
-fn AlignmentNote(input: Memo<Option<InputDoc>>) -> impl IntoView {
-    move || {
-        let x = input.get()?;
-        let link = crate::binding_app::bctx().link_of_input(&x.name)?;
-        let spans = link.spans();
-        if spans.is_empty() {
-            return None;
-        }
-        let terms: Vec<(String, Shape)> =
-            x.terms.iter().map(|t| (t.name.clone(), t.shape)).collect();
-        let rows = crate::binding::alignment(&spans, &terms);
-        let same = rows.iter().all(|r| r.2);
-        Some(view! {
-            <div class="alignment">
-                <span class=if same { "tag ok" } else { "tag bad" }>
-                    {if same { "terms are the ODD's buckets" } else { "terms differ from the ODD's buckets" }}
-                </span>
-                <span class="hint">{format!("{} sets it through {}:", link.attribute, link.knob.map(|k| k.key).unwrap_or_default())}</span>
-                {rows.into_iter().map(|(label, best, ok)| view! {
-                    <span class="pair" class:bad=!ok>
-                        <b>{label}</b>" → "{best.unwrap_or_else(|| "none".into())}
-                    </span>
-                }).collect_view()}
-            </div>
-        })
+/// A dragged parameter kept in order with the others at its point: `low` not
+/// above `mode` or `high`, and so on.
+fn clamp_param(family: Family, values: &[f64], j: usize, v: f64) -> f64 {
+    let names = family.params();
+    let get = |n: &str| names.iter().position(|x| *x == n).map(|i| values[i]);
+    match names[j] {
+        "low" => v
+            .min(get("mode").unwrap_or(f64::INFINITY))
+            .min(get("high").unwrap_or(f64::INFINITY)),
+        "high" => v
+            .max(get("mode").unwrap_or(f64::NEG_INFINITY))
+            .max(get("low").unwrap_or(f64::NEG_INFINITY)),
+        "mode" => v.clamp(
+            get("low").unwrap_or(v),
+            get("high").unwrap_or(v).max(get("low").unwrap_or(v)),
+        ),
+        "sd" => v.max(f64::EPSILON),
+        _ => v,
     }
 }
 
 #[component]
-fn TermRow(q: u64, b: u64, i: u64, t: u64, input: Memo<Option<InputDoc>>) -> impl IntoView {
+fn DistCard(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
     let ctx = rctx();
-    let term =
-        Memo::new(move |_| input.with(|x| x.as_ref()?.terms.iter().find(|y| y.id == t).cloned()));
-    let index = Memo::new(move |_| {
-        input.with(|x| {
-            x.as_ref()
-                .and_then(|x| x.terms.iter().position(|y| y.id == t))
-                .unwrap_or(0)
-        })
+    let family = Memo::new(move |_| {
+        part.with(|x| x.as_ref().and_then(|x| x.dist.as_ref()).map(|d| d.family))
     });
-    let update = move |f: Box<dyn FnOnce(&mut Term)>| {
-        ctx.input_update(q, b, i, |x| {
-            if let Some(term) = x.terms.iter_mut().find(|y| y.id == t) {
-                f(term)
-            }
-        })
-    };
-    let rename = move |ev: leptos::ev::Event| {
-        let new = event_target_value(&ev).trim().to_string();
-        let Some((input_name, old)) = input.with_untracked(|x| {
-            let x = x.as_ref()?;
-            Some((
-                x.name.clone(),
-                x.terms.iter().find(|y| y.id == t)?.name.clone(),
-            ))
-        }) else {
-            return;
-        };
-        if !new.is_empty() && new != old {
-            ctx.base_update(q, b, |x| x.rename_term(&input_name, &old, &new));
+    let family_button = move |f: Family| {
+        view! {
+            <button class:active=move || family.get() == Some(f) on:click=move |_| ctx.part_update(q, p, |x| x.set_family(f))>{f.name()}</button>
         }
     };
-    let set_kind = move |ev: leptos::ev::Event| {
-        let k = event_target_value(&ev);
-        update(Box::new(move |x| x.shape = x.shape.as_kind(&k)));
-    };
-    let remove = move |_| {
-        ctx.input_update(q, b, i, |x| x.terms.retain(|y| y.id != t));
-    };
-    let params = move || {
-        let Some(term) = term.get() else {
-            return ().into_any();
-        };
-        let names: &[&str] = match term.shape {
-            Shape::Triangle(_) => &["a", "peak", "c"],
-            Shape::Trapezoid(_) => &["a", "b", "c", "d"],
-            Shape::Gaussian { .. } => &["mean", "sigma"],
-        };
-        term.shape
-            .params()
-            .into_iter()
-            .enumerate()
-            .map(|(k, v)| {
-                let label = names[k];
-                view! {
-                    <input class="corner" title=label aria-label=label inputmode="decimal" prop:value=num(v)
-                        on:change=move |ev| {
-                            if let Some(v) = parse_num(&event_target_value(&ev)) {
-                                update(Box::new(move |x| x.shape = x.shape.with_param(k, v)));
-                            }
-                        }/>
-                }
-            })
-            .collect_view()
-            .into_any()
-    };
     view! {
-        <tr>
-            <td><span class=move || format!("swatch s{}", index.get() % 8)></span></td>
-            <td><input class="term-name" prop:value=move || term.with(|x| x.as_ref().map(|x| x.name.clone()).unwrap_or_default()) on:change=rename/></td>
-            <td>
-                <select on:change=set_kind prop:value=move || term.with(|x| x.as_ref().map(|x| x.shape.kind()).unwrap_or("triangle"))>
-                    {SHAPES.iter().map(|s| view! { <option value=*s>{*s}</option> }).collect_view()}
-                </select>
-            </td>
-            <td class="corners">{params}</td>
-            <td><button class="mini danger" title="Remove the term" on:click=remove><Icon name="x"/></button></td>
-        </tr>
+        <div class="card">
+            <div class="card-head">
+                <div class="segmented">
+                    {family_button(Family::Uniform)}
+                    {family_button(Family::Triangular)}
+                    {family_button(Family::Normal)}
+                </div>
+                <span class="hint">{move || match family.get() {
+                    Some(Family::Uniform) => "uniform: any value from low to high, equally",
+                    Some(Family::Triangular) => "triangular: from low to high, most often at mode",
+                    Some(Family::Normal) => "normal: around mean, sd wide, cut to low..high",
+                    None => "",
+                }}</span>
+            </div>
+            <PartChart q=q p=p part=part/>
+            <BucketNote part=part/>
+            <ValuesTable q=q p=p part=part/>
+        </div>
     }
 }
 
 const CW: f64 = 600.0;
-const CTOP: f64 = 24.0;
-const CBOT: f64 = 128.0;
+const CTOP: f64 = 14.0;
+const CBOT: f64 = 176.0;
 
 /// Ticks at round steps across `[lo, hi]`.
 fn ticks(lo: f64, hi: f64, n: usize) -> Vec<f64> {
@@ -1084,126 +1073,222 @@ fn ticks(lo: f64, hi: f64, n: usize) -> Vec<f64> {
     out
 }
 
-/// An input's terms over its universe, their corners draggable, and the
-/// value tested.
+/// One sample of a part over its first input: (x, low, median, at p, high).
+type Sample = (f64, f64, f64, f64, f64);
+
+/// A part over its first input, the others held at the tested values: the
+/// range low..high, the median and the value at the tested quantile, and,
+/// for a part over one input, each value written at a point as a handle to
+/// drag up or down.
 #[component]
-fn MembershipChart(q: u64, b: u64, i: u64, input: Memo<Option<InputDoc>>) -> impl IntoView {
+fn PartChart(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
     let ctx = rctx();
     let svg_ref = NodeRef::<leptos::svg::Svg>::new();
-    let dragging = RwSignal::new(None::<(u64, usize)>);
-    let range = move || input.with(|x| x.as_ref().map(|x| (x.low, x.high)).unwrap_or((0.0, 1.0)));
-    let sx = move |v: f64| {
-        let (lo, hi) = range();
-        if hi > lo {
-            (v - lo) / (hi - lo) * CW
-        } else {
-            0.0
+    let dragging = RwSignal::new(None::<(usize, usize)>);
+    let frozen = RwSignal::new(None::<(f64, f64)>);
+    let qname = Memo::new(move |_| {
+        ctx.doc
+            .with(|d| d.quantity(q).map(|x| x.name.clone()).unwrap_or_default())
+    });
+    // The part as openodd holds it, from the form when it agrees in size.
+    let core = Memo::new(move |_| part.with(|x| x.as_ref().and_then(PartDoc::core)));
+    let input = Memo::new(move |_| {
+        core.with(|c| {
+            c.as_ref()
+                .and_then(|c| c.axes.first().map(|a| a.input.clone()))
+        })
+    });
+    let x_range = Memo::new(move |_| {
+        core.with(|c| {
+            let a = c.as_ref()?.axes.first()?;
+            let (lo, hi) = (a.points[0], *a.points.last()?);
+            Some(if hi > lo {
+                let pad = (hi - lo) * 0.08;
+                (lo - pad, hi + pad)
+            } else {
+                (lo - 1.0, hi + 1.0)
+            })
+        })
+    });
+    let samples = Memo::new(move |_| -> Vec<Sample> {
+        let Some((lo, hi)) = x_range.get() else {
+            return vec![];
+        };
+        let qn = qname.get();
+        let pq = ctx.p.get();
+        core.with(|c| {
+            let Some(c) = c else { return vec![] };
+            let base: Vec<f64> = c
+                .axes
+                .iter()
+                .map(|a| ctx.tested_value(&qn, &a.input))
+                .collect();
+            let mut xs: Vec<f64> = (0..=120)
+                .map(|k| lo + (hi - lo) * k as f64 / 120.0)
+                .collect();
+            xs.extend(c.axes[0].points.iter().copied());
+            xs.sort_by(f64::total_cmp);
+            xs.dedup();
+            xs.into_iter()
+                .map(|x| {
+                    let mut v = base.clone();
+                    v[0] = x;
+                    let d = c.dist(&v);
+                    let (l, h) = d.support();
+                    (x, l, d.quantile(0.5), d.quantile(pq), h)
+                })
+                .collect()
+        })
+    });
+    let y_range = Memo::new(move |_| {
+        if let Some(r) = frozen.get() {
+            return r;
         }
+        let s = samples.get();
+        let mut lo = s.iter().map(|x| x.1).fold(f64::INFINITY, f64::min);
+        let mut hi = s.iter().map(|x| x.4).fold(f64::NEG_INFINITY, f64::max);
+        if !lo.is_finite() || !hi.is_finite() {
+            return (0.0, 1.0);
+        }
+        if hi <= lo {
+            lo -= 1.0;
+            hi += 1.0;
+        }
+        let pad = (hi - lo) * 0.12;
+        (lo - pad, hi + pad)
+    });
+    let sx = move |v: f64| {
+        let (lo, hi) = x_range.get().unwrap_or((0.0, 1.0));
+        (v - lo) / (hi - lo) * CW
     };
-    let sy = move |d: f64| CBOT - d * (CBOT - CTOP);
-    let to_value = move |client_x: f64| -> Option<f64> {
+    let sy = move |v: f64| {
+        let (lo, hi) = y_range.get();
+        CBOT - (v - lo) / (hi - lo) * (CBOT - CTOP)
+    };
+    let one_axis = Memo::new(move |_| core.with(|c| c.as_ref().map(|c| c.axes.len()) == Some(1)));
+    let to_value = move |client_y: f64| -> Option<f64> {
         let el = svg_ref.get()?;
         let el: &web_sys::Element = el.unchecked_ref();
         let rect = el.get_bounding_client_rect();
-        if rect.width() <= 0.0 {
+        if rect.height() <= 0.0 {
             return None;
         }
-        let x = (client_x - rect.left()) / rect.width() * (CW + 40.0) - 20.0;
-        let (lo, hi) = range();
-        let v = lo + x / CW * (hi - lo);
-        // Snap to a round step: a few hundred across the universe.
-        let step = 10f64.powf(((hi - lo) / 200.0).log10().floor());
+        let y = (client_y - rect.top()) / rect.height() * (CBOT + 50.0);
+        let (lo, hi) = y_range.get_untracked();
+        let v = lo + (CBOT - y) / (CBOT - CTOP) * (hi - lo);
+        let step = 10f64.powf(((hi - lo) / 300.0).log10().floor());
         Some(tidy((v / step).round() * step))
-    };
-    let name = move || input.with(|x| x.as_ref().map(|x| x.name.clone()).unwrap_or_default());
-    let tested = move || {
-        let n = name();
-        ctx.probe_value(&n).or_else(|| {
-            input.with(|x| {
-                x.as_ref()
-                    .map(|x| x.default.unwrap_or((x.low + x.high) / 2.0))
-            })
-        })
     };
     let pointer_down = move |ev: web_sys::PointerEvent| {
         let target: web_sys::Element = ev.target().unwrap().unchecked_into();
-        if let Some((t, k)) = target.get_attribute("data-handle").and_then(|s| {
-            let (t, k) = s.split_once(':')?;
-            Some((t.parse().ok()?, k.parse().ok()?))
+        if let Some((j, k)) = target.get_attribute("data-handle").and_then(|s| {
+            let (j, k) = s.split_once(':')?;
+            Some((j.parse().ok()?, k.parse().ok()?))
         }) {
-            dragging.set(Some((t, k)));
+            frozen.set(Some(y_range.get_untracked()));
+            dragging.set(Some((j, k)));
             if let Some(el) = svg_ref.get() {
                 let el: &web_sys::Element = el.unchecked_ref();
                 let _ = el.set_pointer_capture(ev.pointer_id());
             }
             ev.prevent_default();
-        } else if let Some(v) = to_value(ev.client_x() as f64) {
-            let (lo, hi) = range();
-            ctx.set_probe(&name(), v.clamp(lo, hi));
+        } else if let (Some(name), Some(el), Some((lo, hi))) = (
+            input.get_untracked(),
+            svg_ref.get(),
+            x_range.get_untracked(),
+        ) {
+            // A click on the chart tests that value of the input.
+            let el: &web_sys::Element = el.unchecked_ref();
+            let rect = el.get_bounding_client_rect();
+            if rect.width() > 0.0 {
+                let x = (ev.client_x() as f64 - rect.left()) / rect.width() * (CW + 70.0) - 50.0;
+                let v = (lo + x / CW * (hi - lo)).clamp(lo, hi);
+                let step = 10f64.powf(((hi - lo) / 200.0).log10().floor());
+                ctx.set_probe(&name, tidy((v / step).round() * step));
+            }
         }
     };
     let pointer_move = move |ev: web_sys::PointerEvent| {
-        if let (Some((t, k)), Some(v)) = (dragging.get_untracked(), to_value(ev.client_x() as f64))
+        if let (Some((j, k)), Some(v)) = (dragging.get_untracked(), to_value(ev.client_y() as f64))
         {
-            ctx.input_update(q, b, i, |x| {
-                let (lo, hi) = (x.low, x.high);
-                if let Some(term) = x.terms.iter_mut().find(|y| y.id == t) {
-                    term.shape = term.shape.drag(k, v, lo, hi);
+            ctx.part_update(q, p, |x| {
+                if let Some(d) = &mut x.dist {
+                    let at: Vec<f64> = d.params.iter().map(|p| p.values[k]).collect();
+                    let v = clamp_param(d.family, &at, j, v);
+                    let param = &mut d.params[j];
+                    param.values[k] = v;
+                    param.constant = false;
                 }
             });
         }
     };
-    let pointer_up = move |_ev: web_sys::PointerEvent| dragging.set(None);
-    let curves = move || {
-        let Some(x) = input.get() else {
+    let pointer_up = move |_ev: web_sys::PointerEvent| {
+        dragging.set(None);
+        frozen.set(None);
+    };
+    let band = move || {
+        let s = samples.get();
+        if s.is_empty() {
             return ().into_any();
-        };
-        let (lo, hi) = (x.low, x.high);
-        x.terms
+        }
+        let top: Vec<String> = s
             .iter()
-            .enumerate()
-            .map(|(k, t)| {
-                let mut xs: Vec<f64> = (0..=120).map(|j| lo + (hi - lo) * j as f64 / 120.0).collect();
-                xs.extend(t.shape.handles().iter().map(|(v, _)| *v).filter(|v| *v >= lo && *v <= hi));
-                xs.sort_by(f64::total_cmp);
-                xs.dedup();
-                let line: Vec<String> = xs
-                    .iter()
-                    .map(|v| format!("{:.1},{:.1}", sx(*v), sy(t.shape.degree(*v))))
-                    .collect();
-                let area = format!("M{:.1},{CBOT} L{} L{:.1},{CBOT} Z", sx(lo), line.join(" L"), sx(hi));
-                let label_x = t.shape.handles().iter().map(|(v, d)| (*v, *d)).filter(|(_, d)| *d >= 0.99).map(|(v, _)| v.clamp(lo, hi)).next().unwrap_or((lo + hi) / 2.0);
-                view! {
-                    <g class=format!("term s{}", k % 8)>
-                        <path class="area" d=area/>
-                        <path class="curve" d=format!("M{}", line.join(" L"))/>
-                        <text class="term-label" x=sx(label_x) y=CTOP - 10.0 text-anchor="middle">{t.name.clone()}</text>
-                    </g>
-                }
-            })
-            .collect_view()
-            .into_any()
+            .map(|x| format!("{:.1},{:.1}", sx(x.0), sy(x.4)))
+            .collect();
+        let bottom: Vec<String> = s
+            .iter()
+            .rev()
+            .map(|x| format!("{:.1},{:.1}", sx(x.0), sy(x.1)))
+            .collect();
+        let line = |f: fn(&Sample) -> f64| {
+            s.iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    format!(
+                        "{}{:.1},{:.1}",
+                        if i == 0 { "M" } else { "L" },
+                        sx(x.0),
+                        sy(f(x))
+                    )
+                })
+                .collect::<String>()
+        };
+        view! {
+            <path class="band-area" d=format!("M{} L{} Z", top.join(" L"), bottom.join(" L"))/>
+            <path class="band-edge" d=line(|x| x.4)/>
+            <path class="band-edge" d=line(|x| x.1)/>
+            <path class="median-line" d=line(|x| x.2)/>
+            <path class="atp-line" d=line(|x| x.3)/>
+        }
+        .into_any()
     };
     let handles = move || {
-        let Some(x) = input.get() else {
+        if !one_axis.get() {
+            return ().into_any();
+        }
+        let Some(doc) = part.get() else {
             return ().into_any();
         };
-        let (lo, hi) = (x.low, x.high);
-        x.terms
+        let (Some(axes), Some(d)) = (doc.axes, doc.dist) else {
+            return ().into_any();
+        };
+        let points = axes[0].points.clone();
+        d.params
             .iter()
             .enumerate()
-            .flat_map(|(k, t)| {
-                let id = t.id;
-                t.shape
-                    .handles()
-                    .into_iter()
+            .filter(|(_, prm)| prm.name != "sd")
+            .flat_map(|(j, prm)| {
+                let cls = format!("handle-dot p-{}", prm.name);
+                let name = prm.name.clone();
+                points
+                    .iter()
+                    .zip(prm.values.clone())
                     .enumerate()
-                    .map(move |(j, (v, d))| {
-                        let active = move || dragging.get() == Some((id, j));
-                        let title = num(v);
+                    .map(move |(k, (x, v))| {
+                        let active = move || dragging.get() == Some((j, k));
+                        let title = format!("{name} at {}: {}", num(*x), num(v));
                         view! {
-                            <circle class=format!("handle-dot s{}", k % 8) class:active=active
-                                cx=sx(v.clamp(lo, hi)) cy=sy(d) r="6" data-handle=format!("{id}:{j}")>
+                            <circle class=cls.clone() class:active=active cx=sx(*x) cy=sy(v) r="6" data-handle=format!("{j}:{k}")>
                                 <title>{title}</title>
                             </circle>
                         }
@@ -1213,30 +1298,51 @@ fn MembershipChart(q: u64, b: u64, i: u64, input: Memo<Option<InputDoc>>) -> imp
             .collect_view()
             .into_any()
     };
-    let axis = move || {
-        let (lo, hi) = range();
-        ticks(lo, hi, 6)
+    let grid_view = move || {
+        let (xlo, xhi) = x_range.get().unwrap_or((0.0, 1.0));
+        let (ylo, yhi) = y_range.get();
+        let xt = ticks(xlo, xhi, 6)
             .into_iter()
             .map(|t| {
-                let x = sx(t);
                 view! {
-                    <line class="grid-line" x1=x x2=x y1=CTOP y2=CBOT/>
-                    <text class="tick-label" x=x y=CBOT + 16.0 text-anchor="middle">{num(t)}</text>
+                    <line class="grid-line" x1=sx(t) x2=sx(t) y1=CTOP y2=CBOT/>
+                    <text class="tick-label" x=sx(t) y=CBOT + 15.0 text-anchor="middle">{num(t)}</text>
                 }
             })
-            .collect_view()
+            .collect_view();
+        let yt = ticks(ylo, yhi, 5)
+            .into_iter()
+            .map(|t| {
+                view! {
+                    <line class="grid-line" x1="0" x2=CW y1=sy(t) y2=sy(t)/>
+                    <text class="tick-label" x="-6" y=sy(t) + 4.0 text-anchor="end">{num(t)}</text>
+                }
+            })
+            .collect_view();
+        view! { {xt}{yt} }
+    };
+    let marker = move || {
+        let name = input.get()?;
+        let v = ctx.tested_value(&qname.get(), &name);
+        let x = sx(v);
+        Some(view! {
+            <g class="probe">
+                <line x1=x x2=x y1=CTOP y2=CBOT/>
+                <text x=x + 4.0 y=CTOP + 10.0>{num(v)}</text>
+            </g>
+        })
     };
     // The ODD's buckets, where the binding and the manifest say which
     // attribute sets this input: what each label writes into it.
     let bands = Memo::new(move |_| {
-        let n = name();
+        let n = input.get()?;
         let link = crate::binding_app::bctx().link_of_input(&n)?;
         let spans = link.spans();
-        (!spans.is_empty()).then_some((link.attribute, spans))
+        (!spans.is_empty()).then_some(spans)
     });
     let band_view = move || {
-        let (_, spans) = bands.get()?;
-        let (lo, hi) = range();
+        let spans = bands.get()?;
+        let (lo, hi) = x_range.get()?;
         let y = CBOT + 26.0;
         let placed: Vec<(String, f64, f64)> = spans
             .into_iter()
@@ -1245,8 +1351,6 @@ fn MembershipChart(q: u64, b: u64, i: u64, input: Memo<Option<InputDoc>>) -> imp
                 (label, x0, (sx(b.clamp(lo, hi)) - x0).max(3.0))
             })
             .collect();
-        // The bands first, then their labels over them: a label too long
-        // for its band sits beside it, over the next.
         let rects = placed
             .iter()
             .enumerate()
@@ -1266,21 +1370,11 @@ fn MembershipChart(q: u64, b: u64, i: u64, input: Memo<Option<InputDoc>>) -> imp
             .collect_view();
         Some(view! { <g class="bands">{rects}{labels}</g> })
     };
-    let marker = move || {
-        let v = tested()?;
-        let x = sx(v);
-        Some(view! {
-            <g class="probe">
-                <line x1=x x2=x y1=CTOP - 2.0 y2=CBOT/>
-                <text x=x + 4.0 y=CBOT - 4.0>{num(v)}</text>
-            </g>
-        })
-    };
     view! {
         <svg
             node_ref=svg_ref
             class="membership"
-            viewBox=move || format!("-20 0 {} {}", CW + 40.0, if bands.with(Option::is_some) { 182.0 } else { 154.0 })
+            viewBox=format!("-50 0 {} {}", CW + 70.0, CBOT + 50.0)
             preserveAspectRatio="xMidYMid meet"
             on:pointerdown=pointer_down
             on:pointermove=pointer_move
@@ -1288,318 +1382,140 @@ fn MembershipChart(q: u64, b: u64, i: u64, input: Memo<Option<InputDoc>>) -> imp
             on:pointercancel=pointer_up
         >
             <rect class="plot-bg" x="0" y=CTOP width=CW height=CBOT - CTOP/>
-            {axis}
+            {grid_view}
             {band_view}
-            {curves}
+            {band}
             {marker}
             {handles}
         </svg>
-    }
-}
-
-#[component]
-fn RulesCard(q: u64, b: u64) -> impl IntoView {
-    let ctx = rctx();
-    let base = Memo::new(move |_| ctx.doc.with(|d| d.base(q, b).cloned()));
-    // The inputs the rules may name: the file's, else those it extends.
-    let inputs = Memo::new(move |_| {
-        let own = base.with(|x| x.as_ref().and_then(|x| x.inputs.clone()));
-        let list: Vec<(String, Vec<String>)> = match own {
-            Some(is) => is
-                .iter()
-                .map(|i| {
-                    (
-                        i.name.clone(),
-                        i.terms.iter().map(|t| t.name.clone()).collect(),
-                    )
-                })
-                .collect(),
-            None => ctx
-                .read_base(q, b)
-                .map(|r| {
-                    r.inputs
-                        .iter()
-                        .map(|i| (i.name.clone(), i.terms.keys().cloned().collect()))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        };
-        list
-    });
-    let outputs = Memo::new(move |_| {
-        base.with(|x| x.as_ref().map(|x| x.outputs.clone()).unwrap_or_default())
-    });
-    let rule_ids = Memo::new(move |_| {
-        base.with(|x| {
-            x.as_ref()
-                .and_then(|x| x.rules.as_ref())
-                .map(|rs| rs.iter().map(|r| r.id).collect::<Vec<_>>())
-        })
-    });
-    let firing = Memo::new(move |_| ctx.firing(q, b));
-    let add_rule = move |_| {
-        let first = inputs.with(|is| {
-            is.first()
-                .and_then(|(n, ts)| ts.first().map(|t| (n.clone(), t.clone())))
-        });
-        ctx.base_update(q, b, |x| {
-            let n = x.outputs.len();
-            x.rules.get_or_insert_with(Vec::new).push(RuleDoc {
-                id: fresh_id(),
-                when: first.map(|c| when_of(&[c])).unwrap_or_default(),
-                then: vec![Some(0.0); n],
-            });
-        })
-    };
-    let add_each = move |_| {
-        let Some((input, terms)) = inputs.with(|is| is.first().cloned()) else {
-            return;
-        };
-        ctx.base_update(q, b, |x| {
-            let n = x.outputs.len();
-            let rules = x.rules.get_or_insert_with(Vec::new);
-            for t in terms {
-                let c = vec![(input.clone(), t)];
-                if !rules.iter().any(|r| clauses(&r.when).as_ref() == Some(&c)) {
-                    rules.push(RuleDoc {
-                        id: fresh_id(),
-                        when: when_of(&c),
-                        then: vec![Some(0.0); n],
-                    });
-                }
-            }
-        })
-    };
-    let add_output = move |_| {
-        ctx.base_update(q, b, |x| {
-            let o = unique("output", &x.outputs);
-            x.outputs.push(o);
-            for r in x.rules.iter_mut().flatten() {
-                r.then.push(Some(0.0));
-            }
-        })
-    };
-    let take_rules = move |_| {
-        if let Some(read) = ctx.read_base(q, b) {
-            let outputs = read.outputs.clone();
-            let rules: Vec<RuleDoc> = read
-                .rules
-                .iter()
-                .map(|r| RuleDoc {
-                    id: fresh_id(),
-                    when: r.antecedent.clone(),
-                    then: outputs.iter().map(|o| r.then.get(o).copied()).collect(),
-                })
-                .collect();
-            ctx.base_update(q, b, |x| {
-                x.outputs = outputs;
-                x.rules = Some(rules);
-            });
-        }
-    };
-    view! {
-        <div class="card">
-            {move || match rule_ids.get() {
-                None => view! {
-                    <p class="hint">"This file does not name the rules: the file it extends gives them."</p>
-                    <button class="button subtle" on:click=take_rules><Icon name="plus"/>"Write them here to change them"</button>
-                }.into_any(),
-                Some(_) => view! {
-                    <p class="hint">"A rule fires as strongly as its antecedent holds; each output is the rules' values averaged by how strongly each fires. Pick one term per input (blank: any), or write the antecedent with " <code>"AND"</code> ", " <code>"OR"</code> ", " <code>"NOT"</code> "."</p>
-                    <div class="table-scroll">
-                        <table class="rules-table">
-                            <thead>
-                                <tr>
-                                    <th>"#"</th>
-                                    {move || inputs.get().into_iter().map(|(n, _)| view! { <th>{shown(&n)}</th> }).collect_view()}
-                                    {move || outputs.get().into_iter().enumerate().map(|(k, o)| view! { <OutputHead q=q b=b k=k name=o/> }).collect_view()}
-                                    <th><button class="mini" title="Add an output" on:click=add_output><Icon name="plus"/></button></th>
-                                    <th>"Fires"</th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <For
-                                    each=move || rule_ids.get().unwrap_or_default()
-                                    key=|id| *id
-                                    children=move |r| view! { <RuleRow q=q b=b r=r inputs=inputs firing=firing/> }
-                                />
-                            </tbody>
-                        </table>
-                    </div>
-                    <div class="actions">
-                        <button class="button subtle" on:click=add_rule><Icon name="plus"/>"Add a rule"</button>
-                        <Show when=move || inputs.with(|i| i.len() == 1)>
-                            <button class="button subtle" on:click=add_each><Icon name="sparkle"/>"A rule per term"</button>
-                        </Show>
-                    </div>
-                }.into_any(),
-            }}
+        <div class="legend-line">
+            <span><i class="key band-key"></i>"low – high"</span>
+            <span><i class="key median-key"></i>"median"</span>
+            <span><i class="key atp-key"></i>{move || format!("at the tested quantile ({})", num(ctx.p.get()))}</span>
+            <span class="hint">{move || if one_axis.get() {
+                "Drag a point's value up or down; click the chart to test an input value."
+            } else {
+                "Over its first input, the others held at the tested values."
+            }}</span>
         </div>
     }
 }
 
+/// What each of the ODD's buckets gives through this part, where the
+/// binding and the manifest say which attribute sets its first input.
 #[component]
-fn OutputHead(q: u64, b: u64, k: usize, name: String) -> impl IntoView {
-    let ctx = rctx();
-    let rename = move |ev: leptos::ev::Event| {
-        let n = event_target_value(&ev).trim().to_string();
-        if !n.is_empty() {
-            ctx.base_update(q, b, |x| {
-                if let Some(o) = x.outputs.get_mut(k) {
-                    *o = n;
-                }
-            });
+fn BucketNote(part: Memo<Option<PartDoc>>) -> impl IntoView {
+    move || {
+        let core = part.with(|x| x.as_ref().and_then(PartDoc::core))?;
+        let input = core.axes.first()?.input.clone();
+        let link = crate::binding_app::bctx().link_of_input(&input)?;
+        let spans = link.spans();
+        if spans.is_empty() {
+            return None;
         }
-    };
-    let remove = move |_| {
-        ctx.base_update(q, b, |x| {
-            if k < x.outputs.len() {
-                x.outputs.remove(k);
-                for r in x.rules.iter_mut().flatten() {
-                    if k < r.then.len() {
-                        r.then.remove(k);
+        let held: Vec<f64> = core
+            .axes
+            .iter()
+            .map(|a| (a.points[0] + a.points[a.points.len() - 1]) / 2.0)
+            .collect();
+        let rows = crate::binding::bucket_ranges(&spans, &core, &input, &held);
+        let key = link.knob.map(|k| k.key).unwrap_or_default();
+        Some(view! {
+            <div class="alignment">
+                <span class="hint">{format!("{} sets {input} through {key}; each bucket gives:", link.attribute)}</span>
+                {rows.into_iter().map(|(label, a, b, lo, hi)| {
+                    let span = if a == b { num(a) } else { format!("{}–{}", num(a), num(b)) };
+                    view! {
+                        <span class="pair"><b>{label}</b>{format!(" ({span}) → {} – {}", short(lo), short(hi))}</span>
                     }
-                }
-            }
+                }).collect_view()}
+            </div>
         })
-    };
-    view! {
-        <th class="output-head">
-            <input class="output-name" prop:value=name on:change=rename aria-label="Output name"/>
-            <button class="mini danger" title="Remove the output" on:click=remove><Icon name="x"/></button>
-        </th>
     }
 }
 
+fn doc_size(axes: &[AxisDoc]) -> usize {
+    axes.iter().map(|a| a.points.len()).product()
+}
+
+/// The values written at each point: one row per point for a part over one
+/// input, a grid per parameter over two.
 #[component]
-fn RuleRow(
-    q: u64,
-    b: u64,
-    r: u64,
-    inputs: Memo<Vec<(String, Vec<String>)>>,
-    firing: Memo<Option<Vec<f64>>>,
-) -> impl IntoView {
+fn ValuesTable(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
     let ctx = rctx();
-    let rule = Memo::new(move |_| {
-        ctx.doc.with(|d| {
-            d.base(q, b)?
-                .rules
-                .as_ref()?
-                .iter()
-                .find(|x| x.id == r)
-                .cloned()
-        })
-    });
-    let index = Memo::new(move |_| {
-        ctx.doc.with(|d| {
-            d.base(q, b)
-                .and_then(|x| x.rules.as_ref())
-                .and_then(|rs| rs.iter().position(|x| x.id == r))
-                .unwrap_or(0)
-        })
-    });
-    let as_text = RwSignal::new(false);
-    // The rule's clauses, when term pickers show them.
-    let picked = Memo::new(move |_| {
-        let when = rule.with(|x| x.as_ref().map(|x| x.when.clone()).unwrap_or_default());
-        let cs = clauses(&when)?;
-        inputs.with(|is| {
-            cs.iter()
-                .all(|(i, t)| is.iter().any(|(n, ts)| n == i && ts.contains(t)))
-                .then_some(cs)
-        })
-    });
-    let pick = move |input: String, term: String| {
-        let order: Vec<String> = inputs.with(|is| is.iter().map(|(n, _)| n.clone()).collect());
-        let mut cs = picked.get_untracked().unwrap_or_default();
-        cs.retain(|(i, _)| *i != input);
-        if !term.is_empty() {
-            cs.push((input, term));
-        }
-        cs.sort_by_key(|(i, _)| order.iter().position(|o| o == i));
-        let when = when_of(&cs);
-        ctx.rule_update(q, b, r, |x| x.when = when);
-    };
-    let set_when = move |ev: leptos::ev::Event| {
-        let w = event_target_value(&ev);
-        ctx.rule_update(q, b, r, |x| x.when = w);
-    };
-    let remove = move |_| {
-        ctx.base_update(q, b, |x| {
-            if let Some(rs) = &mut x.rules {
-                rs.retain(|y| y.id != r)
+    let set = move |j: usize, k: usize, v: f64| {
+        ctx.part_update(q, p, |x| {
+            if let Some(d) = &mut x.dist {
+                d.params[j].values[k] = v;
+                d.params[j].constant = false;
             }
         })
     };
-    let fires = move || firing.with(|f| f.as_ref().and_then(|f| f.get(index.get()).copied()));
-    let condition = move || {
-        let n = inputs.with(Vec::len).max(1);
-        match (picked.get(), as_text.get()) {
-            (Some(cs), false) => inputs
-                .get()
-                .into_iter()
-                .map(|(name, terms)| {
-                    let chosen = cs.iter().find(|(i, _)| *i == name).map(|(_, t)| t.clone()).unwrap_or_default();
-                    let n2 = name.clone();
-                    view! {
-                        <td>
-                            <select class="term-pick" class:any=chosen.is_empty() prop:value=chosen.clone()
-                                on:change=move |ev| pick(n2.clone(), event_target_value(&ev))>
-                                <option value="">"—"</option>
-                                {terms.into_iter().map(|t| view! { <option value=t.clone()>{t.clone()}</option> }).collect_view()}
-                            </select>
-                        </td>
-                    }
-                })
-                .collect_view()
-                .into_any(),
-            _ => view! {
-                <td colspan=n.to_string()>
-                    <input class="when mono" prop:value=move || rule.with(|x| x.as_ref().map(|x| x.when.clone()).unwrap_or_default()) on:change=set_when aria-label="Antecedent"/>
-                </td>
+    let cell = move |j: usize, k: usize, v: f64| {
+        view! {
+            <td class="num"><input class="value" inputmode="decimal" prop:value=num(v)
+                on:change=move |ev| if let Some(v) = parse_num(&event_target_value(&ev)) { set(j, k, v) }/></td>
+        }
+    };
+    move || {
+        let Some(doc) = part.get() else {
+            return ().into_any();
+        };
+        let (Some(axes), Some(d)) = (doc.axes, doc.dist) else {
+            return ().into_any();
+        };
+        if d.params.iter().any(|x| x.values.len() != doc_size(&axes)) {
+            return view! { <p class="hint">"The values do not match the points: edit them in the YAML."</p> }.into_any();
+        }
+        match axes.len() {
+            0 => view! {
+                <table class="rules-table"><tbody><tr>
+                    {d.params.iter().enumerate().map(|(j, prm)| view! { <th>{prm.name.clone()}</th>{cell(j, 0, prm.values[0])} }).collect_view()}
+                </tr></tbody></table>
             }
             .into_any(),
-        }
-    };
-    let values = move || {
-        let then = rule.with(|x| x.as_ref().map(|x| x.then.clone()).unwrap_or_default());
-        then.into_iter()
-            .enumerate()
-            .map(|(k, v)| {
+            1 => {
+                let a = &axes[0];
                 view! {
-                    <td class="num">
-                        <input class="value" inputmode="decimal" placeholder="—" prop:value=v.map(num).unwrap_or_default()
-                            on:change=move |ev| {
-                                let v = parse_num(&event_target_value(&ev));
-                                ctx.rule_update(q, b, r, |x| {
-                                    if let Some(slot) = x.then.get_mut(k) {
-                                        *slot = v;
-                                    }
-                                });
-                            }/>
-                    </td>
+                    <div class="table-scroll">
+                        <table class="rules-table">
+                            <thead><tr><th>{shown(&a.input)}</th>{d.params.iter().map(|prm| view! { <th class="num">{prm.name.clone()}</th> }).collect_view()}</tr></thead>
+                            <tbody>
+                                {a.points.iter().enumerate().map(|(k, x)| view! {
+                                    <tr><td class="mono">{num(*x)}</td>{d.params.iter().enumerate().map(|(j, prm)| cell(j, k, prm.values[k])).collect_view()}</tr>
+                                }).collect_view()}
+                            </tbody>
+                        </table>
+                    </div>
                 }
-            })
-            .collect_view()
-    };
-    view! {
-        <tr class:firing=move || fires().is_some_and(|f| f > 0.0)>
-            <td class="hint">{move || index.get() + 1}</td>
-            {condition}
-            {values}
-            <td>
-                <button class="mini" title=move || if as_text.get() { "Show as term pickers" } else { "Edit as text" }
-                    on:click=move |_| as_text.update(|t| *t = !*t)><Icon name="code"/></button>
-            </td>
-            <td class="fires">
-                {move || fires().map(|f| view! {
-                    <span class="bar"><span style=format!("width: {:.0}%", f * 100.0)></span></span>
-                    <span class="mono">{format!("{f:.2}")}</span>
-                })}
-            </td>
-            <td><button class="mini danger" title="Remove the rule" on:click=remove><Icon name="x"/></button></td>
-        </tr>
+                .into_any()
+            }
+            2 => {
+                let (a, b) = (&axes[0], &axes[1]);
+                let nb = b.points.len();
+                d.params
+                    .iter()
+                    .enumerate()
+                    .map(|(j, prm)| {
+                        view! {
+                            <h3>{format!("{} by {} (rows) and {} (columns)", prm.name, shown(&a.input), shown(&b.input))}</h3>
+                            <div class="table-scroll">
+                                <table class="rules-table">
+                                    <thead><tr><th></th>{b.points.iter().map(|y| view! { <th class="num mono">{num(*y)}</th> }).collect_view()}</tr></thead>
+                                    <tbody>
+                                        {a.points.iter().enumerate().map(|(r, x)| view! {
+                                            <tr><td class="mono">{num(*x)}</td>{(0..nb).map(|c| cell(j, r * nb + c, prm.values[r * nb + c])).collect_view()}</tr>
+                                        }).collect_view()}
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                    })
+                    .collect_view()
+                    .into_any()
+            }
+            _ => view! { <p class="hint">"A part over more than two inputs is edited in the YAML."</p> }.into_any(),
+        }
     }
 }
 
@@ -1656,23 +1572,20 @@ fn TestTab() -> impl IntoView {
             return vec![];
         };
         ctx.good.with(|g| {
-            let Some(q) = g.as_ref().and_then(|s| s.quantities.get(&qn)) else {
+            let Some(set) = g.as_ref() else {
                 return vec![];
             };
-            let mut out: Vec<(String, f64, f64, f64)> = vec![];
-            for b in &q.rule_bases {
-                for i in &b.inputs {
-                    if !out.iter().any(|(n, ..)| *n == i.name) {
-                        out.push((
-                            i.name.clone(),
-                            i.low,
-                            i.high,
-                            i.default.unwrap_or((i.low + i.high) / 2.0),
-                        ));
-                    }
-                }
-            }
-            out
+            let Some(q) = set.quantities.get(&qn) else {
+                return vec![];
+            };
+            q.inputs()
+                .into_iter()
+                .filter_map(|n| {
+                    let (lo, hi) = rules_doc::input_range(set, &qn, &n)?;
+                    let pad = (hi - lo) * 0.1;
+                    Some((n, lo - pad, hi + pad))
+                })
+                .collect::<Vec<_>>()
         })
     });
     let x = Memo::new(move |_| {
@@ -1682,21 +1595,6 @@ fn TestTab() -> impl IntoView {
             .filter(|x| all.iter().any(|(n, ..)| n == x))
             .or_else(|| all.first().map(|i| i.0.clone()))
     });
-    let result = Memo::new(move |_| {
-        let qn = quantity.get()?;
-        let probe = ctx.probe.get();
-        ctx.good.with(|g| {
-            let set = g.as_ref()?;
-            let q = set.quantities.get(&qn)?;
-            let values = rules_doc::values_at(set, &qn, &probe);
-            Some((
-                q.combine,
-                q.outputs.clone(),
-                q.evaluate_each(&values).map_err(|e| e.to_string()),
-                q.evaluate(&values).map_err(|e| e.to_string()),
-            ))
-        })
-    });
     view! {
         <div class="field">
             <span>"Quantity"</span>
@@ -1705,10 +1603,10 @@ fn TestTab() -> impl IntoView {
             </select>
         </div>
         <h3>"Inputs"</h3>
-        {move || inputs.get().into_iter().map(|(n, lo, hi, dflt)| {
+        {move || inputs.get().into_iter().map(|(n, lo, hi)| {
             let n1 = n.clone();
             let n2 = n.clone();
-            let value = Signal::derive(move || ctx.probe_value(&n1).unwrap_or(dflt));
+            let value = Signal::derive(move || ctx.tested_value(&quantity.get().unwrap_or_default(), &n1));
             let step = 10f64.powf(((hi - lo) / 200.0).log10().floor());
             view! {
                 <div class="test-row">
@@ -1722,29 +1620,20 @@ fn TestTab() -> impl IntoView {
                 </div>
             }
         }).collect_view()}
-        <h3>"Outputs"</h3>
-        {move || match result.get() {
-            None => view! { <p class="hint">"No rules that read yet."</p> }.into_any(),
-            Some((combine, outputs, each, joined)) => match (each, joined) {
-                (Ok(each), Ok(joined)) => view! {
-                    <table class="rules-table compact">
-                        <thead><tr><th></th>{outputs.iter().map(|o| view! { <th class="num">{o.clone()}</th> }).collect_view()}</tr></thead>
-                        <tbody>
-                            {each.into_iter().map(|(bn, out)| view! {
-                                <tr><td>{bn}</td>{outputs.iter().map(|o| {
-                                    let v = out.get(o).copied().unwrap_or(f64::NAN);
-                                    let wins = joined.get(o).is_some_and(|j| (*j - v).abs() < 1e-12);
-                                    view! { <td class="num" class:wins=wins>{num(v)}</td> }
-                                }).collect_view()}</tr>
-                            }).collect_view()}
-                            <tr class="total"><td>{format!("{} →", if combine == openodd::rules::Combine::Max { "max" } else { "min" })}</td>
-                                {outputs.iter().map(|o| view! { <td class="num">{num(joined.get(o).copied().unwrap_or(f64::NAN))}</td> }).collect_view()}
-                            </tr>
-                        </tbody>
-                    </table>
-                }.into_any(),
-                (Err(e), _) | (_, Err(e)) => view! { <div class="error">{e}</div> }.into_any(),
-            },
+        <div class="test-row">
+            <div class="line"><span class="mono">"quantile p"</span><span class="spacer"></span><span class="mono">{move || num(ctx.p.get())}</span></div>
+            <input type="range" min="0" max="1" step="0.01" prop:value=move || ctx.p.get().to_string()
+                on:input=move |ev| if let Some(v) = parse_num(&event_target_value(&ev)) { ctx.p.set(v) }/>
+        </div>
+        <h3>"Values"</h3>
+        {move || {
+            let Some(qn) = quantity.get() else {
+                return view! { <p class="hint">"No rules that read yet."</p> }.into_any();
+            };
+            match ctx.joined(&qn) {
+                Some(j) => summary_table(&qn, &j, ctx.p.get(), None),
+                None => view! { <p class="hint">"No rules that read yet."</p> }.into_any(),
+            }
         }}
         <h3>"Response"</h3>
         <div class="field">
@@ -1757,70 +1646,73 @@ fn TestTab() -> impl IntoView {
     }
 }
 
-/// A quantity's outputs as one input moves across its universe: the
-/// combined output solid, each rule base's dashed.
+/// What the response chart draws: the input's range, the tested value, the
+/// samples, the quantity's (low, at p, high) at each, and each part's value
+/// at p.
+type Response = (
+    f64,
+    f64,
+    f64,
+    Vec<f64>,
+    Vec<(f64, f64, f64)>,
+    Vec<(String, Vec<f64>)>,
+);
+
+/// A quantity's range and its value at the tested quantile as one input
+/// moves, each part's value at the quantile dashed.
 #[component]
 fn ResponseChart(quantity: Memo<Option<String>>, x: Memo<Option<String>>) -> impl IntoView {
     let ctx = rctx();
-    let data = Memo::new(move |_| {
+    let data = Memo::new(move |_| -> Option<Response> {
         let qn = quantity.get()?;
         let xn = x.get()?;
         let probe = ctx.probe.get();
+        let pq = ctx.p.get();
         ctx.good.with(|g| {
             let set = g.as_ref()?;
-            let q = set.quantities.get(&qn)?;
-            let input = q
-                .rule_bases
-                .iter()
-                .flat_map(|b| &b.inputs)
-                .find(|i| i.name == xn)?;
-            let (lo, hi) = (input.low, input.high);
+            let (lo, hi) = rules_doc::input_range(set, &qn, &xn)?;
+            let pad = (hi - lo) * 0.1;
+            let (lo, hi) = (lo - pad, hi + pad);
             let base: IndexMap<String, f64> = rules_doc::values_at(set, &qn, &probe);
             let at = base.get(&xn).copied().unwrap_or((lo + hi) / 2.0);
             let n = 80;
             let mut xs = vec![];
-            let mut joined: Vec<IndexMap<String, f64>> = vec![];
-            let mut each: Vec<Vec<(String, IndexMap<String, f64>)>> = vec![];
+            let mut joined = vec![];
+            let mut parts: Vec<(String, Vec<f64>)> = vec![];
             for k in 0..=n {
                 let v = lo + (hi - lo) * k as f64 / n as f64;
                 let mut values = base.clone();
                 values.insert(xn.clone(), v);
-                let (Ok(j), Ok(e)) = (q.evaluate(&values), q.evaluate_each(&values)) else {
+                let Ok(j) = set.joined(&qn, &values) else {
                     continue;
                 };
                 xs.push(v);
-                joined.push(j);
-                each.push(e);
+                let (l, h) = j.support();
+                joined.push((l, j.quantile(pq), h));
+                if parts.is_empty() {
+                    parts = j.parts.iter().map(|(n, _)| (n.clone(), vec![])).collect();
+                }
+                for ((_, d), (_, ys)) in j.parts.iter().zip(parts.iter_mut()) {
+                    ys.push(d.quantile(pq));
+                }
             }
-            Some((
-                q.outputs.clone(),
-                lo,
-                hi,
-                at,
-                xs,
-                joined,
-                each,
-                q.rule_bases.len(),
-            ))
+            Some((lo, hi, at, xs, joined, parts))
         })
     });
     move || {
-        let Some((outputs, lo, hi, at, xs, joined, each, bases)) = data.get() else {
+        let Some((lo, hi, at, xs, joined, parts)) = data.get() else {
             return view! { <p class="hint">"Nothing to draw."</p> }.into_any();
         };
         if xs.is_empty() {
-            return view! { <p class="hint">"No rule fires along this input."</p> }.into_any();
+            return view! { <p class="hint">"Nothing to draw."</p> }.into_any();
         }
         let (w, h, top, bot) = (320.0, 190.0, 10.0, 160.0);
-        let mut ymin = f64::INFINITY;
-        let mut ymax = f64::NEG_INFINITY;
-        for j in joined
-            .iter()
-            .chain(each.iter().flat_map(|e| e.iter().map(|(_, o)| o)))
-        {
-            for v in j.values() {
-                ymin = ymin.min(*v);
-                ymax = ymax.max(*v);
+        let mut ymin = joined.iter().map(|x| x.0).fold(f64::INFINITY, f64::min);
+        let mut ymax = joined.iter().map(|x| x.2).fold(f64::NEG_INFINITY, f64::max);
+        for (_, ys) in &parts {
+            for y in ys {
+                ymin = ymin.min(*y);
+                ymax = ymax.max(*y);
             }
         }
         if ymax.partial_cmp(&ymin) != Some(std::cmp::Ordering::Greater) {
@@ -1829,13 +1721,7 @@ fn ResponseChart(quantity: Memo<Option<String>>, x: Memo<Option<String>>) -> imp
         }
         let pad = (ymax - ymin) * 0.06;
         let (ymin, ymax) = (ymin - pad, ymax + pad);
-        let sx = move |v: f64| {
-            if hi > lo {
-                (v - lo) / (hi - lo) * w
-            } else {
-                0.0
-            }
-        };
+        let sx = move |v: f64| (v - lo) / (hi - lo) * w;
         let sy = move |v: f64| bot - (v - ymin) / (ymax - ymin) * (bot - top);
         let path = |ys: Vec<f64>| {
             xs.iter()
@@ -1851,22 +1737,28 @@ fn ResponseChart(quantity: Memo<Option<String>>, x: Memo<Option<String>>) -> imp
                 })
                 .collect::<String>()
         };
-        let mut lines = vec![];
-        if bases > 1 {
-            for bi in 0..bases {
-                for (k, o) in outputs.iter().enumerate() {
-                    let ys: Vec<f64> = each.iter().map(|e| e[bi].1[o]).collect();
-                    lines.push(
-                        view! { <path class=format!("resp base o{}", k % 4) d=path(ys)/> }
-                            .into_any(),
-                    );
-                }
-            }
-        }
-        for (k, o) in outputs.iter().enumerate() {
-            let ys: Vec<f64> = joined.iter().map(|j| j[o]).collect();
-            lines.push(view! { <path class=format!("resp o{}", k % 4) d=path(ys)/> }.into_any());
-        }
+        let top_edge: Vec<String> = xs
+            .iter()
+            .zip(&joined)
+            .map(|(x, j)| format!("{:.1},{:.1}", sx(*x), sy(j.2)))
+            .collect();
+        let bottom_edge: Vec<String> = xs
+            .iter()
+            .zip(&joined)
+            .rev()
+            .map(|(x, j)| format!("{:.1},{:.1}", sx(*x), sy(j.0)))
+            .collect();
+        let multi = parts.len() > 1;
+        let part_lines = if multi {
+            parts
+                .iter()
+                .enumerate()
+                .map(|(k, (_, ys))| view! { <path class=format!("resp base o{}", k % 4) d=path(ys.clone())/> })
+                .collect_view()
+                .into_any()
+        } else {
+            ().into_any()
+        };
         let xticks = ticks(lo, hi, 4);
         let yticks = ticks(ymin, ymax, 4);
         view! {
@@ -1878,12 +1770,15 @@ fn ResponseChart(quantity: Memo<Option<String>>, x: Memo<Option<String>>) -> imp
                 {xticks.into_iter().map(|t| view! {
                     <text class="tick-label" x=sx(t) y=bot + 16.0 text-anchor="middle">{num(t)}</text>
                 }).collect_view()}
-                {lines}
+                <path class="band-area" d=format!("M{} L{} Z", top_edge.join(" L"), bottom_edge.join(" L"))/>
+                {part_lines}
+                <path class="atp-line" d=path(joined.iter().map(|j| j.1).collect())/>
                 <line class="probe-line" x1=sx(at) x2=sx(at) y1=top y2=bot/>
             </svg>
             <div class="legend-line">
-                {outputs.iter().enumerate().map(|(k, o)| view! { <span><i class=format!("key o{}", k % 4)></i>{o.clone()}</span> }).collect_view()}
-                {(bases > 1).then(|| view! { <span class="hint">"dashed: each rule base"</span> })}
+                <span><i class="key band-key"></i>"low – high"</span>
+                <span><i class="key atp-key"></i>"at the tested quantile"</span>
+                {multi.then(|| view! { <span class="hint">"dashed: each part at the quantile"</span> })}
             </div>
         }
         .into_any()
@@ -1945,19 +1840,29 @@ fn DetailsTab() -> impl IntoView {
             {set.quantities.values().map(|q| view! {
                 <div class="detail">
                     <div class="card-title"><Icon name="func"/>{q.name.clone()}
-                        <span class="tag">{format!("combine {}", if q.combine == openodd::rules::Combine::Max { "max" } else { "min" })}</span>
+                        <span class="tag">{format!("combine {}", q.combine.name())}</span>
                     </div>
-                    <div class="hint">{format!("outputs: {}", q.outputs.join(", "))}</div>
                     <ul>
-                        {q.rule_bases.iter().map(|b| view! {
-                            <li><span class="mono">{b.name.clone()}</span>": "
-                                {b.inputs.iter().map(|i| format!("{} [{}, {}] ({})", i.name, num(i.low), num(i.high), i.terms.keys().cloned().collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join("; ")}
-                                {format!(" · {} rules", b.rules.len())}
-                            </li>
+                        {q.parts.iter().map(|p| {
+                            let over = p
+                                .axes
+                                .iter()
+                                .map(|a| format!("{} [{}]", a.input, a.points.iter().map(|v| num(*v)).collect::<Vec<_>>().join(", ")))
+                                .collect::<Vec<_>>()
+                                .join(" × ");
+                            view! {
+                                <li><span class="mono">{p.name.clone()}</span>": "
+                                    {format!("{} over {over} ({} points)", p.family.name(), p.size())}
+                                </li>
+                            }
                         }).collect_view()}
                     </ul>
                 </div>
             }).collect_view()}
+            {(!set.inputs.is_empty()).then(|| view! {
+                <h3>"Inputs"</h3>
+                <ul>{set.inputs.values().map(|i| view! { <li class="mono">{format!("{} default {}", i.name, i.default.map(num).unwrap_or_else(|| "none".into()))}</li> }).collect_view()}</ul>
+            })}
             <h3>"Files read"</h3>
             <ul>{set.files.iter().map(|f| view! { <li class="mono">{format!("{} {}", &f.sha256[..12], f.label)}</li> }).collect_view()}</ul>
         }.into_any(),
