@@ -160,11 +160,42 @@ YAML back. The draft is kept in the browser apart from the ODD editor's.
 The model is `rules_doc.rs` (the rule file read and written, tested natively)
 and the interface `rules_app.rs`.
 
+## The factor graph
+
+The **Graph** switch (or `#graph`) shows the same rules as a factor graph:
+the **variables** -- the inputs the backend gives (outlined) and the
+quantities the rules derive (filled) -- and the **factors** between them
+(squares), each a part: the distribution of its quantity given the variables
+it reads. A part may read a quantity ([chains](rules.md#chains)): that link
+is dashed, and the graph runs left to right, each quantity after those it
+reads. Each variable shows its value at the tested inputs (a quantity at its
+median), each factor its distribution's family.
+
+- **Drag a node** to move it; *Arrange* lays the graph out in layers again.
+  Where each node is is kept in the browser, by name.
+- **Drag from a variable's port** (the dot on its right) onto a factor to make
+  that part read the variable too (a new last input, the distribution the
+  same along it), or onto a quantity to give it a new part reading the
+  variable. A link that would make a quantity read itself, through any chain,
+  is refused, with the chain it would close.
+- **Select** a factor, a quantity or a link to edit it beside the canvas: a
+  factor and a quantity open the rules editor's own form (points, the
+  distribution and its chart, the values); an input its name (renaming it
+  renames every part reading it), default and description, and the factors
+  reading it; a link removes the input from the part (its distribution is the
+  one at the input's first point), or the part when it is its only input.
+  With nothing selected, the panel is the rules editor's test drive.
+
+Renaming a quantity, in either view, renames it in every part that reads it.
+The interface is `graph_app.rs`; the layout (`auto_layout`) puts the inputs in
+the first column, and for each depth of the chain a column of factors and one
+of quantities.
+
 ## Embedding the studio
 
 A page that has an element `id="openodd-studio"` gets the studio mounted in
 it instead of in the body, so a page can wrap the studio with its own text.
-The address picks the editor (`#binding`, `#rules`) when the page loads and
+The address picks the editor (`#binding`, `#rules`, `#graph`) when the page loads and
 whenever it changes, so the page can switch it. The studio's stylesheet sets
 `:root` and `body`; scope it to the element when the page has its own.
 

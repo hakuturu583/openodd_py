@@ -57,7 +57,9 @@
 
   Its **Rules** mode edits a backend's [rule files](docs/rules.md) as forms:
   each part's distribution drawn over its input with draggable points, its
-  values as a table, and each quantity's distribution as the inputs move. Its **Binding** mode edits how each attribute is measured. With
+  values as a table, and each quantity's distribution as the inputs move. Its
+  **Graph** mode edits the same rules as a factor graph: drag a variable onto
+  a factor to make it read the variable, quantities chaining into others. Its **Binding** mode edits how each attribute is measured. With
   a backend's manifest (`Backend.manifest()`), it follows each attribute from
   the ODD through the binding and the backend's knobs to the rules that read
   it. It is written in Rust and Leptos, with no server
@@ -99,7 +101,8 @@ else is this library's.
 - **Derive with rules**: what a run's settings do to the rest of it -- a
   simulator's rain to the road's grip -- a backend may write as conditional
   distributions in YAML (`Rules`, evaluated in the Rust core): per quantity, a
-  distribution's parameters at points of its inputs, interpolated between them.
+  distribution's parameters at points of its inputs, interpolated between them;
+  a quantity may read another, so the rules form a graph (`Rules.sample`).
   It holds its own (`Backend.rules`), a run reads another file over them
   (`Backend.use_rules`), `Backend.derived_range("tire_friction", {"water": 70})`
   gives the range and `Backend.derived_at(..., quantile)` the value a run draws

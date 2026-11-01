@@ -662,7 +662,14 @@ impl RulesView {
         let q = self.rules.quantity(quantity).map_err(|e| e.to_string())?;
         let out: Vec<Json> = rules_view::sliders(&self.rules, q)
             .iter()
-            .map(|s| json!({"name": s.name, "universe": [s.low, s.high], "default": s.default}))
+            .map(|s| {
+                json!({
+                    "name": s.name,
+                    "universe": [s.low, s.high],
+                    "default": s.default,
+                    "quantity": self.rules.quantities.contains_key(&s.name),
+                })
+            })
             .collect();
         Ok(Json::Array(out).to_string())
     }
@@ -696,6 +703,23 @@ impl RulesView {
             .joined(quantity, &Self::inputs_of(inputs)?)
             .map_err(|e| e.to_string())?
             .cdf(x))
+    }
+
+    pub fn order_str(&self) -> String {
+        Json::from(self.rules.order().to_vec()).to_string()
+    }
+
+    pub fn sample_str(&self, inputs: &str, quantiles: &str) -> Result<String, String> {
+        let quantiles = if quantiles.trim().is_empty() {
+            IndexMap::new()
+        } else {
+            Self::inputs_of(quantiles)?
+        };
+        let out = self
+            .rules
+            .sample(&Self::inputs_of(inputs)?, &quantiles)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::to_string(&out).expect("numbers"))
     }
 
     pub fn rules_html_str(&self, query: &str, options: &str) -> Result<String, String> {
@@ -760,8 +784,10 @@ impl RulesView {
         Json::from(self.rules.quantities.keys().cloned().collect::<Vec<_>>()).to_string()
     }
 
-    /// A quantity's inputs: a JSON array of `{name, universe, default}`, the
-    /// universe the outermost points of every part reading it.
+    /// A quantity's inputs: a JSON array of `{name, universe, default,
+    /// quantity}`, the universe the outermost points of every part reading
+    /// it, and `quantity` true for another quantity of the rules (one given
+    /// is taken as observed; one left out is worked out at its median).
     pub fn inputs(&self, quantity: &str) -> Result<String, JsError> {
         self.inputs_str(quantity).map_err(js)
     }
@@ -780,6 +806,23 @@ impl RulesView {
     /// The share of a quantity's distribution at `inputs` at or below `x`.
     pub fn cdf(&self, quantity: &str, inputs_json: &str, x: f64) -> Result<f64, JsError> {
         self.cdf_value(quantity, inputs_json, x).map_err(js)
+    }
+
+    /// The quantities, each after the quantities its parts read: a JSON
+    /// array.
+    pub fn order(&self) -> String {
+        self.order_str()
+    }
+
+    /// Every quantity's value at `inputs`, each at its own quantile in
+    /// `quantiles` (`{quantity: p}`, 0.5 when left out): a JSON object.
+    pub fn sample(
+        &self,
+        inputs_json: &str,
+        quantiles_json: Option<String>,
+    ) -> Result<String, JsError> {
+        self.sample_str(inputs_json, quantiles_json.as_deref().unwrap_or(""))
+            .map_err(js)
     }
 
     /// The component at `query` (`{quantity, inputs, x, p}`), with `options`
