@@ -1,0 +1,14 @@
+# The weather a simulated run is staged in, as the default ODD names it: the
+# attributes a backend's knobs set and its fuzzy rules read.
+TAXONOMY:
+  environment:
+    illumination: [day, low_sun, twilight, night]
+    rain: [none, light, moderate, heavy]
+    fog: [none, light, moderate, heavy]
+    road_wetness: [none, light, moderate, heavy]
+ODD:
+  weather:
+    TITLE: Any weather but heavy fog at night
+    EXCLUDE_AND:
+      fog: heavy
+      illumination: night

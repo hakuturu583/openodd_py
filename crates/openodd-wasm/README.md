@@ -3,8 +3,8 @@
 openodd's coverage view and case plot for the browser (`wasm32-unknown-unknown`,
 wasm-bindgen): a `Viewer` reads coverage documents and renders both views
 client side, the case plot's predicted background included; a `RulesView`
-reads a backend's fuzzy rules and renders their terms, firing rules, outputs
-and response. `js/viewer.js` mounts a view on an element and keeps its axis
+reads a backend's rules (conditional distributions) and renders each part's
+distribution, the quantity's at the inputs chosen, and its response. `js/viewer.js` mounts a view on an element and keeps its axis
 pickers, sliders and cells live. See
 [docs/wasm.md](../../docs/wasm.md) and the demo in
 [examples/wasm-viewer](../../examples/wasm-viewer).

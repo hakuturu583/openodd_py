@@ -1,43 +1,91 @@
-"""Fuzzy rules (src/rules.rs, openodd.rules) and the backend that holds them."""
+"""Rules as conditional distributions (src/rules.rs, openodd.rules) and the
+backend that holds them."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import NormalDist
 
 import pytest
 
 from openodd import Backend, Rules, RulesError
 
-GOLDEN = json.loads((Path(__file__).parent / "rules_golden.json").read_text())
-
-GRIP = GOLDEN["files"]["grip"]
-
-
-@pytest.mark.parametrize("case", GOLDEN["cases"], ids=lambda c: c["file"])
-def test_the_rules_infer_as_simpful_does(case) -> None:
-    rules = Rules.from_text(GOLDEN["files"][case["file"]], case["file"])
-    for point in case["points"]:
-        out = rules.evaluate(case["quantity"], point["inputs"])
-        assert out == pytest.approx(point["outputs"], abs=1e-12), point
+GRIP = """
+version: 2
+quantities:
+  grip:
+    parts:
+      water:
+        at: {water: [0, 50, 100]}
+        uniform:
+          low: [0.90, 0.65, 0.45]
+          high: [1.10, 0.85, 0.65]
+"""
 
 
 class TestRules:
-    def test_a_range_reads_low_and_high(self) -> None:
+    def test_a_range_is_interpolated_between_the_points(self) -> None:
         rules = Rules.from_text(GRIP)
         assert rules.quantities == ["grip"]
         assert rules.inputs("grip") == ["water"]
-        assert rules.outputs("grip") == ["low", "high"]
+        assert rules.combine("grip") == "min"
         assert rules.range("grip", {"water": 25}) == pytest.approx((0.775, 0.975))
+        assert rules.range("grip", {"water": 150}) == pytest.approx((0.45, 0.65))
+        assert rules.evaluate("grip", {"water": 70}) == pytest.approx(
+            {"low": 0.57, "high": 0.77, "median": 0.67, "mean": 0.67}
+        )
+
+    def test_a_run_draws_a_quantile(self) -> None:
+        rules = Rules.from_text(GRIP)
+        assert rules.quantile("grip", {"water": 70}, 0.25) == pytest.approx(0.62)
+        assert rules.quantile("grip", {"water": 70}, 2.0) == pytest.approx(0.77)
+        assert rules.cdf("grip", {"water": 70}, 0.62) == pytest.approx(0.25)
+        assert rules.distributions("grip", {"water": 70}) == [
+            ("water", "uniform", pytest.approx({"low": 0.57, "high": 0.77}))
+        ]
+
+    def test_a_truncated_normal_draws_as_the_standard_library_computes(self) -> None:
+        text = GRIP.replace(
+            "uniform:\n          low: [0.90, 0.65, 0.45]\n          high: [1.10, 0.85, 0.65]",
+            "normal: {mean: [1.0, 0.75, 0.55], sd: 0.05, low: [0.9, 0.65, 0.45], high: [1.1, 0.85, 0.65]}",
+        )
+        rules = Rules.from_text(text)
+        n = NormalDist(0.75, 0.05)
+        lo, hi = n.cdf(0.65), n.cdf(0.85)
+        for p in (0.01, 0.25, 0.5, 0.9):
+            want = n.inv_cdf(lo + p * (hi - lo))
+            assert rules.quantile("grip", {"water": 50}, p) == pytest.approx(want, abs=1e-9)
+
+    def test_parts_move_together_and_the_least_holds(self) -> None:
+        text = """
+version: 2
+quantities:
+  visibility:
+    combine: min
+    parts:
+      fog:
+        at: {fog_density: [0, 100]}
+        uniform: {low: [250, 15], high: [400, 40]}
+      light:
+        at: {sun_altitude_angle: [-6, 0]}
+        uniform: {low: [50, 250], high: [150, 400]}
+"""
+        rules = Rules.from_text(text)
+        night = {"fog_density": 70, "sun_altitude_angle": -20}
+        assert rules.range("visibility", night) == pytest.approx((50, 148))
+        assert rules.quantile("visibility", night, 0.5) == pytest.approx(100)
+        assert rules.quantile("visibility", night, 1.0) == pytest.approx(148)
 
     def test_a_file_names_itself_in_messages(self, tmp_path) -> None:
         path = tmp_path / "grip.yaml"
-        path.write_text(GRIP.replace("(water IS wet)", "(water IS soaked)"))
-        with pytest.raises(RulesError, match=r"grip\.yaml: .*water has no term 'soaked'"):
+        path.write_text(GRIP.replace("low: [0.90, 0.65, 0.45]", "low: [0.90, 0.95, 0.45]"))
+        with pytest.raises(RulesError, match=r"grip\.yaml: .*at water=50.0: low \(0.95\) must not be above high"):
             Rules.read(path)
         with pytest.raises(RulesError, match="cannot read rules"):
             Rules.read(tmp_path / "nowhere.yaml")
+        with pytest.raises(RulesError, match=r"version 1 \(fuzzy rules\) is no longer read"):
+            Rules.from_text(GRIP.replace("version: 2", "version: 1"))
 
     def test_unknown_quantities_and_missing_inputs_are_refused(self) -> None:
         rules = Rules.from_text(GRIP)
@@ -45,11 +93,9 @@ class TestRules:
             rules.evaluate("visibility", {})
         with pytest.raises(RulesError, match="reads water, which was not given"):
             rules.evaluate("grip", {})
-
-    def test_a_quantity_without_low_and_high_has_no_range(self) -> None:
-        rules = Rules.from_text(GOLDEN["files"]["operators"])
-        with pytest.raises(RulesError, match="not low and high"):
-            rules.range("q", {"x": 0, "y": 0})
+        with_default = Rules.from_text(GRIP.replace("quantities:", "inputs:\n  water: {default: 100}\nquantities:"))
+        assert with_default.input_defaults == {"water": 100.0}
+        assert with_default.range("grip", {}) == pytest.approx((0.45, 0.65))
 
     def test_a_later_file_replaces_quantities_by_name(self, tmp_path) -> None:
         over = tmp_path / "over.yaml"
@@ -75,7 +121,10 @@ class TestBackend:
         assert backend.derived_range("grip", {"wetness": 10, "deposits": 50}) == (
             pytest.approx((0.65, 0.85))
         )
-        assert backend.derived("grip", {"water": 0}) == pytest.approx({"low": 0.9, "high": 1.1})
+        assert backend.derived("grip", {"water": 0}) == pytest.approx(
+            {"low": 0.9, "high": 1.1, "median": 1.0, "mean": 1.0}
+        )
+        assert backend.derived_at("grip", {"wetness": 70}, 0.5) == pytest.approx(0.67)
 
     def test_a_run_reads_other_rules_over_the_backends_and_goes_back(self, tmp_path) -> None:
         backend = _WaterBackend(rules=Rules.from_text(GRIP), rule_inputs=["water"])
@@ -112,16 +161,13 @@ class TestBackend:
 
 
 OVER = """
-version: 1
+version: 2
 extends: {base}
 quantities:
   grip:
-    rule_bases:
+    parts:
       water:
-        rules:
-          - {{if: (water IS dry), then: {{low: 0.95, high: 1.05}}}}
-          - {{if: (water IS wet), then: {{low: 0.60, high: 0.80}}}}
-          - {{if: (water IS flooded), then: {{low: 0.30, high: 0.50}}}}
+        uniform: {{low: [0.95, 0.60, 0.30], high: [1.05, 0.80, 0.50]}}
 """
 
 
@@ -133,7 +179,7 @@ class TestExtends:
         mini.write_text(OVER.format(base="../base.yaml"))
         rules = Rules.read(mini)
         assert rules.range("grip", {"water": 100}) == pytest.approx((0.30, 0.50))
-        # The inputs are base.yaml's.
+        # The points are base.yaml's.
         assert rules.range("grip", {"water": 25}) == pytest.approx((0.775, 0.925))
         assert [Path(p).name for p, _ in rules.files] == ["base.yaml", "mini.yaml"]
 
@@ -181,3 +227,50 @@ class TestExtends:
         backend = _WaterBackend(rules=Rules.from_text(GRIP), rule_inputs=["water"])
         backend.use_rules("https://example.com/measured.yaml")
         assert backend.derived_range("grip", {"water": 100}) == pytest.approx((0.30, 0.50))
+
+
+class TestManifest:
+    def test_a_backend_describes_its_probes_knobs_and_rule_inputs(self) -> None:
+        from openodd.sampler import OddKnob
+
+        def rain(world):  # type: ignore[no-untyped-def]
+            """Rain, from a 0-100 precipitation."""
+            return None
+
+        backend = Backend(
+            name="sim",
+            probes={"rain": (rain, ""), "speed_kph": (lambda w: None, "km/h")},
+            readers={"measure": lambda v: (lambda w: None, "m")},
+            knobs={
+                rain: OddKnob("environment.rain", values={"none": 0, "heavy": [70, 100]}),
+                "speed_kph": OddKnob("ego.speed", range=(0, 130), limits=(0, None)),
+            },
+            rules=Rules.from_text(GRIP, "grip.yaml"),
+            rule_inputs=["water", "precipitation"],
+            rule_input_knobs={"precipitation": "environment.rain"},
+            rule_input_text={"water": "the larger of wetness and deposits"},
+        )
+        m = backend.manifest()
+        assert m["openodd_backend"] == 1 and m["name"] == "sim"
+        assert m["probes"]["rain"] == {"unit": "", "text": "Rain, from a 0-100 precipitation."}
+        assert m["probes"]["speed_kph"] == {"unit": "km/h"}
+        assert m["readers"] == ["measure"]
+        assert m["knobs"]["rain"] == {
+            "key": "environment.rain",
+            "values": {"none": 0, "heavy": [70.0, 100.0]},
+        }
+        assert m["knobs"]["speed_kph"] == {
+            "key": "ego.speed",
+            "range": [0.0, 130.0],
+            "limits": [0.0, None],
+        }
+        assert m["rule_inputs"] == {
+            "water": {"text": "the larger of wetness and deposits"},
+            "precipitation": {"knob": "environment.rain"},
+        }
+        assert m["rules"][0]["file"] == "grip.yaml"
+        assert len(m["rules"][0]["sha256"]) == 64
+        # It is plain data: JSON writes it as it is.
+        import json
+
+        assert json.loads(json.dumps(m)) == m

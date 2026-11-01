@@ -1,0 +1,46 @@
+# What Backend.manifest() writes for autoware_carla_scenario's CARLA backend
+# (its weather part): the probes, the knobs that set each bucket, and the
+# rule inputs each knob writes. Transcribed from odd/backend.py and
+# weather_rules.py on the feat/fuzzy-weather-rules branch.
+openodd_backend: 1
+name: CARLA
+probes:
+  illumination: {unit: "", text: "The illumination level, from the sun's altitude."}
+  rain: {unit: "", text: "The rain level, from CARLA's 0-100 precipitation."}
+  fog: {unit: "", text: "The fog level, from CARLA's 0-100 fog density."}
+  road_wetness: {unit: "", text: "The level of the road's wetness, from CARLA's 0-100 wetness."}
+  visibility: {unit: m, text: "How far drivers see, metres."}
+  tire_friction: {unit: "", text: "How well the road grips, as a share of the dry road's grip (1.0)."}
+  ego_speed_kph: {unit: km/h}
+  speed_limit_kph: {unit: km/h}
+readers: [measure]
+knobs:
+  illumination:
+    key: environment.sun_altitude_angle
+    values: {day: [15, 90], low_sun: [0, 15], twilight: [-6, 0], night: [-90, -6]}
+  rain:
+    key: environment.rain
+    values: {none: 0, light: [1, 30], moderate: [30, 70], heavy: [70, 100]}
+  fog:
+    key: environment.fog_density
+    values: {none: 0, light: [1, 30], moderate: [30, 70], heavy: [70, 100]}
+  road_wetness:
+    key: environment.wetness
+    values: {none: 0, light: [1, 30], moderate: [30, 70], heavy: [70, 100]}
+  visibility:
+    key: environment.visibility_m
+    range: [15, 400]
+  tire_friction:
+    key: environment.tire_friction
+    range: [0.3, 1.1]
+rule_inputs:
+  cloudiness: {}
+  precipitation: {knob: environment.rain}
+  precipitation_deposits: {text: "Standing water: set with the rain, from CARLA's rain presets"}
+  wetness: {knob: environment.wetness}
+  wind_intensity: {}
+  fog_density: {knob: environment.fog_density}
+  fog_distance: {}
+  sun_altitude_angle: {knob: environment.sun_altitude_angle}
+  sun_azimuth_angle: {}
+  water: {text: "The larger of wetness and precipitation_deposits"}

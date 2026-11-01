@@ -71,6 +71,103 @@ The files a document `IMPORT`s can be loaded under *Document & imports*. The
 check reads them as a transmission, by name, as the Python package does. The
 draft is kept in the browser's local storage. *Download YAML* saves the file.
 
+## The binding and the connections
+
+The studio holds three documents at once, each with its own editor, chosen in
+the toolbar: the **ODD** (`#` in the address), its **Binding** (`#binding`),
+and a backend's **Rules** (`#rules`). They describe one chain:
+
+| | Says | Example |
+|---|---|---|
+| ODD | what is talked about | `environment.rain` is `none`, `light`, `moderate` or `heavy` |
+| Binding | how each attribute is measured | by the backend's probe `rain` |
+| Backend manifest | how a run sets each bucket, and which rule inputs that writes | the knob `environment.rain` writes 70-100 for `heavy`; the rules read it as `precipitation` |
+| Rules | what follows from those inputs | at `precipitation` 70, visibility is 100 to 220 m |
+
+The manifest is what Python's `Backend.manifest()` writes ([rules.md](rules.md#the-backends-manifest)).
+Load it with *Backend manifest*. Then the binding's probes are checked against
+the backend's, and the attributes can be followed to the rules. *Examples →
+CARLA weather* loads all four: a weather ODD, the CARLA backend's binding of
+it, its manifest, and its weather rules.
+
+- **Connections** (the binding editor's home) follows every attribute along
+  the chain in one table. Its columns are the buckets, the probe, the knob and
+  what it writes per bucket, the rule inputs, and the parts that read them.
+  An attribute without a probe has a *Bind* button.
+- **An attribute** shows its chain, ODD → binding → backend knob → rules, and
+  the form of its binding. The form has the probe (or a reader such as
+  `measure`), unit, bucket edges or values, cover measure, least stay and
+  text. Under the rules, a table says what each bucket gives through each
+  part reading its input: the least and greatest value of the quantity over
+  the values the knob writes for that bucket (heavy rain, 70 to 100: a
+  visibility of 60 to 220 m).
+- **Binding & backend** sets the binding's name and the ODD files it
+  measures, and lists the manifest's probes, knobs and rule inputs.
+
+In the rules editor, *ODD names* names each input by the attribute that sets
+it (`environment.rain` for `precipitation`), and each part's chart gets a
+strip of the ODD's buckets under its input, with what each bucket gives
+written beside it. The file keeps the backend's names: those are what the
+backend's rules read.
+
+The models are `binding.rs` (the binding and the manifest read and written,
+and the chain followed, tested natively) and the interface `binding_app.rs`.
+
+## Editing rules
+
+The **Rules** switch in the toolbar (or `#rules` in the address) turns the
+page into an editor of a backend's [rules](rules.md): conditional
+distributions, the rule file a backend derives quantities from, such as the
+road's grip from how wet it is. Every edit is read back by openodd's own
+reader, so the toolbar says whether the Python package would accept the file,
+and where it would not.
+
+- **The outline** lists the quantities and their parts. *Rule file* holds the
+  inputs the file describes (a default, a line saying what each is), what the
+  file `extends`, the files it extends (the browser cannot fetch them: load
+  them there, found by their file name), and the files read with the SHA-256
+  of each.
+- **A quantity** sets its name, a line saying what it is, and `combine`
+  (`min`, the default, or `max`). It shows each part's low, high, median and
+  value at the tested quantile, and the quantity's; the part that gives the
+  quantity's value at the quantile is marked.
+- **A part** has its inputs and points, and its distribution:
+  - the inputs it reads and the **points** of each, increasing. Changing the
+    points reads the values at the new points from the old ones, so adding a
+    point keeps the part as it was;
+  - the distribution's family (uniform, triangular, normal). Switching makes
+    each point's distribution from the one there (a uniform's ends become a
+    triangle's, its mode the middle);
+  - a **chart** over the first input, the others held at the tested values:
+    the range low to high, the median, and the value at the tested quantile.
+    For a part over one input, each value written at a point is a handle:
+    **drag it up or down** (`low` stays below `mode` and `high`). Click the
+    chart to test an input value;
+  - the **values** as a table: a row per point over one input, a grid per
+    parameter over two. A part over more inputs is edited in the YAML.
+- **Test drive** (the panel): a slider per input of the quantity and one for
+  the quantile `p`, each part's and the quantity's values, and the quantity's
+  response as one input moves, the others held (the range shaded, the value
+  at `p` solid, each part's value at `p` dashed).
+
+A file that extends others may leave a part's points or distribution to them:
+the form says so, and *Write them here* copies what the extended files give so
+they can be changed. A `null` that removes a quantity is not written by the
+form; edit the YAML for it. Comments are not kept. **YAML** shows what the
+form writes (each parameter's values on one line), and *Apply* reads edited
+YAML back. The draft is kept in the browser apart from the ODD editor's.
+
+The model is `rules_doc.rs` (the rule file read and written, tested natively)
+and the interface `rules_app.rs`.
+
+## Embedding the studio
+
+A page that has an element `id="openodd-studio"` gets the studio mounted in
+it instead of in the body, so a page can wrap the studio with its own text.
+The address picks the editor (`#binding`, `#rules`) when the page loads and
+whenever it changes, so the page can switch it. The studio's stylesheet sets
+`:root` and `body`; scope it to the element when the page has its own.
+
 ## Building
 
 ```bash

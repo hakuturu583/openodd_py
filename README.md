@@ -55,7 +55,12 @@
   - number lines whose condition ends you drag;
   - a test drive judging values live.
 
-  It is written in Rust and Leptos, with no server
+  Its **Rules** mode edits a backend's [rule files](docs/rules.md) as forms:
+  each part's distribution drawn over its input with draggable points, its
+  values as a table, and each quantity's distribution as the inputs move. Its **Binding** mode edits how each attribute is measured. With
+  a backend's manifest (`Backend.manifest()`), it follows each attribute from
+  the ODD through the binding and the backend's knobs to the rules that read
+  it. It is written in Rust and Leptos, with no server
   ([docs/editor.md](docs/editor.md), demo at
   [hakuturu583.github.io/openodd_py](https://hakuturu583.github.io/openodd_py/)).
 - **Comparing two sets on one ODD**: the same views with two sets of runs laid over one
@@ -91,14 +96,16 @@ What measures the attributes -- a simulator, a recorded log -- is the applicatio
 attribute (`knob`), and where the ego is (`position`, `geolocation`). Everything
 else is this library's.
 
-- **Derive with fuzzy rules**: what a run's settings do to the rest of it -- a
-  simulator's rain to the road's grip -- a backend may write as Sugeno rules in YAML
-  (`Rules`, inferred in the Rust core with simpful's operators). It holds its own
-  (`Backend.rules`), a run reads another file over them (`Backend.use_rules`), and
-  `Backend.derived_range("tire_friction", {"water": 70})` gives the range
+- **Derive with rules**: what a run's settings do to the rest of it -- a
+  simulator's rain to the road's grip -- a backend may write as conditional
+  distributions in YAML (`Rules`, evaluated in the Rust core): per quantity, a
+  distribution's parameters at points of its inputs, interpolated between them.
+  It holds its own (`Backend.rules`), a run reads another file over them
+  (`Backend.use_rules`), `Backend.derived_range("tire_friction", {"water": 70})`
+  gives the range and `Backend.derived_at(..., quantile)` the value a run draws
   ([docs/rules.md](docs/rules.md)). In the browser, `RulesView` draws them as an
-  embeddable component: terms, firing rules, outputs and the response curve
-  ([docs/wasm.md](docs/wasm.md#fuzzy-rules)).
+  embeddable component: each part's distribution over its input, and the
+  quantity's at the inputs chosen ([docs/wasm.md](docs/wasm.md#rules)).
 
 A `default` ODD ships with the package (`openodd.bundled_odd()`,
 [python/openodd/odds/default](python/openodd/odds/default)): every attribute a road-vehicle

@@ -24,11 +24,12 @@
 //! pass rate. It has the same methods as the [`Viewer`], so `mount` drives
 //! it the same way.
 //!
-//! A [`RulesView`] reads a backend's fuzzy rules (openodd's rule file) and
-//! renders them ([`rules_view`]): each input's terms, which rules fire at the
-//! inputs chosen, what each rule base and the quantity give, and how the
-//! quantity answers one input moved across its universe. `mount` drives it
-//! with `view: "rules"`.
+//! A [`RulesView`] reads a backend's rules (openodd's rule file: conditional
+//! distributions) and renders them ([`rules_view`]): what each part and the
+//! quantity give at the inputs chosen and a quantile `p`, the quantity's
+//! distribution there, how it answers one input moved across its range, and
+//! each part over its input with the points written. `mount` drives it with
+//! `view: "rules"`.
 
 pub mod rules_view;
 
@@ -590,7 +591,7 @@ impl Comparison {
     }
 }
 
-/// A backend's fuzzy rules, as a component ([`rules_view`]).
+/// A backend's rules, as a component ([`rules_view`]).
 #[wasm_bindgen]
 pub struct RulesView {
     rules: openodd::rules::RuleSet,
@@ -659,29 +660,42 @@ impl RulesView {
 
     pub fn inputs_str(&self, quantity: &str) -> Result<String, String> {
         let q = self.rules.quantity(quantity).map_err(|e| e.to_string())?;
-        let mut seen = Vec::new();
-        let mut out = Vec::new();
-        for base in &q.rule_bases {
-            for i in &base.inputs {
-                if !seen.contains(&i.name) {
-                    seen.push(i.name.clone());
-                    out.push(
-                        json!({"name": i.name, "universe": [i.low, i.high], "default": i.default}),
-                    );
-                }
-            }
-        }
+        let out: Vec<Json> = rules_view::sliders(&self.rules, q)
+            .iter()
+            .map(|s| json!({"name": s.name, "universe": [s.low, s.high], "default": s.default}))
+            .collect();
         Ok(Json::Array(out).to_string())
     }
 
-    pub fn evaluate_str(&self, quantity: &str, inputs: &str) -> Result<String, String> {
+    /// The inputs as the core reads them (`{name: value}`).
+    fn inputs_of(inputs: &str) -> Result<IndexMap<String, f64>, String> {
         let raw = parse(inputs, "inputs")?;
-        let query = rules_view::Query::from_json(&json!({ "inputs": raw }))?;
+        Ok(rules_view::Query::from_json(&json!({ "inputs": raw }))?.inputs)
+    }
+
+    pub fn evaluate_str(&self, quantity: &str, inputs: &str) -> Result<String, String> {
         let out = self
             .rules
-            .evaluate(quantity, &query.inputs)
+            .evaluate(quantity, &Self::inputs_of(inputs)?)
             .map_err(|e| e.to_string())?;
         Ok(serde_json::to_string(&out).expect("numbers"))
+    }
+
+    pub fn quantile_value(&self, quantity: &str, inputs: &str, p: f64) -> Result<f64, String> {
+        if !(0.0..=1.0).contains(&p) {
+            return Err(format!("p must be from 0 to 1, got {p}"));
+        }
+        self.rules
+            .quantile(quantity, &Self::inputs_of(inputs)?, p)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn cdf_value(&self, quantity: &str, inputs: &str, x: f64) -> Result<f64, String> {
+        Ok(self
+            .rules
+            .joined(quantity, &Self::inputs_of(inputs)?)
+            .map_err(|e| e.to_string())?
+            .cdf(x))
     }
 
     pub fn rules_html_str(&self, query: &str, options: &str) -> Result<String, String> {
@@ -707,7 +721,7 @@ impl RulesView {
         Self::from_files(text, source, files_json.as_deref().unwrap_or("")).map_err(js)
     }
 
-    /// Merge another rule file over these rules (down to the rule base).
+    /// Merge another rule file over these rules (down to the part).
     pub fn merge(
         &mut self,
         text: &str,
@@ -746,17 +760,29 @@ impl RulesView {
         Json::from(self.rules.quantities.keys().cloned().collect::<Vec<_>>()).to_string()
     }
 
-    /// A quantity's inputs: a JSON array of `{name, universe, default}`.
+    /// A quantity's inputs: a JSON array of `{name, universe, default}`, the
+    /// universe the outermost points of every part reading it.
     pub fn inputs(&self, quantity: &str) -> Result<String, JsError> {
         self.inputs_str(quantity).map_err(js)
     }
 
-    /// A quantity's outputs at `inputs` (a JSON object), as a JSON object.
+    /// A quantity's `{low, high, median, mean}` at `inputs` (a JSON object;
+    /// an input left out reads its default), as a JSON object.
     pub fn evaluate(&self, quantity: &str, inputs_json: &str) -> Result<String, JsError> {
         self.evaluate_str(quantity, inputs_json).map_err(js)
     }
 
-    /// The component at `query` (`{quantity, inputs, x}`), with `options`
+    /// A quantity's value at quantile `p` (0 to 1) at `inputs`.
+    pub fn quantile(&self, quantity: &str, inputs_json: &str, p: f64) -> Result<f64, JsError> {
+        self.quantile_value(quantity, inputs_json, p).map_err(js)
+    }
+
+    /// The share of a quantity's distribution at `inputs` at or below `x`.
+    pub fn cdf(&self, quantity: &str, inputs_json: &str, x: f64) -> Result<f64, JsError> {
+        self.cdf_value(quantity, inputs_json, x).map_err(js)
+    }
+
+    /// The component at `query` (`{quantity, inputs, x, p}`), with `options`
     /// (`{id, labels, samples}`).
     pub fn rules_html(&self, query_json: &str, options_json: &str) -> Result<String, JsError> {
         self.rules_html_str(query_json, options_json).map_err(js)

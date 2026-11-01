@@ -29,8 +29,9 @@
 <main>
   <header>
     <h1>openodd rules</h1>
-    <p>A backend's fuzzy rules: each input's terms, the rules that fire, what each rule base and the quantity give, and how the
-      quantity answers one input moved. Edit the YAML and the view follows -- computed in your browser with WebAssembly.
+    <p>A backend's rules, each a conditional distribution: what each part and the quantity give at the inputs and the quantile
+      chosen, the quantity's distribution there, how it answers one input moved, and each part over its input with the points
+      written. Edit the YAML and the view follows -- computed in your browser with WebAssembly.
       <a href="index.html">Coverage viewer</a></p>
   </header>
   <div class="work">
@@ -68,7 +69,7 @@
       return;
     }
     error.textContent = "";
-    // Keep where the reader was: the quantity, the inputs, the input moved.
+    // Keep where the reader was: the quantity, the inputs, the input moved, p.
     const state = view ? view.state : {};
     if (view) view.unmount();
     try {

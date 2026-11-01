@@ -1,45 +1,40 @@
-"""Fuzzy rules: how a backend derives what a run sets from what it was given.
+"""Rules: how a backend derives what a run sets from what it was given.
 
 A backend's knobs set what an ODD names -- the rain, the sun. What those do
 to the rest of a run -- the road's grip, how far drivers see -- is the
-backend's own model, which it may write as fuzzy rules in YAML (docs/rules.md)::
+backend's own model, which it writes as rules in YAML (docs/rules.md): each a
+conditional distribution, the distribution of a quantity given some inputs::
 
-    version: 1
+    version: 2
     quantities:
       tire_friction:
-        rule_bases:
+        parts:
           water:
-            inputs:
-              water:
-                universe: [0, 100]
-                terms:
-                  dry: {trapezoid: [0, 0, 0, 50]}
-                  wet: {triangle: [0, 50, 100]}
-                  flooded: {trapezoid: [50, 100, 100, 100]}
-            rules:
-              - if: (water IS dry)
-                then: {low: 0.90, high: 1.10}
-              - if: (water IS wet)
-                then: {low: 0.65, high: 0.85}
-              - if: (water IS flooded)
-                then: {low: 0.45, high: 0.65}
+            at: {water: [0, 50, 100]}      # the input, and its points
+            uniform:                       # the distribution at each point
+              low:  [0.90, 0.65, 0.45]
+              high: [1.10, 0.85, 0.65]
 
-Inference is Sugeno's, zero order, with simpful's operators (``AND`` the
-least, ``OR`` the greatest, ``NOT`` the complement), in the Rust core. A
-backend holds its rules (:attr:`~.backend.Backend.rules`), and a run may read
-another file over them (:meth:`~.backend.Backend.use_rules`).
+Each parameter is interpolated linearly between the points and held beyond
+them; a distribution is ``uniform`` (``low``, ``high``), ``triangular``
+(``low``, ``mode``, ``high``) or ``normal`` (``mean``, ``sd``, truncated to
+``low``..``high``). A run draws a value at a quantile (:meth:`Rules.quantile`).
+With several parts, ``combine`` (``min``, the default, or ``max``) joins the
+values they give at the same quantile. The Rust core reads and infers them.
+A backend holds its rules (:attr:`~.backend.Backend.rules`), and a run may
+read another file over them (:meth:`~.backend.Backend.use_rules`).
 
 A rule file may ``extends`` others -- a path relative to it, an ``https://``
 URL (``{url, sha256}`` pins its content), or ``{git, rev, path}`` -- and
 writes only what it changes over them::
 
-    version: 1
+    version: 2
     extends: https://example.com/rules/base_weather.yaml
     quantities:
       tire_friction:
-        rule_bases:
+        parts:
           water:
-            rules: [...]          # its inputs are base_weather.yaml's
+            uniform: {low: [0.95, 0.60, 0.30], high: [1.05, 0.80, 0.50]}
 """
 
 from __future__ import annotations
@@ -83,7 +78,7 @@ class RulesError(ValueError):
 
 
 class Rules:
-    """A rule set: quantities, each rule bases whose outputs ``combine`` joins."""
+    """A rule set: quantities, each parts whose values ``combine`` joins."""
 
     def __init__(self, core: "_core.RuleSet") -> None:
         self._core = core
@@ -134,8 +129,8 @@ class Rules:
     ) -> "Rules":
         """The file at *location* (a path or an ``https://`` URL), and the
         files it extends, merged over these rules (:meth:`merged`). It need
-        only name what it changes -- a rule base's ``rules`` without its
-        ``inputs`` -- since it is checked once merged.
+        only name what it changes -- a part's distribution without its
+        ``at`` -- since it is checked once merged.
 
         Raises:
             RulesError: When it cannot be read or the merged rules are not
@@ -160,10 +155,10 @@ class Rules:
         )
 
     def merged(self, over: "Rules") -> "Rules":
-        """These rules with *over*'s merged over them: a quantity, a rule base
-        and an input *over* names replaces these rules' of that name, field by
-        field down to the rule base (``null`` removes one), and a rule base's
-        ``rules`` are replaced whole.
+        """These rules with *over*'s merged over them: a quantity, a part and
+        an input *over* names merges over these rules' of that name, field by
+        field (``null`` removes one); a part's ``at`` and its distribution are
+        replaced whole.
 
         Raises:
             RulesError: When the merged rules are not well formed.
@@ -181,38 +176,64 @@ class Rules:
         return self._core.quantities
 
     def inputs(self, quantity: str) -> list[str]:
-        """The inputs *quantity*'s rule bases read."""
+        """The inputs *quantity*'s parts read."""
         return self._call(self._core.inputs, quantity)
 
-    def outputs(self, quantity: str) -> list[str]:
-        return self._call(self._core.outputs, quantity)
+    @property
+    def input_defaults(self) -> dict[str, Optional[float]]:
+        """The inputs the file describes, and the value each reads when not
+        given (``None``: none)."""
+        return dict(self._core.input_defaults())
 
     def source(self, quantity: str) -> str:
         """The file *quantity*'s rules were read from."""
         return self._call(self._core.source, quantity)
 
+    def combine(self, quantity: str) -> str:
+        """``min`` or ``max``: how *quantity*'s parts are joined."""
+        return self._call(self._core.combine, quantity)
+
     def evaluate(self, quantity: str, inputs: Mapping[str, float]) -> dict[str, float]:
-        """Each output of *quantity* at *inputs*; an input not given reads its
-        ``default``, and one outside its universe is clamped to it.
+        """``low``, ``high``, ``median`` and ``mean`` of *quantity* at
+        *inputs*; an input not given reads its ``default``, and one beyond its
+        outermost points is held there.
 
         Raises:
-            RulesError: On an unknown quantity, an input not given that has no
-                default, or inputs no rule fires at.
+            RulesError: On an unknown quantity, or an input not given that has
+                no default.
         """
-        values = {str(k): float(v) for k, v in inputs.items()}
-        return self._call(self._core.evaluate, quantity, values)
+        return self._call(self._core.evaluate, quantity, _values(inputs))
 
     def range(self, quantity: str, inputs: Mapping[str, float]) -> tuple[float, float]:
-        """``(low, high)`` of a quantity whose outputs are ``low`` and ``high``."""
+        """``(low, high)``: the least and greatest value *quantity* takes at
+        *inputs*."""
         out = self.evaluate(quantity, inputs)
-        if "low" not in out or "high" not in out:
-            raise RulesError(
-                f"{self.source(quantity)}: {quantity} gives {sorted(out)}, not low and high"
-            )
         return out["low"], out["high"]
 
+    def quantile(self, quantity: str, inputs: Mapping[str, float], p: float) -> float:
+        """The value of *quantity* at quantile *p* (0 to 1, clamped) at
+        *inputs*: a share *p* of its mass lies below it. A run draws *p* and
+        reads the value here; with several parts, each gives its value at
+        *p* and ``combine`` joins them."""
+        return self._call(self._core.quantile, quantity, _values(inputs), float(p))
+
+    def cdf(self, quantity: str, inputs: Mapping[str, float], x: float) -> float:
+        """The share of *quantity*'s mass at or below *x*, at *inputs*."""
+        return self._call(self._core.cdf, quantity, _values(inputs), float(x))
+
+    def distributions(
+        self, quantity: str, inputs: Mapping[str, float]
+    ) -> list[tuple[str, str, dict[str, float]]]:
+        """Each part's distribution at *inputs*: ``(part, family, params)``."""
+        return [
+            (name, family, dict(params))
+            for name, family, params in self._call(
+                self._core.distributions, quantity, _values(inputs)
+            )
+        ]
+
     def check_inputs(self, allowed: Sequence[str]) -> None:
-        """Refuse a rule base reading an input not in *allowed*."""
+        """Refuse a part reading an input not in *allowed*."""
         self._call(self._core.check_inputs, [str(a) for a in allowed])
 
     @staticmethod
@@ -224,3 +245,7 @@ class Rules:
 
     def __repr__(self) -> str:
         return f"Rules({', '.join(self.quantities)})"
+
+
+def _values(inputs: Mapping[str, float]) -> dict[str, float]:
+    return {str(k): float(v) for k, v in inputs.items()}

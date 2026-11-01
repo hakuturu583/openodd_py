@@ -1,7 +1,7 @@
 # The views in the browser: WebAssembly
 
 `crates/openodd-wasm` builds the [coverage view](coverage_view.md), the
-[case plot](case_plot.md) and the [fuzzy rules](rules.md) view for
+[case plot](case_plot.md) and the [rules](rules.md) view for
 `wasm32-unknown-unknown`. A web page computes
 them from coverage documents in the browser. There is no Python and no
 server, and nothing is uploaded. The case plot's background is openodd's own
@@ -85,15 +85,20 @@ and the options as JSON strings:
 | `drift_html(query, options)`, `drift_json(query, options)` | the scenario's realisation: drawn against measured, with the knob calibration ([drift.md](drift.md)); `options.knobs` = `{attribute: [scale, offset]}` |
 | `styles()`, `script()` | the components' CSS and script |
 
-## Fuzzy rules
+## Rules
 
-`RulesView` reads a backend's [fuzzy rules](rules.md) (the YAML text of a
-rule file) and renders them as a component: for one quantity, a slider per
-input, the outputs there -- the quantity's, and each rule base's, the one
-`combine` takes marked -- the response chart (the outputs as one input moves
-across its universe, each rule base dashed behind the quantity), and per rule
-base each input's terms with the value chosen, and the rules with how
-strongly each fires. The same engine as Python's `openodd.Rules` computes it.
+`RulesView` reads a backend's [rules](rules.md) (the YAML text of a rule
+file: conditional distributions) and renders them as a component. For one
+quantity, it shows a slider per input and one for the quantile `p`, and the
+outputs there: `low`, `high`, `median`, `mean` and the value at `p`, for the
+quantity and for each part, with the part that decides the value at `p`
+marked. It also draws the quantity's distribution there (its CDF, each part's
+dashed, the value at `p` marked), the response chart (the quantity's range,
+median and value at `p` as one input moves across its range, each part's
+range dashed behind), and per part a chart over one of its inputs (the one
+the response moves, if it reads it), the others held at the values chosen:
+the range, the median, the value at `p`, the points written as dots and the
+value chosen. The same engine as Python's `openodd.Rules` computes it.
 
 ```html
 <div id="rules"></div>
@@ -107,27 +112,29 @@ strongly each fires. The same engine as Python's `openodd.Rules` computes it.
   const rules = await loadRules(RulesView, "https://example.com/rules/vehicles/mini.yaml");
   rules.merge(measuredText, "measured.yaml");   // another file over it: only what it changes
   const view = mount(rules, document.getElementById("rules"), {
-    view: "rules", quantity: "visibility", inputs: { fog_density: 80 }, x: "fog_density",
+    view: "rules", quantity: "visibility", inputs: { fog_density: 80 }, x: "fog_density", p: 0.1,
   });
   view.set({ inputs: { sun_altitude_angle: -10 } });
 </script>
 ```
 
 - **The sliders and pickers** dispatch `openodd:rules` (`detail.inputs`,
-  `detail.quantity`, `detail.x`). `mount` cancels it, renders again, and puts
-  the keyboard back on the control used. A slider dispatches on release and
-  shows its value while it moves.
+  `detail.p`, `detail.quantity`, `detail.x`). `mount` cancels it, renders
+  again, and puts the keyboard back on the control used. A slider dispatches
+  on release and shows its value while it moves.
 - **`options`** takes the query (`quantity`, `inputs`: `{name: value}`, `x`:
-  the input the response chart moves) and the component's options (`id`,
-  `labels`, `samples`: points per curve, 121 by default). An input not given
-  reads its `default`, else the middle of its universe.
-- **Words** (`labels`): `inputs`, `outputs`, `combined`, `response`, `vary`,
-  `rules`, `firing`, `terms`, `quantity`, `combine`, `rule_base`,
-  `rule_bases`.
+  the input the response chart moves, `p`: the quantile shown, 0 to 1, 0.5
+  by default) and the component's options (`id`, `labels`, `samples`: points
+  per curve, 121 by default). An input's range is the outermost points of
+  every part reading it; an input not given reads the file's `default`
+  (`inputs.<name>.default`), else the middle of its range.
+- **Words** (`labels`): `inputs`, `outputs`, `quantity`, `response`, `vary`,
+  `distribution`, `parts`, `part`, `combine`, `quantile`, `low`, `high`,
+  `median`, `mean`, `at_p`, `deciding`, `points`.
 - **Colours**: the coverage view's `--oo-*` variables and theme
-  (`data-oo-theme`, or the reader's light or dark scheme); the terms' and rule
-  bases' series through `--oo-rules-s0` to `s7`, the outputs' through
-  `--oo-rules-o0` to `o3`.
+  (`data-oo-theme`, or the reader's light or dark scheme); the parts' series
+  through `--oo-rules-s0` to `s7`, the quantity's median and value at `p`
+  through `--oo-rules-o0` and `o1`.
 
 | Method | Returns |
 |---|---|
@@ -136,10 +143,12 @@ strongly each fires. The same engine as Python's `openodd.Rules` computes it.
 | `RulesView.references(text, source)` | the locations a file extends, to fetch (what `loadRules` does) |
 | `files()` | `[{location, sha256}]` of every file read |
 | `quantities()` | a JSON array |
-| `inputs(quantity)` | a JSON array of `{name, universe, default}` |
-| `evaluate(quantity, inputs)` | the outputs at `inputs` (JSON objects) |
+| `inputs(quantity)` | a JSON array of `{name, universe: [low, high], default}`, the universe the outermost points |
+| `evaluate(quantity, inputs)` | `{low, high, median, mean}` at `inputs` (JSON objects; an input left out reads its default) |
+| `quantile(quantity, inputs, p)` | the value at quantile `p` (a number) |
+| `cdf(quantity, inputs, x)` | the share of the distribution at or below `x` (a number) |
 | `rules_html(query, options)` | the component |
-| `rules_json(query, options)` | its data: each term's curve and degree, each rule's firing, the outputs, the response |
+| `rules_json(query, options)` | its data: the inputs, the outputs (`at_p` the value at `p`) and the part `deciding`, each part's distribution, outputs and chart (`xs`, `curves`, `points`), the quantity's `distribution` (`xs`, `cdf`, each part's), the `response` |
 
 [`examples/wasm-viewer/rules.html`](../examples/wasm-viewer/rules.html) is an
 editor: the rule file on one side, the component on the other, following

@@ -1406,6 +1406,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "indexmap",
+ "libm",
  "nalgebra",
  "openodd-coverage-view",
  "pyo3",
@@ -1434,6 +1435,7 @@ name = "openodd-editor"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "indexmap",
  "js-sys",
  "leptos",
  "openodd",

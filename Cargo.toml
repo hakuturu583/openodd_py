@@ -36,6 +36,8 @@ thiserror = "2"
 tar = { version = "0.4", optional = true }
 flate2 = { version = "1", optional = true }
 rand = "0.8"
+# erf and erfc for the truncated normal distribution of rule files (src/rules.rs).
+libm = "0.2"
 rand_chacha = "0.3"
 fs2 = { version = "0.4", optional = true }
 # Gaussian-process regression: the starting length scale of the flaky-case

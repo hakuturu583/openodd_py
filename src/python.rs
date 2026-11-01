@@ -2216,7 +2216,7 @@ impl FlakinessModel {
     }
 }
 
-/// Fuzzy rules a backend derives settings with (`crate::rules`).
+/// Rules a backend derives settings with: conditional distributions (`crate::rules`).
 #[pyclass(frozen, module = "openodd._core")]
 #[derive(Clone)]
 struct RuleSet {
@@ -2339,20 +2339,74 @@ impl RuleSet {
         Ok(self.inner.quantity(quantity).map_err(err)?.inputs())
     }
 
-    fn outputs(&self, quantity: &str) -> PyResult<Vec<String>> {
-        Ok(self.inner.quantity(quantity).map_err(err)?.outputs.clone())
+    /// The inputs the file describes: name -> its default (`None`: none).
+    fn input_defaults(&self) -> indexmap::IndexMap<String, Option<f64>> {
+        self.inner
+            .inputs
+            .iter()
+            .map(|(n, i)| (n.clone(), i.default))
+            .collect()
     }
 
     fn source(&self, quantity: &str) -> PyResult<String> {
         Ok(self.inner.quantity(quantity).map_err(err)?.source.clone())
     }
 
+    fn combine(&self, quantity: &str) -> PyResult<&'static str> {
+        Ok(self.inner.quantity(quantity).map_err(err)?.combine.name())
+    }
+
+    /// `low`, `high`, `median` and `mean` at `inputs`.
     fn evaluate(
         &self,
         quantity: &str,
         inputs: indexmap::IndexMap<String, f64>,
     ) -> PyResult<indexmap::IndexMap<String, f64>> {
         self.inner.evaluate(quantity, &inputs).map_err(err)
+    }
+
+    /// The value at quantile `p` at `inputs`.
+    fn quantile(
+        &self,
+        quantity: &str,
+        inputs: indexmap::IndexMap<String, f64>,
+        p: f64,
+    ) -> PyResult<f64> {
+        self.inner.quantile(quantity, &inputs, p).map_err(err)
+    }
+
+    /// The share of the mass at or below `x`, at `inputs`.
+    fn cdf(
+        &self,
+        quantity: &str,
+        inputs: indexmap::IndexMap<String, f64>,
+        x: f64,
+    ) -> PyResult<f64> {
+        Ok(self.inner.joined(quantity, &inputs).map_err(err)?.cdf(x))
+    }
+
+    /// Each part's distribution at `inputs`: (part, family, {parameter: value}).
+    #[allow(clippy::type_complexity)]
+    fn distributions(
+        &self,
+        quantity: &str,
+        inputs: indexmap::IndexMap<String, f64>,
+    ) -> PyResult<Vec<(String, &'static str, indexmap::IndexMap<String, f64>)>> {
+        let joined = self.inner.joined(quantity, &inputs).map_err(err)?;
+        Ok(joined
+            .parts
+            .iter()
+            .map(|(name, d)| {
+                let family = d.family();
+                let params = family
+                    .params()
+                    .iter()
+                    .map(|p| p.to_string())
+                    .zip(d.params())
+                    .collect();
+                (name.clone(), family.name(), params)
+            })
+            .collect())
     }
 
     fn check_inputs(&self, allowed: Vec<String>) -> PyResult<()> {
