@@ -274,3 +274,56 @@ class TestManifest:
         import json
 
         assert json.loads(json.dumps(m)) == m
+
+
+CHAIN = """version: 2
+quantities:
+  sight_speed:
+    parts:
+      sight:
+        at: {visibility: [0, 400]}
+        uniform: {low: [0, 20], high: [0, 40]}
+  visibility:
+    parts:
+      fog:
+        at: {fog: [0, 100]}
+        uniform: {low: [200, 0], high: [400, 200]}
+"""
+
+
+class TestChains:
+    def test_a_part_reads_another_quantity(self) -> None:
+        rules = Rules.from_text(CHAIN)
+        assert rules.order == ["visibility", "sight_speed"]
+        assert rules.upstream("sight_speed") == ["visibility"]
+        assert rules.free_inputs == ["fog"]
+        # fog 50: the visibility's median, 200 m, gives 10-20.
+        assert rules.range("sight_speed", {"fog": 50}) == pytest.approx((10, 20))
+        # The visibility at its own quantile: 100 m.
+        assert rules.range(
+            "sight_speed", {"fog": 50}, quantiles={"visibility": 0.0}
+        ) == pytest.approx((5, 10))
+        # A visibility given is observed.
+        assert rules.quantile(
+            "sight_speed", {"fog": 50, "visibility": 400}, 1.0
+        ) == pytest.approx(40)
+
+    def test_sample_gives_every_quantity(self) -> None:
+        rules = Rules.from_text(CHAIN)
+        assert rules.sample({"fog": 50}, {"sight_speed": 1.0}) == pytest.approx(
+            {"visibility": 200.0, "sight_speed": 20.0}
+        )
+        backend = Backend(rules=rules, rule_inputs=["fog"])
+        assert backend.derived_sample({"fog": 50})["visibility"] == pytest.approx(200)
+        assert backend.derived_at(
+            "sight_speed", {"fog": 50}, 0.0, {"visibility": 1.0}
+        ) == pytest.approx(15)
+
+    def test_a_cycle_is_refused(self) -> None:
+        text = (
+            "version: 2\nquantities:\n"
+            "  a: {parts: {p: {at: {b: [0, 1]}, uniform: {low: 0, high: 1}}}}\n"
+            "  b: {parts: {p: {at: {a: [0, 1]}, uniform: {low: 0, high: 1}}}}\n"
+        )
+        with pytest.raises(RulesError, match="cycle: a -> b -> a"):
+            Rules.from_text(text)

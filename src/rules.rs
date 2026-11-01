@@ -869,6 +869,8 @@ pub struct RuleSet {
     /// The rules as one document, every `extends` worked in: what a later
     /// set merges over ([`RuleSet::merged`]).
     doc: Node,
+    /// The quantities in an order where each comes after those it reads.
+    order: Vec<String>,
 }
 
 impl RuleSet {
@@ -969,12 +971,104 @@ impl RuleSet {
             let quantity = read_quantity(&name, raw, source, &at.key(&name))?;
             out.insert(name, quantity);
         }
+        for name in inputs.keys() {
+            if out.contains_key(name) {
+                return Err(Where::new(source).key("inputs").key(name).error(format!(
+                    "'{name}' is a quantity: a part reads a quantity's value, which it gives itself"
+                )));
+            }
+        }
+        let order = order_of(&out, &Where::new(source).key("quantities"))?;
         Ok(RuleSet {
             quantities: out,
             inputs,
             files: Vec::new(),
             doc,
+            order,
         })
+    }
+
+    /// The quantities, each after the quantities its parts read.
+    pub fn order(&self) -> &[String] {
+        &self.order
+    }
+
+    /// The quantities `quantity`'s parts read, each once.
+    pub fn upstream(&self, quantity: &str) -> Result<Vec<String>> {
+        Ok(self
+            .quantity(quantity)?
+            .inputs()
+            .into_iter()
+            .filter(|i| self.quantities.contains_key(i))
+            .collect())
+    }
+
+    /// The inputs the parts read that are not quantities: what a caller
+    /// gives, in the order first read.
+    pub fn free_inputs(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for q in self.quantities.values() {
+            for i in q.inputs() {
+                if !self.quantities.contains_key(&i) && !out.contains(&i) {
+                    out.push(i);
+                }
+            }
+        }
+        out
+    }
+
+    /// `inputs`, and the value of every quantity `quantity` reads, through
+    /// any chain: one given in `inputs` is taken as it is (an observed
+    /// value); any other is its value at its own quantile in `quantiles`
+    /// (the median, 0.5, when not named), at the inputs it reads.
+    pub fn resolved(
+        &self,
+        quantity: &str,
+        inputs: &IndexMap<String, f64>,
+        quantiles: &IndexMap<String, f64>,
+    ) -> Result<IndexMap<String, f64>> {
+        let mut values = inputs.clone();
+        let mut needed: Vec<String> = Vec::new();
+        let mut stack = self.upstream(quantity)?;
+        while let Some(q) = stack.pop() {
+            if values.contains_key(&q) || needed.contains(&q) {
+                continue;
+            }
+            stack.extend(self.upstream(&q)?);
+            needed.push(q);
+        }
+        for q in &self.order {
+            if needed.contains(q) {
+                let p = quantiles.get(q).copied().unwrap_or(0.5);
+                let v = self.quantity(q)?.joined(&values, &self.inputs)?.quantile(p);
+                values.insert(q.clone(), v);
+            }
+        }
+        Ok(values)
+    }
+
+    /// Every quantity's value at `inputs`, each at its own quantile in
+    /// `quantiles` (0.5 when not named), in [`RuleSet::order`]: a quantity
+    /// given in `inputs` keeps the value given.
+    pub fn sample(
+        &self,
+        inputs: &IndexMap<String, f64>,
+        quantiles: &IndexMap<String, f64>,
+    ) -> Result<IndexMap<String, f64>> {
+        let mut values = inputs.clone();
+        let mut out = IndexMap::new();
+        for q in &self.order {
+            let v = match inputs.get(q) {
+                Some(v) => *v,
+                None => {
+                    let p = quantiles.get(q).copied().unwrap_or(0.5);
+                    self.quantity(q)?.joined(&values, &self.inputs)?.quantile(p)
+                }
+            };
+            values.insert(q.clone(), v);
+            out.insert(q.clone(), v);
+        }
+        Ok(out)
     }
 
     /// This rule set with `over`'s rules merged over it: a quantity, a part
@@ -1015,8 +1109,22 @@ impl RuleSet {
 
     /// `quantity`'s distribution at `inputs`; an input not given reads its
     /// `default`.
+    /// A quantity it reads that is not in `inputs` is at its median
+    /// ([`RuleSet::joined_at`] names their quantiles).
     pub fn joined(&self, quantity: &str, inputs: &IndexMap<String, f64>) -> Result<Joined> {
-        self.quantity(quantity)?.joined(inputs, &self.inputs)
+        self.joined_at(quantity, inputs, &IndexMap::new())
+    }
+
+    /// `quantity`'s distribution at `inputs`, the quantities it reads at
+    /// their quantiles in `quantiles` ([`RuleSet::resolved`]).
+    pub fn joined_at(
+        &self,
+        quantity: &str,
+        inputs: &IndexMap<String, f64>,
+        quantiles: &IndexMap<String, f64>,
+    ) -> Result<Joined> {
+        let values = self.resolved(quantity, inputs, quantiles)?;
+        self.quantity(quantity)?.joined(&values, &self.inputs)
     }
 
     /// `low`, `high`, `median` and `mean` of `quantity` at `inputs`
@@ -1034,12 +1142,13 @@ impl RuleSet {
         Ok(self.joined(quantity, inputs)?.quantile(p))
     }
 
-    /// Refuse an input that is not one of `allowed` (the backend's).
+    /// Refuse an input that is neither one of `allowed` (the backend's)
+    /// nor a quantity of these rules.
     pub fn check_inputs(&self, allowed: &[String]) -> Result<()> {
         for q in self.quantities.values() {
             for part in &q.parts {
                 for a in &part.axes {
-                    if !allowed.contains(&a.input) {
+                    if !allowed.contains(&a.input) && !self.quantities.contains_key(&a.input) {
                         return Err(Error::value(format!(
                             "{}: quantities.{}.parts.{}.at: unknown input '{}'; the rules may read {}",
                             q.source,
@@ -1054,6 +1163,44 @@ impl RuleSet {
         }
         Ok(())
     }
+}
+
+/// The quantities in an order where each comes after the quantities its
+/// parts read; a quantity that reads itself, through any chain, is refused.
+fn order_of(quantities: &IndexMap<String, Quantity>, at: &Where) -> Result<Vec<String>> {
+    fn visit(
+        name: &str,
+        quantities: &IndexMap<String, Quantity>,
+        path: &mut Vec<String>,
+        done: &mut Vec<String>,
+        at: &Where,
+    ) -> Result<()> {
+        if done.iter().any(|d| d == name) {
+            return Ok(());
+        }
+        if let Some(k) = path.iter().position(|p| p == name) {
+            let mut cycle: Vec<String> = path[k..].to_vec();
+            cycle.push(name.to_string());
+            return Err(at.key(&path[k]).error(format!(
+                "the quantities read each other in a cycle: {}",
+                cycle.join(" -> ")
+            )));
+        }
+        path.push(name.to_string());
+        for i in quantities[name].inputs() {
+            if quantities.contains_key(&i) {
+                visit(&i, quantities, path, done, at)?;
+            }
+        }
+        path.pop();
+        done.push(name.to_string());
+        Ok(())
+    }
+    let mut done = Vec::new();
+    for name in quantities.keys() {
+        visit(name, quantities, &mut Vec::new(), &mut done, at)?;
+    }
+    Ok(done)
 }
 
 /// One YAML document of `text`, merge keys (`<<`) worked out, its version
@@ -1586,6 +1733,71 @@ fn node_name(node: &Node, at: &Where) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Visibility from fog, and the speed a driver keeps from the
+    /// visibility: a chain.
+    const CHAIN: &str = r#"version: 2
+quantities:
+  sight_speed:
+    parts:
+      sight:
+        at: {visibility: [0, 400]}
+        uniform: {low: [0, 20], high: [0, 40]}
+  visibility:
+    parts:
+      fog:
+        at: {fog: [0, 100]}
+        uniform: {low: [200, 0], high: [400, 200]}
+"#;
+
+    fn values(pairs: &[(&str, f64)]) -> IndexMap<String, f64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn a_chain_is_ordered_and_read_through() {
+        let set = RuleSet::parse(CHAIN, "chain.yaml").unwrap();
+        assert_eq!(set.order(), ["visibility", "sight_speed"]);
+        assert_eq!(set.upstream("sight_speed").unwrap(), ["visibility"]);
+        assert_eq!(set.free_inputs(), ["fog"]);
+        // fog 50: visibility 100-300, median 200; sight_speed at 200 is 10-20.
+        let fog = values(&[("fog", 50.0)]);
+        assert_eq!(set.evaluate("sight_speed", &fog).unwrap()["low"], 10.0);
+        // The visibility at its own quantile, 0: 100 m, so 5-10.
+        let q = values(&[("visibility", 0.0)]);
+        let j = set.joined_at("sight_speed", &fog, &q).unwrap();
+        assert_eq!(j.support(), (5.0, 10.0));
+        // A visibility given is taken as observed.
+        let seen = values(&[("fog", 50.0), ("visibility", 400.0)]);
+        assert_eq!(set.quantile("sight_speed", &seen, 1.0).unwrap(), 40.0);
+        let all = set.sample(&fog, &values(&[("sight_speed", 1.0)])).unwrap();
+        assert_eq!(all["visibility"], 200.0);
+        assert_eq!(all["sight_speed"], 20.0);
+        set.check_inputs(&["fog".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn a_cycle_is_refused() {
+        let text = r#"version: 2
+quantities:
+  a:
+    parts: {p: {at: {b: [0, 1]}, uniform: {low: 0, high: 1}}}
+  b:
+    parts: {p: {at: {a: [0, 1]}, uniform: {low: 0, high: 1}}}
+"#;
+        let err = RuleSet::parse(text, "c.yaml").unwrap_err().to_string();
+        assert!(err.contains("cycle: a -> b -> a"), "{err}");
+        let own = "version: 2\nquantities:\n  a:\n    parts: {p: {at: {a: [0, 1]}, uniform: {low: 0, high: 1}}}\n";
+        let err = RuleSet::parse(own, "c.yaml").unwrap_err().to_string();
+        assert!(err.contains("cycle: a -> a"), "{err}");
+    }
+
+    #[test]
+    fn an_input_may_not_name_a_quantity() {
+        let text = format!("{CHAIN}inputs: {{visibility: {{default: 1}}}}\n");
+        let err = RuleSet::parse(&text, "c.yaml").unwrap_err().to_string();
+        assert!(err.contains("'visibility' is a quantity"), "{err}");
+    }
 
     const GRIP: &str = r#"version: 2
 quantities:
