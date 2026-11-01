@@ -253,3 +253,41 @@ fn a_file_extending_others_reads_them_from_what_the_page_fetched() {
         "{e}"
     );
 }
+
+#[wasm_bindgen_test]
+#[test]
+fn a_chain_is_ordered_sampled_and_its_quantity_inputs_flagged() {
+    let chain = include_str!("../../../examples/wasm-viewer/chain_rules.yaml");
+    let v = RulesView::from_text(chain, "chain_rules.yaml").unwrap();
+    let order: Vec<String> = serde_json::from_str(&v.order_str()).unwrap();
+    assert_eq!(
+        order,
+        [
+            "tire_friction",
+            "visibility",
+            "sight_speed",
+            "following_gap"
+        ]
+    );
+    let inputs: Json = serde_json::from_str(&v.inputs_str("sight_speed").unwrap()).unwrap();
+    assert_eq!(inputs[0]["name"], "visibility");
+    assert_eq!(inputs[0]["quantity"], true);
+    let weather =
+        r#"{"water": 70, "fog_density": 80, "precipitation": 30, "sun_altitude_angle": 10}"#;
+    let all: Json = serde_json::from_str(&v.sample_str(weather, "").unwrap()).unwrap();
+    assert!(close(all["tire_friction"].as_f64().unwrap(), 0.67));
+    // The visibility at its median, and the speed read at it.
+    let vis = all["visibility"].as_f64().unwrap();
+    let seen = format!(r#"{{"visibility": {vis}}}"#);
+    let speed = v.quantile_value("sight_speed", &seen, 0.5).unwrap();
+    assert!(close(all["sight_speed"].as_f64().unwrap(), speed));
+    // Each quantity at its own quantile.
+    let low: Json =
+        serde_json::from_str(&v.sample_str(weather, r#"{"visibility": 0}"#).unwrap()).unwrap();
+    assert!(low["visibility"].as_f64().unwrap() < vis);
+    // The component shows a chained quantity like any other.
+    let html = v
+        .rules_html_str(r#"{"quantity": "sight_speed"}"#, "{}")
+        .unwrap();
+    assert!(html.contains("visibility"));
+}

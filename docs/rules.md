@@ -67,6 +67,49 @@ quantities:
   `(low, high)`; `Rules.cdf` the share of the mass at or below a value;
   `Rules.distributions` each part's distribution at the inputs.
 
+## Chains
+
+A part may read another quantity of the same rules, so a quantity can derive
+from one derived itself -- the speed drivers keep from how far they see, and
+that from the fog. The rules are then a graph: the inputs and the quantities
+are its variables, each part a factor between the variables it reads and its
+quantity (the editor draws it so, [editor.md](editor.md#the-factor-graph)).
+
+```yaml
+quantities:
+  visibility:
+    parts:
+      fog: {at: {fog_density: [0, 100]}, uniform: {low: [250, 15], high: [400, 40]}}
+  sight_speed:
+    parts:
+      sight:
+        at: {visibility: [15, 50, 100, 250, 400]}      # a quantity
+        triangular:
+          low:  [4.6, 10.0, 15.2, 25.7, 33.4]
+          mode: [6.5, 14.1, 21.6, 36.5, 47.3]
+          high: [7.6, 16.6, 25.4, 42.9, 55.6]
+```
+
+- **A quantity read is worked out first**, at the inputs it reads, and at its
+  **own quantile**: `quantiles={"visibility": 0.1}`, the median when not
+  named. Each quantity has a quantile of its own, so a run that draws one per
+  quantity samples the whole graph, each given what it reads
+  (`Rules.sample(inputs, quantiles)`, `Backend.derived_sample`).
+- **A quantity given is observed**: a value in `inputs` under a quantity's
+  name is taken as it is, and what it reads is not worked out.
+  `Rules.quantile("sight_speed", {"visibility": 80}, 0.5)` is the
+  distribution given a visibility of 80 m.
+- **A cycle is refused**: a quantity may not read itself, through any chain
+  (`the quantities read each other in a cycle: a -> b -> a`), and an input the
+  file describes may not have a quantity's name.
+- `Rules.order` lists the quantities each after those it reads,
+  `Rules.upstream(q)` the quantities `q` reads, and `Rules.free_inputs` the
+  inputs a caller gives. `Backend(rule_inputs=...)` lists the backend's
+  inputs only: a quantity of the rules is always readable.
+
+`examples/wasm-viewer/chain_rules.yaml` chains the weather's grip and
+visibility to the speed and the time gap drivers keep.
+
 ## Checks
 
 A rule file is checked when it is read, and `RulesError` (a `ValueError`) says
@@ -176,7 +219,8 @@ rules it followed.
 | `rule_values(values)` | What the rules read of the values a caller has: by default those. A backend whose rules read something derived -- the larger of `wetness` and `precipitation_deposits` -- overrides it |
 | `derived(quantity, values)` | `low`, `high`, `median` and `mean` of the quantity |
 | `derived_range(quantity, values)` | `(low, high)` |
-| `derived_at(quantity, values, quantile)` | The value a run that drew `quantile` sets |
+| `derived_at(quantity, values, quantile, quantiles=None)` | The value a run that drew `quantile` sets (the quantities it reads at `quantiles`, [Chains](#chains)) |
+| `derived_sample(values, quantiles=None)` | Every quantity's value, each at its own quantile |
 | `manifest()` | The backend described for tools that do not run it ([below](#the-backends-manifest)) |
 
 A run that reads its own rules should call `use_rules` at its start every

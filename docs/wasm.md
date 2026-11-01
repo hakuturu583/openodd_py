@@ -143,10 +143,12 @@ value chosen. The same engine as Python's `openodd.Rules` computes it.
 | `RulesView.references(text, source)` | the locations a file extends, to fetch (what `loadRules` does) |
 | `files()` | `[{location, sha256}]` of every file read |
 | `quantities()` | a JSON array |
-| `inputs(quantity)` | a JSON array of `{name, universe: [low, high], default}`, the universe the outermost points |
+| `inputs(quantity)` | a JSON array of `{name, universe: [low, high], default, quantity}`, the universe the outermost points; `quantity` is true for another quantity the parts read ([chains](rules.md#chains)): one given is observed, one left out worked out at its median |
 | `evaluate(quantity, inputs)` | `{low, high, median, mean}` at `inputs` (JSON objects; an input left out reads its default) |
 | `quantile(quantity, inputs, p)` | the value at quantile `p` (a number) |
 | `cdf(quantity, inputs, x)` | the share of the distribution at or below `x` (a number) |
+| `order()` | the quantities, each after those it reads (a JSON array) |
+| `sample(inputs, quantiles)` | every quantity's value, each at its own quantile in `quantiles` (`{quantity: p}`, 0.5 when left out): a JSON object |
 | `rules_html(query, options)` | the component |
 | `rules_json(query, options)` | its data: the inputs, the outputs (`at_p` the value at `p`) and the part `deciding`, each part's distribution, outputs and chart (`xs`, `curves`, `points`), the quantity's `distribution` (`xs`, `cdf`, each part's), the `response` |
 

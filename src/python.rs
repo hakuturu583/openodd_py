@@ -2361,8 +2361,13 @@ impl RuleSet {
         &self,
         quantity: &str,
         inputs: indexmap::IndexMap<String, f64>,
+        quantiles: indexmap::IndexMap<String, f64>,
     ) -> PyResult<indexmap::IndexMap<String, f64>> {
-        self.inner.evaluate(quantity, &inputs).map_err(err)
+        Ok(self
+            .inner
+            .joined_at(quantity, &inputs, &quantiles)
+            .map_err(err)?
+            .summary())
     }
 
     /// The value at quantile `p` at `inputs`.
@@ -2371,8 +2376,13 @@ impl RuleSet {
         quantity: &str,
         inputs: indexmap::IndexMap<String, f64>,
         p: f64,
+        quantiles: indexmap::IndexMap<String, f64>,
     ) -> PyResult<f64> {
-        self.inner.quantile(quantity, &inputs, p).map_err(err)
+        Ok(self
+            .inner
+            .joined_at(quantity, &inputs, &quantiles)
+            .map_err(err)?
+            .quantile(p))
     }
 
     /// The share of the mass at or below `x`, at `inputs`.
@@ -2381,8 +2391,13 @@ impl RuleSet {
         quantity: &str,
         inputs: indexmap::IndexMap<String, f64>,
         x: f64,
+        quantiles: indexmap::IndexMap<String, f64>,
     ) -> PyResult<f64> {
-        Ok(self.inner.joined(quantity, &inputs).map_err(err)?.cdf(x))
+        Ok(self
+            .inner
+            .joined_at(quantity, &inputs, &quantiles)
+            .map_err(err)?
+            .cdf(x))
     }
 
     /// Each part's distribution at `inputs`: (part, family, {parameter: value}).
@@ -2391,8 +2406,12 @@ impl RuleSet {
         &self,
         quantity: &str,
         inputs: indexmap::IndexMap<String, f64>,
+        quantiles: indexmap::IndexMap<String, f64>,
     ) -> PyResult<Vec<(String, &'static str, indexmap::IndexMap<String, f64>)>> {
-        let joined = self.inner.joined(quantity, &inputs).map_err(err)?;
+        let joined = self
+            .inner
+            .joined_at(quantity, &inputs, &quantiles)
+            .map_err(err)?;
         Ok(joined
             .parts
             .iter()
@@ -2411,6 +2430,30 @@ impl RuleSet {
 
     fn check_inputs(&self, allowed: Vec<String>) -> PyResult<()> {
         self.inner.check_inputs(&allowed).map_err(err)
+    }
+
+    /// The quantities, each after those its parts read.
+    fn order(&self) -> Vec<String> {
+        self.inner.order().to_vec()
+    }
+
+    /// The quantities `quantity`'s parts read.
+    fn upstream(&self, quantity: &str) -> PyResult<Vec<String>> {
+        self.inner.upstream(quantity).map_err(err)
+    }
+
+    /// The inputs read that are not quantities.
+    fn free_inputs(&self) -> Vec<String> {
+        self.inner.free_inputs()
+    }
+
+    /// Every quantity's value, each at its own quantile.
+    fn sample(
+        &self,
+        inputs: indexmap::IndexMap<String, f64>,
+        quantiles: indexmap::IndexMap<String, f64>,
+    ) -> PyResult<indexmap::IndexMap<String, f64>> {
+        self.inner.sample(&inputs, &quantiles).map_err(err)
     }
 }
 

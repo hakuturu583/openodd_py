@@ -21,6 +21,22 @@ them; a distribution is ``uniform`` (``low``, ``high``), ``triangular``
 ``low``..``high``). A run draws a value at a quantile (:meth:`Rules.quantile`).
 With several parts, ``combine`` (``min``, the default, or ``max``) joins the
 values they give at the same quantile. The Rust core reads and infers them.
+
+A part may read another quantity, so rules form a graph (a chain of
+conditional distributions)::
+
+    quantities:
+      visibility:
+        parts:
+          fog: {at: {fog_density: [0, 100]}, uniform: {low: [250, 15], high: [400, 40]}}
+      sight_speed:
+        parts:
+          sight: {at: {visibility: [15, 400]}, uniform: {low: [5, 25], high: [10, 35]}}
+
+A quantity read and not given is its value at its own quantile
+(``quantiles``, the median by default); one given is taken as observed.
+:attr:`Rules.order` lists the quantities each after those it reads, and
+:meth:`Rules.sample` gives every one. A cycle is refused.
 A backend holds its rules (:attr:`~.backend.Backend.rules`), and a run may
 read another file over them (:meth:`~.backend.Backend.use_rules`).
 
@@ -193,44 +209,112 @@ class Rules:
         """``min`` or ``max``: how *quantity*'s parts are joined."""
         return self._call(self._core.combine, quantity)
 
-    def evaluate(self, quantity: str, inputs: Mapping[str, float]) -> dict[str, float]:
+    def evaluate(
+        self,
+        quantity: str,
+        inputs: Mapping[str, float],
+        quantiles: Optional[Mapping[str, float]] = None,
+    ) -> dict[str, float]:
         """``low``, ``high``, ``median`` and ``mean`` of *quantity* at
         *inputs*; an input not given reads its ``default``, and one beyond its
-        outermost points is held there.
+        outermost points is held there. A quantity it reads that *inputs* does
+        not give is at its quantile in *quantiles* (the median when not
+        named).
 
         Raises:
             RulesError: On an unknown quantity, or an input not given that has
                 no default.
         """
-        return self._call(self._core.evaluate, quantity, _values(inputs))
+        return self._call(
+            self._core.evaluate, quantity, _values(inputs), _values(quantiles)
+        )
 
-    def range(self, quantity: str, inputs: Mapping[str, float]) -> tuple[float, float]:
+    def range(
+        self,
+        quantity: str,
+        inputs: Mapping[str, float],
+        quantiles: Optional[Mapping[str, float]] = None,
+    ) -> tuple[float, float]:
         """``(low, high)``: the least and greatest value *quantity* takes at
         *inputs*."""
-        out = self.evaluate(quantity, inputs)
+        out = self.evaluate(quantity, inputs, quantiles)
         return out["low"], out["high"]
 
-    def quantile(self, quantity: str, inputs: Mapping[str, float], p: float) -> float:
+    def quantile(
+        self,
+        quantity: str,
+        inputs: Mapping[str, float],
+        p: float,
+        quantiles: Optional[Mapping[str, float]] = None,
+    ) -> float:
         """The value of *quantity* at quantile *p* (0 to 1, clamped) at
         *inputs*: a share *p* of its mass lies below it. A run draws *p* and
         reads the value here; with several parts, each gives its value at
-        *p* and ``combine`` joins them."""
-        return self._call(self._core.quantile, quantity, _values(inputs), float(p))
+        *p* and ``combine`` joins them. A quantity it reads is at its own
+        quantile in *quantiles* (the median when not named)."""
+        return self._call(
+            self._core.quantile,
+            quantity,
+            _values(inputs),
+            float(p),
+            _values(quantiles),
+        )
 
-    def cdf(self, quantity: str, inputs: Mapping[str, float], x: float) -> float:
+    def cdf(
+        self,
+        quantity: str,
+        inputs: Mapping[str, float],
+        x: float,
+        quantiles: Optional[Mapping[str, float]] = None,
+    ) -> float:
         """The share of *quantity*'s mass at or below *x*, at *inputs*."""
-        return self._call(self._core.cdf, quantity, _values(inputs), float(x))
+        return self._call(
+            self._core.cdf, quantity, _values(inputs), float(x), _values(quantiles)
+        )
 
     def distributions(
-        self, quantity: str, inputs: Mapping[str, float]
+        self,
+        quantity: str,
+        inputs: Mapping[str, float],
+        quantiles: Optional[Mapping[str, float]] = None,
     ) -> list[tuple[str, str, dict[str, float]]]:
         """Each part's distribution at *inputs*: ``(part, family, params)``."""
         return [
             (name, family, dict(params))
             for name, family, params in self._call(
-                self._core.distributions, quantity, _values(inputs)
+                self._core.distributions,
+                quantity,
+                _values(inputs),
+                _values(quantiles),
             )
         ]
+
+    @property
+    def order(self) -> list[str]:
+        """The quantities, each after the quantities its parts read."""
+        return self._core.order()
+
+    def upstream(self, quantity: str) -> list[str]:
+        """The quantities *quantity*'s parts read."""
+        return self._call(self._core.upstream, quantity)
+
+    @property
+    def free_inputs(self) -> list[str]:
+        """The inputs the parts read that are not quantities: what a caller
+        gives."""
+        return self._core.free_inputs()
+
+    def sample(
+        self,
+        inputs: Mapping[str, float],
+        quantiles: Optional[Mapping[str, float]] = None,
+    ) -> dict[str, float]:
+        """Every quantity's value at *inputs*, each at its own quantile in
+        *quantiles* (0.5 when not named), in :attr:`order`: what one run
+        sets. A quantity given in *inputs* keeps the value given."""
+        return dict(
+            self._call(self._core.sample, _values(inputs), _values(quantiles))
+        )
 
     def check_inputs(self, allowed: Sequence[str]) -> None:
         """Refuse a part reading an input not in *allowed*."""
@@ -247,5 +331,7 @@ class Rules:
         return f"Rules({', '.join(self.quantities)})"
 
 
-def _values(inputs: Mapping[str, float]) -> dict[str, float]:
+def _values(inputs: Optional[Mapping[str, float]]) -> dict[str, float]:
+    if not inputs:
+        return {}
     return {str(k): float(v) for k, v in inputs.items()}

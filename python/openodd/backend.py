@@ -273,14 +273,34 @@ class Backend:
         return rules.range(quantity, self.rule_values(values))
 
     def derived_at(
-        self, quantity: str, values: Mapping[str, float], quantile: float
+        self,
+        quantity: str,
+        values: Mapping[str, float],
+        quantile: float,
+        quantiles: Optional[Mapping[str, float]] = None,
     ) -> float:
         """The value of *quantity* at *quantile* (0 to 1) at *values*: what a
-        run that drew *quantile* sets (:meth:`.Rules.quantile`)."""
+        run that drew *quantile* sets (:meth:`.Rules.quantile`). A quantity it
+        reads is at its own quantile in *quantiles* (the median when not
+        named)."""
         rules = self.active_rules
         if rules is None:
             raise RulesError(f"the {self.name} backend has no rules")
-        return rules.quantile(quantity, self.rule_values(values), quantile)
+        return rules.quantile(
+            quantity, self.rule_values(values), quantile, quantiles
+        )
+
+    def derived_sample(
+        self,
+        values: Mapping[str, float],
+        quantiles: Optional[Mapping[str, float]] = None,
+    ) -> dict[str, float]:
+        """Every quantity of :attr:`active_rules` at *values*, each at its own
+        quantile in *quantiles* (:meth:`.Rules.sample`)."""
+        rules = self.active_rules
+        if rules is None:
+            raise RulesError(f"the {self.name} backend has no rules")
+        return rules.sample(self.rule_values(values), quantiles)
 
 
     # -- what the backend says of itself ----------------------------------------
