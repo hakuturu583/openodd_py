@@ -59,7 +59,8 @@
   each part's distribution drawn over its input with draggable points, its
   values as a table, and each quantity's distribution as the inputs move. Its
   **Graph** mode edits the same rules as a factor graph: drag a variable onto
-  a factor to make it read the variable, quantities chaining into others. Its **Binding** mode edits how each attribute is measured. With
+  a factor to make it read the variable, quantities chaining into others. Load measured rows as JSON and **Fit** the graph to
+  them by maximum likelihood, in the browser. Its **Binding** mode edits how each attribute is measured. With
   a backend's manifest (`Backend.manifest()`), it follows each attribute from
   the ODD through the binding and the backend's knobs to the rules that read
   it. It is written in Rust and Leptos, with no server
@@ -106,7 +107,14 @@ else is this library's.
   It holds its own (`Backend.rules`), a run reads another file over them
   (`Backend.use_rules`), `Backend.derived_range("tire_friction", {"water": 70})`
   gives the range and `Backend.derived_at(..., quantile)` the value a run draws
-  ([docs/rules.md](docs/rules.md)). In the browser, `RulesView` draws them as an
+  ([docs/rules.md](docs/rules.md)). **Fit them to data**: `Rules.fit(rows)`
+  (or `openodd-rules-fit rules.yaml drives.csv -o fitted.yaml`) estimates
+  every parameter at every point by maximum likelihood from values measured
+  together in the real world, factor by factor through the graph -- holding
+  what the rule file (`fixed:`) or the call (`fixed=[...]`) says must not
+  move -- and writes
+  the fitted rules as a file extending the original
+  ([docs/rules.md](docs/rules.md#fitting-to-data)). In the browser, `RulesView` draws them as an
   embeddable component: each part's distribution over its input, and the
   quantity's at the inputs chosen ([docs/wasm.md](docs/wasm.md#rules)).
 

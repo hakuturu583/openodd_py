@@ -40,11 +40,12 @@ quantities:
 | `inputs` | Optional: name → `default` (the value read when none is given) and `text` |
 | `quantities` | Name → a quantity: `parts`, `combine` and an optional `text` |
 | `combine` | How the parts' values are joined: `min` (the default) or `max` |
-| `parts` | Name → a part: `at`, one distribution, and an optional `text` |
+| `parts` | Name → a part: `at`, one distribution, an optional `text`, and an optional `fixed` |
 | `at` | Input → its points, increasing. The order of the inputs is the order of the values' nesting |
 | `uniform` | `low`, `high` |
 | `triangular` | `low`, `mode`, `high` |
 | `normal` | `mean`, `sd`, truncated to `low`..`high` |
+| `fixed` | What a fit to data holds as written ([Holding values](#holding-values)): `true`, or a list of `param`, `param@input=point,...`, `@input=point,...` |
 
 - **Values.** A parameter is one number, the same everywhere, or one value per
   point. With several inputs it is nested lists, one level per input in `at`'s
@@ -109,6 +110,169 @@ quantities:
 
 `examples/wasm-viewer/chain_rules.yaml` chains the weather's grip and
 visibility to the speed and the time gap drivers keep.
+
+## Fitting to data
+
+Rules written by hand are a guess. `Rules.fit` estimates them from data
+measured in the real world -- a log of drives, each row the values seen
+together -- by **maximum likelihood**: the parameters under which the rows
+are most likely.
+
+```python
+import openodd
+
+rules = openodd.Rules.read("weather.yaml")
+rows = openodd.read_rows("drives.csv")       # water, fog, grip, visibility, ...
+fit = rules.fit(rows)
+report = fit.quantities["grip"]               # a QuantityFit
+report.rows, report.skipped                   # the rows it was fitted from, and those missing something it reads
+report.log_likelihood_before, report.log_likelihood
+fit.rules.range("grip", {"water": 70})       # the fitted rules
+fit.write("weather_fitted.yaml", extends="weather.yaml")
+backend.use_rules("weather_fitted.yaml")     # runs follow the fitted rules
+```
+
+or from the shell:
+
+```sh
+openodd-rules-fit weather.yaml drives/*.csv -o weather_fitted.yaml [-q grip] [--weight w]
+```
+
+**What is estimated.** The rule file's own numbers: every parameter at every
+point a part writes. The families, the inputs and their points stay as
+written, so the fitted file is the same rules with other numbers, and a
+point no row falls near (no row interpolates from it) keeps its value.
+
+| Family | Estimated | Held |
+|---|---|---|
+| `uniform` | `low`, `high` | |
+| `triangular` | `low`, `mode`, `high` | |
+| `normal` | `mean`, `sd` | `low`, `high`: the physical range it is truncated to |
+
+**The graph factors.** The rules are a factor graph, each quantity a
+conditional distribution given what its parts read, so the likelihood of a
+row is the product of each quantity's density at its value given what it
+reads there, and the log-likelihood is a sum, one term per quantity. Each
+quantity is fitted on its own, from the rows that give it **and** everything
+it reads: a row missing the visibility tells nothing of `sight_speed`'s
+factor (it is counted in `skipped`), nor of the visibility's. An input
+missing from a row reads its `default`, as everywhere in the rules; a
+quantity read has none. With several parts, the parts move together, so the
+quantity's density at a value is the density of the part deciding it there
+(the one whose distribution function is greatest under `min`); a part that
+never decides is free, within the bound it puts on the quantity.
+
+**Rows.** A row is a mapping of names to values: a quantity's name gives
+its observed value, an input's name the input. Values may be numbers or
+numeric strings (a CSV's); `None`, `""` and NaN are not observed, and
+columns the rules do not read -- a timestamp -- are ignored. `weights`, or
+the column `weight_column` (`--weight COLUMN`) names, weighs each row, as a
+time step's duration would; a row without a weight weighs 1. Python, the
+command and the editor read rows with the same reader, the core's.
+`read_rows` reads CSV and TSV with a header, JSON lines, and JSON: a list of
+objects, `{"rows": [...], "weight": "<column>"}` (the weight column, 1 where
+a row has none; `openodd-rules-fit` uses it unless `--weight` is given), or
+an object of columns. The editor's graph fits the same JSON in the browser
+([editor.md](editor.md#fitting-the-graph-to-data)).
+
+**How.** The likelihood is maximized by L-BFGS from the rules' current
+values. A row must lie inside a uniform's or a triangular's range, so the
+start is widened where one does not, and the fit closes the range on the
+data through a log barrier whose weight falls to 0 stage by stage. A
+triangular's `mode` is fitted as its share of the range, a normal's `sd` on
+a log scale, so each stays valid. A row outside a normal's `low`..`high` is
+an error: the range is the file's to say.
+
+**Degenerate data.** A likelihood grows without bound as a distribution
+narrows onto one value (every row the same grip, or one row near a point).
+`min_spread` (default 0.001) keeps the width at each point with data --
+`high - low`, or `sd` -- at least that share of the standard deviation of
+the quantity's values. Write points where there is data to estimate them
+from: the maximum-likelihood estimate of a uniform's range is the data's
+own envelope, which is as wide as the data happened to be.
+
+| `Rules` member | |
+|---|---|
+| `fit(rows, weights=None, *, weight_column=None, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3, fixed=())` | A `RulesFit`. `quantities` limits the fit; one named that no row gives is an error. `fixed` holds values besides the file's ([below](#holding-values)) |
+| `log_likelihood(rows, weights=None)` | Per quantity, `(log-likelihood, rows)`: how well rules -- fitted or written -- explain data; compare two on the same rows |
+
+| `RulesFit` member | |
+|---|---|
+| `rules` | The fitted rules |
+| `quantities` | Per quantity fitted: a `QuantityFit` -- `rows`, `skipped`, `log_likelihood_before` (`-inf` when a row lay outside the rules' range), `log_likelihood`, `iterations`, `converged`, and per part `points`, `points_with_data` and `estimated` (the values fitted) |
+| `text(extends=None)`, `write(path, extends=None)` | The fitted parts as a rule file. With `extends`, the rules fitted (a path, written relative to `path`, or a URL), it extends them and reads as the whole fitted set; without, it merges over them (`Rules.read_over`, `Backend.use_rules`) |
+
+### How well the rules match
+
+A fit's log-likelihood says which of two rule sets is likelier on the same
+rows, not whether either matches them. `Rules.calibration(rows)` (and each
+`QuantityFit`'s `calibration_before` and `calibration`) says that, from where
+each row's value falls in the quantity's distribution at the row's inputs --
+its quantile `u = cdf(value)`, the probability integral transform. Under
+rules that match the data, `u` is spread evenly over 0..1, whatever the
+family:
+
+| `Calibration` | |
+|---|---|
+| `in_band` | The share of rows in the distribution's central 90%: 0.9 when it matches; less when too narrow or off-centre, more when too wide |
+| `histogram` | The share of rows in each tenth of the quantiles: flat when it matches; a U when too narrow, a hump when too wide, a slope when off-centre |
+| `ks` | Kolmogorov-Smirnov's distance of `u` from even (about `1.36 / sqrt(rows)` is what chance alone gives 5% of the time) |
+| `outside` | The share of rows the rules hold impossible |
+| `mean_log_likelihood` | The log-likelihood per unit of weight: comparable across data sets of different sizes |
+
+`openodd-rules-fit` prints the band before and after; the editor shows it
+per factor as the data loads, and before and after a fit.
+
+A uniform's or triangular's fitted range closes on the data: its rows at
+the ends sit on it. The fitted file writes `low` and `high` rounded outwards
+to ten significant digits, so a reader that rounds (the editor writes ten)
+still holds every row.
+
+### Holding values
+
+A fit need not move everything. What is known -- a grip measured on a test
+track, a spread from the tyre's datasheet, a dry road nobody drove -- is
+held as written, and the rest is fitted given it.
+
+The rule file says what its author holds, on the part:
+
+```yaml
+quantities:
+  tire_friction:
+    parts:
+      water:
+        at: {water: [0, 50, 100]}
+        normal: {mean: [0.9, 0.7, 0.5], sd: 0.05, low: 0, high: 1.2}
+        fixed: [sd, "mean@water=0"]   # the spread, and the dry road's mean
+      ice:
+        at: {temperature: [-10, 0, 5]}
+        uniform: {low: [0.05, 0.1, 0.8], high: [0.15, 0.3, 1.0]}
+        fixed: true                   # all of it
+```
+
+| `fixed` entry | Holds |
+|---|---|
+| `true` | every value of the part |
+| `sd` | the parameter at every point |
+| `mean@water=0` | the parameter at one point: every input the part reads, each at one of its points (`mean@water=0,rain=50`) |
+| `"@water=0"` | every parameter at that point (quote it: YAML reads a bare `@` as reserved) |
+
+and a fit may hold more, without editing the file: `rules.fit(rows,
+fixed=[...])` or `openodd-rules-fit --fix SPEC` (repeatable) take the same
+entries prefixed by the quantity and the part -- `tire_friction`
+(a quantity whole: it is not fitted), `tire_friction.water` (a part),
+`tire_friction.water.sd`, `tire_friction.water.mean@water=0`,
+`tire_friction.water@water=0`. An entry that names nothing -- a parameter
+the family has not, a value not one of the points -- is an error.
+
+The fitted file writes only the distributions, so what the rule file holds
+stays held when the fitted file merges over it. Held values shape what is
+fitted: the free values are the best given the held ones, not the ones a
+free fit would find -- with the dry road's mean held too low, the wet road's
+rises to make up for it where the two are interpolated. A uniform's or a
+triangular's range held narrower than the data is an error (a row there is
+impossible). A triangular's `mode` held stays put while its range is fitted
+around it, and a range held leaves the `mode` alone to be fitted inside it.
 
 ## Checks
 
@@ -184,9 +348,9 @@ is refused.
 
 **How files merge.** A quantity, a part and an input the later file names
 merge over the earlier file's of that name, field by field: `combine` and
-`parts` of a quantity; `at`, the distribution and `text` of a part; `default`
-and `text` of an input. A part's `at` and its distribution are each replaced
-whole, and a distribution of another family replaces the one there (`normal:`
+`parts` of a quantity; `at`, the distribution, `text` and `fixed` of a part;
+`default` and `text` of an input. A part's `at`, its distribution and its
+`fixed` are each replaced whole, and a distribution of another family replaces the one there (`normal:`
 over `uniform:`). `null` removes a quantity, a part or an input. So
 `uniform:` alone keeps the points, and `at:` alone keeps the distribution
 (which must then have as many values as the new points).

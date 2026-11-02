@@ -18,7 +18,8 @@ use crate::doc::fresh_id;
 use crate::icons::Icon;
 use crate::io;
 use crate::rules_doc::{
-    self, num, short, tidy, AxisDoc, DistDoc, InputDoc, ParamDoc, PartDoc, QuantityDoc, RulesDoc,
+    self, num, short, tidy, AxisDoc, DistDoc, FixedDoc, InputDoc, ParamDoc, PartDoc, QuantityDoc,
+    RulesDoc,
 };
 
 pub const SAMPLE: &str = include_str!("../../../examples/wasm-viewer/sample_rules.yaml");
@@ -161,7 +162,7 @@ impl RCtx {
     }
 }
 
-fn parse_num(s: &str) -> Option<f64> {
+pub(crate) fn parse_num(s: &str) -> Option<f64> {
     s.trim().parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
@@ -224,6 +225,19 @@ fn part_doc(p: &openodd::rules::Part) -> PartDoc {
                 .collect(),
         }),
         text: p.text.clone(),
+        fixed: if p.fixed.contains(&openodd::rules::Hold::ALL) {
+            FixedDoc::All
+        } else if p.fixed.is_empty() {
+            FixedDoc::None
+        } else {
+            // Each but `Hold::ALL` (taken above) has a spec.
+            FixedDoc::Some(
+                p.fixed
+                    .iter()
+                    .filter_map(|h| h.spec(p.family, &p.axes))
+                    .collect(),
+            )
+        },
     }
 }
 
@@ -922,6 +936,103 @@ pub fn PartView(q: u64, p: u64) -> impl IntoView {
             <h3>"Distribution"</h3>
             <DistCard q=q p=p part=part/>
         </Show>
+        <h3>"Fit holds"</h3>
+        <HoldsCard q=q p=p part=part/>
+    }
+}
+
+/// What a fit to data holds of the part as written (`fixed:`): all of it,
+/// a parameter at every point, or values at points.
+#[component]
+fn HoldsCard(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
+    let ctx = rctx();
+    // The family: the document's, else the one an extended file gives.
+    let family = Memo::new(move |_| {
+        part.with(|x| x.as_ref().and_then(|x| x.dist.as_ref().map(|d| d.family)))
+            .or_else(|| ctx.read_part(q, p).map(|x| x.family))
+    });
+    let fixed =
+        Memo::new(move |_| part.with(|x| x.as_ref().map(|x| x.fixed.clone()).unwrap_or_default()));
+    let set_fixed = move |f: FixedDoc| ctx.part_update(q, p, |x| x.fixed = f);
+    let list = move || match fixed.get() {
+        FixedDoc::Some(l) => l,
+        _ => vec![],
+    };
+    let toggle_all = move |ev: leptos::ev::Event| {
+        // Off, it holds nothing: "all" replaced whatever it held before.
+        set_fixed(if event_target_checked(&ev) {
+            FixedDoc::All
+        } else {
+            FixedDoc::None
+        });
+    };
+    let toggle = move |name: &'static str, on: bool| {
+        let mut l = list();
+        l.retain(|s| s != name);
+        if on {
+            l.push(name.to_string());
+        }
+        set_fixed(l.into());
+    };
+    // The entries at points: those that are not a parameter alone.
+    let at_points = move || {
+        list()
+            .into_iter()
+            .filter(|s| s.contains('@'))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let set_points = move |ev: leptos::ev::Event| {
+        let mut l: Vec<String> = list().into_iter().filter(|s| !s.contains('@')).collect();
+        l.extend(
+            event_target_value(&ev)
+                .split_whitespace()
+                .map(str::to_string),
+        );
+        set_fixed(l.into());
+    };
+    let params = move || {
+        let Some(family) = family.get() else {
+            return vec![];
+        };
+        let all = fixed.get() == FixedDoc::All;
+        let held = list();
+        family
+            .params()
+            .iter()
+            .enumerate()
+            .map(|(k, &name)| {
+                // What a fit never estimates (a normal's truncation) is held.
+                let always = !family.fitted_params().contains(&k);
+                let checked = all || always || held.iter().any(|s| s == name);
+                view! {
+                    <label class="check" title=if always { "A fit always holds it: a normal's truncation is the physical range" } else { "Hold it at every point" }>
+                        <input type="checkbox" prop:checked=checked disabled=all || always
+                            on:change=move |ev| toggle(name, event_target_checked(&ev))/>
+                        {name}
+                    </label>
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    view! {
+        <div class="card holds-card">
+            <p class="hint">
+                "A fit to data estimates every parameter at every point; what is held here stays as written, "
+                "and the rest is fitted given it."
+            </p>
+            <label class="check">
+                <input type="checkbox" prop:checked=move || fixed.get() == FixedDoc::All on:change=toggle_all/>
+                <b>"Hold all of it"</b>
+            </label>
+            <div class="holds-params">{params}</div>
+            <label class="field">
+                <span>"At points (space-separated: mean@water=0, @water=100)"</span>
+                <input prop:value=at_points on:change=set_points
+                    disabled=move || fixed.get() == FixedDoc::All
+                    placeholder="mean@water=0"/>
+            </label>
+        </div>
     }
 }
 

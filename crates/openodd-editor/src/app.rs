@@ -162,6 +162,7 @@ pub fn App() -> impl IntoView {
     provide_context(crate::rules_app::rules_context());
     provide_context(crate::binding_app::binding_context());
     provide_context(crate::graph_app::graph_context());
+    provide_context(crate::fit_app::fit_context());
     move || match mode.get() {
         Mode::Odd => view! { <OddStudio/> }.into_any(),
         Mode::Binding => view! { <crate::binding_app::BindingStudio/> }.into_any(),

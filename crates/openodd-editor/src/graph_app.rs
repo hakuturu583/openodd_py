@@ -20,7 +20,9 @@ use crate::doc::fresh_id;
 use crate::icons::Icon;
 use crate::io;
 use crate::rules_app::{rctx, ErrorCard, PartView, QuantityView, RSel, RulesPanel, RulesToolbar};
-use crate::rules_doc::{self, num, short, tidy, InputDoc, PartDoc, QuantityDoc, RulesDoc};
+use crate::rules_doc::{
+    self, num, short, tidy, FixedDoc, InputDoc, PartDoc, QuantityDoc, RulesDoc,
+};
 
 const LAYOUT_KEY: &str = "openodd-editor/graph-layout";
 
@@ -271,10 +273,16 @@ fn tested(set: &RuleSet, probe: &[(String, f64)]) -> HashMap<String, f64> {
 }
 
 fn dist_label(part: &PartDoc) -> String {
-    part.dist
+    let family = part
+        .dist
         .as_ref()
         .map(|d| d.family.name().to_string())
-        .unwrap_or_else(|| "extended".into())
+        .unwrap_or_else(|| "extended".into());
+    match &part.fixed {
+        FixedDoc::None => family,
+        FixedDoc::All => format!("{family} · fixed"),
+        FixedDoc::Some(_) => format!("{family} · part fixed"),
+    }
 }
 
 /// The nodes and edges of the document, placed.
@@ -881,6 +889,7 @@ fn SidePanel() -> impl IntoView {
                     </p>
                     <p class="muted">"Select a node to edit it. The test below moves the inputs and shows every quantity."</p>
                 </section>
+                <crate::fit_app::FitCard/>
             </div>
             <RulesPanel/>
         }

@@ -96,6 +96,37 @@ impl Family {
         }
     }
 
+    /// The parameters a fit to data estimates (indices into
+    /// [`Family::params`]): all but a normal's truncation, the physical
+    /// range it is held to.
+    pub fn fitted_params(self) -> &'static [usize] {
+        match self {
+            Family::Uniform => &[0, 1],
+            Family::Triangular => &[0, 1, 2],
+            Family::Normal => &[0, 1],
+        }
+    }
+
+    /// The indices of `low` and `high` when a fit estimates them -- the
+    /// range every value lies in -- else `None` (a normal's are held).
+    pub fn fitted_range(self) -> Option<(usize, usize)> {
+        match self {
+            Family::Uniform => Some((0, 1)),
+            Family::Triangular => Some((0, 2)),
+            Family::Normal => None,
+        }
+    }
+
+    /// How wide the distribution of parameters `p` is: `high - low`, or a
+    /// normal's `sd`.
+    pub fn spread(self, p: &[f64]) -> f64 {
+        match self {
+            Family::Uniform => p[1] - p[0],
+            Family::Triangular => p[2] - p[0],
+            Family::Normal => p[1],
+        }
+    }
+
     /// The distribution of these parameters (in [`Family::params`]' order).
     pub fn dist(self, p: &[f64]) -> Dist {
         match self {
@@ -299,11 +330,7 @@ impl Dist {
                 high,
             } => {
                 let (a, b, z) = ((low - mean) / sd, (high - mean) / sd, (x - mean) / sd);
-                let mass = if a > 0.0 {
-                    upper(a) - upper(b)
-                } else {
-                    phi(b) - phi(a)
-                };
+                let mass = normal_mass(a, b);
                 density(z) / (sd * mass)
             }
         }
@@ -320,11 +347,7 @@ impl Dist {
                 high,
             } => {
                 let (a, b) = ((low - mean) / sd, (high - mean) / sd);
-                let mass = if a > 0.0 {
-                    upper(a) - upper(b)
-                } else {
-                    phi(b) - phi(a)
-                };
+                let mass = normal_mass(a, b);
                 (mean + sd * (density(a) - density(b)) / mass).clamp(low, high)
             }
         }
@@ -333,17 +356,27 @@ impl Dist {
 
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
 
+/// The standard normal's mass between `a` and `b` (`a <= b`), worked out in
+/// the tail the interval sits in, for precision.
+pub(crate) fn normal_mass(a: f64, b: f64) -> f64 {
+    if a > 0.0 {
+        upper(a) - upper(b)
+    } else {
+        phi(b) - phi(a)
+    }
+}
+
 /// The standard normal's distribution function.
-fn phi(z: f64) -> f64 {
+pub(crate) fn phi(z: f64) -> f64 {
     0.5 * libm::erfc(-z / SQRT_2)
 }
 
 /// Its upper tail, 1 - phi(z), without cancelling.
-fn upper(z: f64) -> f64 {
+pub(crate) fn upper(z: f64) -> f64 {
     0.5 * libm::erfc(z / SQRT_2)
 }
 
-fn density(z: f64) -> f64 {
+pub(crate) fn density(z: f64) -> f64 {
     (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt()
 }
 
@@ -430,6 +463,151 @@ pub struct Part {
     /// combination of the axes' points, the last axis fastest.
     pub values: Vec<Vec<f64>>,
     pub text: String,
+    /// What a fit to data holds as written (`fixed:`; [`crate::rules_fit`]).
+    pub fixed: Vec<Hold>,
+}
+
+/// Values of a part a fit to data holds as written: a parameter (`None`:
+/// every one) at a combination of points (`None`: every one).
+///
+/// Written `param`, `param@input=point,...` (the point named by every input's
+/// value, one of the points written) or `@input=point,...` (every parameter
+/// there); a part's `fixed: true` holds all of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hold {
+    /// An index into [`Family::params`].
+    pub param: Option<usize>,
+    /// An index into the part's combinations of points (see [`Part::values`]).
+    pub point: Option<usize>,
+}
+
+impl Hold {
+    /// Every value of a part.
+    pub const ALL: Hold = Hold {
+        param: None,
+        point: None,
+    };
+
+    /// The hold `spec` names in a part of `family` over `axes` (see [`Hold`]).
+    pub fn parse(spec: &str, family: Family, axes: &[Axis]) -> std::result::Result<Hold, String> {
+        let spec = spec.trim();
+        let (param, at) = match spec.split_once('@') {
+            Some((p, at)) => (p.trim(), Some(at)),
+            None => (spec, None),
+        };
+        let param = (!param.is_empty() || at.is_none()).then_some(param);
+        Hold::new(param, at, family, axes).map_err(|e| format!("'{spec}': {e}"))
+    }
+
+    /// The hold of parameter `param` (`None`: every one) at the point `at`
+    /// names (`input=point,...`; `None`: every point), in a part of `family`
+    /// over `axes`.
+    pub fn new(
+        param: Option<&str>,
+        at: Option<&str>,
+        family: Family,
+        axes: &[Axis],
+    ) -> std::result::Result<Hold, String> {
+        let param = match param {
+            None => None,
+            Some(name) => {
+                let names = family.params();
+                Some(names.iter().position(|n| *n == name).ok_or_else(|| {
+                    format!(
+                        "{} has no parameter '{name}'; it has {}",
+                        family.name(),
+                        names.join(", ")
+                    )
+                })?)
+            }
+        };
+        let point = at.map(|at| point_of(axes, at)).transpose()?;
+        Ok(Hold { param, point })
+    }
+
+    /// As a part's `fixed:` writes it (`mean`, `mean@water=50`,
+    /// `@water=50`); `None` for [`Hold::ALL`], which is `fixed: true`.
+    pub fn spec(&self, family: Family, axes: &[Axis]) -> Option<String> {
+        if *self == Hold::ALL {
+            return None;
+        }
+        let param = self.param.map(|k| family.params()[k]).unwrap_or_default();
+        Some(match self.point {
+            None => param.to_string(),
+            Some(n) => format!("{param}@{}", point_coords(axes, n).join(",")),
+        })
+    }
+
+    /// Whether it holds parameter `k` at combination `n`.
+    pub fn holds(&self, k: usize, n: usize) -> bool {
+        self.param.is_none_or(|p| p == k) && self.point.is_none_or(|q| q == n)
+    }
+}
+
+/// Per axis, how far apart its points' combinations are (the last axis
+/// fastest; see [`Part::values`]).
+fn strides_of(axes: &[Axis]) -> Vec<usize> {
+    let mut strides = vec![1; axes.len()];
+    for d in (0..axes.len().saturating_sub(1)).rev() {
+        strides[d] = strides[d + 1] * axes[d + 1].points.len();
+    }
+    strides
+}
+
+/// Combination `k` of `axes`' points, as `input=point` per axis.
+pub fn point_coords(axes: &[Axis], k: usize) -> Vec<String> {
+    let strides = strides_of(axes);
+    axes.iter()
+        .enumerate()
+        .map(|(d, a)| {
+            let i = k / strides[d] % a.points.len();
+            format!("{}={}", a.input, py_float_repr(a.points[i]))
+        })
+        .collect()
+}
+
+/// The combination of `axes`' points `at` names (`input=point,...`, every
+/// input once, each value one of its points).
+pub fn point_of(axes: &[Axis], at: &str) -> std::result::Result<usize, String> {
+    let mut given: IndexMap<String, f64> = IndexMap::new();
+    for pair in at.split(',') {
+        let Some((input, v)) = pair.split_once('=') else {
+            return Err(format!("'{}' is not input=point", pair.trim()));
+        };
+        let input = input.trim();
+        let v = crate::value::parse_float(v.trim())
+            .ok_or_else(|| format!("{input}={}: not a number", v.trim()))?;
+        if given.insert(input.to_string(), v).is_some() {
+            return Err(format!("{input} is named twice"));
+        }
+    }
+    let strides = strides_of(axes);
+    let mut index = 0;
+    for (d, axis) in axes.iter().enumerate() {
+        let Some(v) = given.shift_remove(&axis.input) else {
+            return Err(format!(
+                "a point names every input the part reads: {} is missing",
+                axis.input
+            ));
+        };
+        let Some(i) = axis.points.iter().position(|p| *p == v) else {
+            return Err(format!(
+                "{}={} is not one of its points ({})",
+                axis.input,
+                py_float_repr(v),
+                axis.points
+                    .iter()
+                    .map(|p| py_float_repr(*p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        };
+        index += i * strides[d];
+    }
+    if let Some(extra) = given.keys().next() {
+        return Err(format!("the part does not read {extra}"));
+    }
+    Ok(index)
 }
 
 impl Part {
@@ -441,6 +619,40 @@ impl Part {
     /// Its distribution at `values` (one per axis, in order), each held at
     /// its axis' outermost points.
     pub fn dist(&self, values: &[f64]) -> Dist {
+        let mut params = [0.0; 4];
+        self.each_corner(values, |index, w| {
+            for (p, column) in params.iter_mut().zip(&self.values) {
+                *p += w * column[index];
+            }
+        });
+        self.family.dist(&params[..self.values.len()])
+    }
+
+    /// The distribution of parameters `params` (per parameter, a value at
+    /// every combination of points, as [`Part::values`]) where `corners`
+    /// ([`Part::weights`]) says: [`Part::dist`] over other values.
+    pub fn dist_with(&self, params: &[Vec<f64>], corners: &[(usize, f64)]) -> Dist {
+        let mut p = [0.0; 4];
+        for &(index, w) in corners {
+            for (v, column) in p.iter_mut().zip(params) {
+                *v += w * column[index];
+            }
+        }
+        self.family.dist(&p[..params.len()])
+    }
+
+    /// The combinations of points the parameters at `values` (one per axis,
+    /// in order) are interpolated from, and the weight of each: every
+    /// parameter there is `sum(w * values[index])`. Weights are positive and
+    /// add up to 1.
+    pub fn weights(&self, values: &[f64]) -> Vec<(usize, f64)> {
+        let mut out = Vec::with_capacity(1 << self.axes.len());
+        self.each_corner(values, |index, w| out.push((index, w)));
+        out
+    }
+
+    /// [`Part::weights`], each given to `f` rather than collected.
+    fn each_corner(&self, values: &[f64], mut f: impl FnMut(usize, f64)) {
         // Each axis: the lower corner's index and the weight of the upper.
         let cells: Vec<(usize, f64)> = self
             .axes
@@ -449,7 +661,6 @@ impl Part {
             .map(|(axis, v)| segment(&axis.points, *v))
             .collect();
         let strides = self.strides();
-        let mut params = vec![0.0; self.values.len()];
         for corner in 0..(1usize << cells.len()) {
             let mut w = 1.0;
             let mut index = 0;
@@ -460,14 +671,10 @@ impl Part {
                 w *= if up { t } else { 1.0 - t };
                 index += j * strides[d];
             }
-            if w == 0.0 {
-                continue;
-            }
-            for (p, column) in params.iter_mut().zip(&self.values) {
-                *p += w * column[index];
+            if w != 0.0 {
+                f(index, w);
             }
         }
-        self.family.dist(&params)
     }
 
     /// The distribution written at combination `index` (see [`Part::values`]).
@@ -477,11 +684,7 @@ impl Part {
     }
 
     fn strides(&self) -> Vec<usize> {
-        let mut strides = vec![1; self.axes.len()];
-        for d in (0..self.axes.len().saturating_sub(1)).rev() {
-            strides[d] = strides[d + 1] * self.axes[d + 1].points.len();
-        }
-        strides
+        strides_of(&self.axes)
     }
 }
 
@@ -512,6 +715,24 @@ impl Combine {
             Combine::Min => "min",
             Combine::Max => "max",
         }
+    }
+
+    /// Which of the parts whose distribution functions at a value are `cdfs`
+    /// decides the quantity there, and the quantity's distribution function
+    /// there: the greatest (`min`: the least of the parts is at or below the
+    /// value as soon as any one is) or the least (`max`). The first, on a tie.
+    pub fn deciding(self, cdfs: impl IntoIterator<Item = f64>) -> (usize, f64) {
+        let mut best = (0, f64::NAN);
+        for (i, c) in cdfs.into_iter().enumerate() {
+            let better = match self {
+                Combine::Min => c > best.1,
+                Combine::Max => c < best.1,
+            };
+            if i == 0 || better {
+                best = (i, c);
+            }
+        }
+        best
     }
 
     fn join(self, a: f64, b: f64) -> f64 {
@@ -566,11 +787,9 @@ impl Joined {
     /// The share of its mass at or below `x`. The parts move together, so
     /// the least of them is at or below `x` as soon as any one is.
     pub fn cdf(&self, x: f64) -> f64 {
-        let each = self.parts.iter().map(|(_, d)| d.cdf(x));
-        match self.combine {
-            Combine::Min => each.fold(0.0, f64::max),
-            Combine::Max => each.fold(1.0, f64::min),
-        }
+        self.combine
+            .deciding(self.parts.iter().map(|(_, d)| d.cdf(x)))
+            .1
     }
 
     pub fn mean(&self) -> f64 {
@@ -1484,7 +1703,7 @@ fn read_quantity(name: &str, node: &Node, source: &str, at: &Where) -> Result<Qu
 }
 
 fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
-    let mut known = vec!["at", "text"];
+    let mut known = vec!["at", "text", "fixed"];
     known.extend(Family::ALL.iter().map(|f| f.name()));
     let map = mapping(node, at, &known)?;
     // Its axes: the inputs `at` names, in order, and their points.
@@ -1543,12 +1762,37 @@ fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
         };
         values.push(read_grid(raw, &shape, size, &here)?);
     }
+    let fixed = match get(map, "fixed") {
+        None => Vec::new(),
+        Some(raw) => {
+            let here = at.key("fixed");
+            match untag(raw) {
+            Node::Bool(true) => vec![Hold::ALL],
+            Node::Bool(false) | Node::Null => Vec::new(),
+            Node::Sequence(items) => items
+                .iter()
+                .map(|item| match untag(item) {
+                    Node::String(spec) => Hold::parse(spec, family, &axes).map_err(|e| here.error(e)),
+                    _ => Err(here.error(
+                        "a parameter (mean), a parameter at a point (mean@water=50), or a point (@water=50)",
+                    )),
+                })
+                .collect::<Result<_>>()?,
+            _ => {
+                return Err(here.error(
+                    "true (every value), or a list of a parameter (mean), a parameter at a point (mean@water=50), or a point (@water=50)",
+                ))
+            }
+            }
+        }
+    };
     let part = Part {
         name: name.to_string(),
         axes,
         family,
         values,
         text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
+        fixed,
     };
     for k in 0..size {
         part.dist_at(k)
@@ -1592,18 +1836,11 @@ fn read_grid(node: &Node, shape: &[usize], size: usize, at: &Where) -> Result<Ve
 }
 
 /// Where combination `k` of a part's points is, in words: `at water=50:`.
-fn point_words(part: &Part, mut k: usize) -> String {
+fn point_words(part: &Part, k: usize) -> String {
     if part.axes.is_empty() {
         return "everywhere:".into();
     }
-    let mut words = Vec::new();
-    for a in part.axes.iter().rev() {
-        let n = a.points.len();
-        words.push(format!("{}={}", a.input, py_float_repr(a.points[k % n])));
-        k /= n;
-    }
-    words.reverse();
-    format!("at {}:", words.join(", "))
+    format!("at {}:", point_coords(&part.axes, k).join(", "))
 }
 
 /// Where in a file a node is, for messages: `file: quantities.x.rules[0]`.
@@ -1774,6 +2011,82 @@ quantities:
         assert_eq!(all["visibility"], 200.0);
         assert_eq!(all["sight_speed"], 20.0);
         set.check_inputs(&["fog".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn a_part_says_what_a_fit_holds() {
+        let text = r#"version: 2
+quantities:
+  q:
+    parts:
+      p:
+        at: {a: [0, 10], b: [0, 1]}
+        normal: {mean: 0, sd: 1, low: -9, high: 9}
+        fixed: [sd, "mean@a=10,b=1", "@b=0,a=0"]
+"#;
+        let set = RuleSet::parse(text, "f.yaml").unwrap();
+        let part = &set.quantities["q"].parts[0];
+        let holds = &part.fixed;
+        assert_eq!(
+            holds[0],
+            Hold {
+                param: Some(1),
+                point: None
+            }
+        );
+        assert_eq!(
+            holds[1],
+            Hold {
+                param: Some(0),
+                point: Some(3)
+            }
+        );
+        assert_eq!(
+            holds[2],
+            Hold {
+                param: None,
+                point: Some(0)
+            }
+        );
+        let held = |k, n| holds.iter().any(|h: &Hold| h.holds(k, n));
+        assert!(held(1, 2) && held(0, 3) && held(3, 0));
+        assert!(!held(0, 1));
+        let spec = |h: &Hold| h.spec(part.family, &part.axes).unwrap();
+        let specs: Vec<_> = holds.iter().map(spec).collect();
+        assert_eq!(specs, ["sd", "mean@a=10.0,b=1.0", "@a=0.0,b=0.0"]);
+        for h in holds {
+            assert_eq!(&Hold::parse(&spec(h), part.family, &part.axes).unwrap(), h);
+        }
+        let all = text.replace(
+            "fixed: [sd, \"mean@a=10,b=1\", \"@b=0,a=0\"]",
+            "fixed: true",
+        );
+        let set = RuleSet::parse(&all, "f.yaml").unwrap();
+        assert_eq!(set.quantities["q"].parts[0].fixed, [Hold::ALL]);
+        for (bad, says) in [
+            (
+                "[median]",
+                "normal has no parameter 'median'; it has mean, sd, low, high",
+            ),
+            (
+                "[\"mean@a=5,b=0\"]",
+                "a=5.0 is not one of its points (0.0, 10.0)",
+            ),
+            (
+                "[\"mean@a=0\"]",
+                "a point names every input the part reads: b is missing",
+            ),
+            ("[\"mean@a=0,b=0,c=1\"]", "the part does not read c"),
+            ("[1]", "a parameter (mean)"),
+            ("yes please", "true (every value)"),
+        ] {
+            let t = text.replace("[sd, \"mean@a=10,b=1\", \"@b=0,a=0\"]", bad);
+            let err = RuleSet::parse(&t, "f.yaml").unwrap_err().to_string();
+            assert!(
+                err.contains("quantities.q.parts.p.fixed") && err.contains(says),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]

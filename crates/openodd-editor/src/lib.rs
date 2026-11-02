@@ -7,13 +7,15 @@
 //!
 //! The rules editor edits a backend's rules (conditional distributions): [`rules_doc`] is the rule
 //! file as it holds it, and [`rules_app`] its interface; [`graph_app`] edits
-//! the same rules as a factor graph.
+//! the same rules as a factor graph, and [`fit_app`] fits them to data.
 
 pub mod app;
 pub mod binding;
 pub mod binding_app;
 pub mod check;
 pub mod doc;
+pub mod fit_app;
+pub mod fit_job;
 pub mod forms;
 pub mod graph_app;
 pub mod icons;

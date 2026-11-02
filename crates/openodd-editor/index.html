@@ -7,6 +7,8 @@
     <title>OpenODD Studio</title>
     <link data-trunk rel="css" href="style.css" />
     <link data-trunk rel="rust" data-bin="openodd-editor" data-wasm-opt="z" />
+    <!-- Fits the rules to data off the page's thread (src/bin/fit_worker.rs). -->
+    <link data-trunk rel="rust" data-bin="fit_worker" data-type="worker" data-loader-shim data-wasm-opt="z" />
   </head>
   <body>
     <noscript>The editor needs JavaScript and WebAssembly.</noscript>

@@ -10,7 +10,7 @@
 //! not kept.
 
 use indexmap::IndexMap;
-use openodd::rules::{Axis, Dist, Family, Fetch, Origin, Part, RuleSet};
+use openodd::rules::{Axis, Dist, Family, Fetch, Hold, Origin, Part, RuleSet};
 use serde_norway::{Mapping, Value};
 
 use crate::doc::fresh_id;
@@ -49,6 +49,32 @@ pub struct PartDoc {
     /// `None`: the file does not name it.
     pub dist: Option<DistDoc>,
     pub text: String,
+    /// What a fit to data holds as written (`fixed:`), kept as the file
+    /// writes it.
+    pub fixed: FixedDoc,
+}
+
+/// A part's `fixed:`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum FixedDoc {
+    /// Not written: a fit estimates every value.
+    #[default]
+    None,
+    /// `fixed: true`: every value.
+    All,
+    /// `fixed: [mean, "sd@water=50", ...]`.
+    Some(Vec<String>),
+}
+
+impl From<Vec<String>> for FixedDoc {
+    /// The entries a part holds: none is [`FixedDoc::None`].
+    fn from(entries: Vec<String>) -> Self {
+        if entries.is_empty() {
+            FixedDoc::None
+        } else {
+            FixedDoc::Some(entries)
+        }
+    }
 }
 
 impl PartDoc {
@@ -68,6 +94,7 @@ impl PartDoc {
                 params: vec![param("low", vec![0.0; 3]), param("high", vec![1.0; 3])],
             }),
             text: String::new(),
+            fixed: FixedDoc::None,
         }
     }
 
@@ -88,18 +115,30 @@ impl PartDoc {
         if dist.params.iter().any(|p| p.values.len() != size) {
             return None;
         }
+        let axes: Vec<Axis> = axes
+            .iter()
+            .map(|a| Axis {
+                input: a.input.clone(),
+                points: a.points.clone(),
+            })
+            .collect();
+        let fixed = match &self.fixed {
+            FixedDoc::None => Vec::new(),
+            FixedDoc::All => vec![Hold::ALL],
+            // Those that name what the part has; the file's reader says
+            // what is wrong with the others.
+            FixedDoc::Some(specs) => specs
+                .iter()
+                .filter_map(|spec| Hold::parse(spec, dist.family, &axes).ok())
+                .collect(),
+        };
         Some(Part {
             name: self.name.clone(),
-            axes: axes
-                .iter()
-                .map(|a| Axis {
-                    input: a.input.clone(),
-                    points: a.points.clone(),
-                })
-                .collect(),
+            axes,
             family: dist.family,
             values: dist.params.iter().map(|p| p.values.clone()).collect(),
             text: self.text.clone(),
+            fixed,
         })
     }
 
@@ -377,6 +416,42 @@ pub struct RulesDoc {
 }
 
 impl RulesDoc {
+    /// Write a fit's overlay (the fitted parts as a rule file,
+    /// `openodd::rules_fit::Fit::text`) into the document: each part's
+    /// distribution as the overlay writes it. A quantity or a part only an
+    /// extended file names is written here, its distribution alone, to
+    /// merge over that file's.
+    pub fn apply_overlay(&mut self, overlay: &str) -> Result<(), String> {
+        let fitted = RulesDoc::from_yaml(overlay)?;
+        for fq in fitted.quantities {
+            let i = match self.quantities.iter().position(|q| q.name == fq.name) {
+                Some(i) => i,
+                None => {
+                    self.quantities.push(QuantityDoc {
+                        parts: vec![],
+                        ..fq.clone()
+                    });
+                    self.quantities.len() - 1
+                }
+            };
+            let parts = &mut self.quantities[i].parts;
+            for fp in fq.parts {
+                match parts.iter_mut().find(|p| p.name == fp.name) {
+                    Some(p) => {
+                        // Points an extended file gives come along: the
+                        // values are laid out over them.
+                        if p.axes.is_none() {
+                            p.axes = fp.axes;
+                        }
+                        p.dist = fp.dist;
+                    }
+                    None => parts.push(fp),
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn quantity(&self, id: u64) -> Option<&QuantityDoc> {
         self.quantities.iter().find(|q| q.id == id)
     }
@@ -508,7 +583,11 @@ impl RulesDoc {
             out.push_str("    parts:\n");
             for p in &q.parts {
                 out.push_str(&format!("      {}:\n", scalar(&p.name)));
-                if p.axes.is_none() && p.dist.is_none() && p.text.is_empty() {
+                if p.axes.is_none()
+                    && p.dist.is_none()
+                    && p.text.is_empty()
+                    && p.fixed == FixedDoc::None
+                {
                     out.push_str("        {}\n");
                 }
                 if !p.text.is_empty() {
@@ -520,6 +599,18 @@ impl RulesDoc {
                         .map(|a| format!("{}: {}", scalar(&a.input), list(&a.points)))
                         .collect();
                     out.push_str(&format!("        at: {{{}}}\n", at.join(", ")));
+                }
+                match &p.fixed {
+                    FixedDoc::None => {}
+                    FixedDoc::All => out.push_str("        fixed: true\n"),
+                    FixedDoc::Some(specs) => out.push_str(&format!(
+                        "        fixed: [{}]\n",
+                        specs
+                            .iter()
+                            .map(|s| scalar(s))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
                 }
                 if let Some(d) = &p.dist {
                     out.push_str(&format!("        {}:\n", d.family.name()));
@@ -557,17 +648,7 @@ fn list(xs: &[f64]) -> String {
 
 /// `values` (the last axis fastest) as nested lists of `shape`.
 fn nested(values: &[f64], shape: &[usize]) -> String {
-    match shape {
-        [] | [_] => list(values),
-        [_, rest @ ..] => {
-            let step: usize = rest.iter().product();
-            if step == 0 {
-                return "[]".into();
-            }
-            let rows: Vec<String> = values.chunks(step).map(|c| nested(c, rest)).collect();
-            format!("[{}]", rows.join(", "))
-        }
-    }
+    openodd::rules_fit::nested_list(values, shape, &num)
 }
 
 fn read_quantity(name: &str, v: &Value) -> Result<QuantityDoc, String> {
@@ -609,6 +690,7 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
         axes: None,
         dist: None,
         text: String::new(),
+        fixed: FixedDoc::None,
     };
     let mut raw_dist: Option<(Family, &Value)> = None;
     for (k, v) in m {
@@ -639,6 +721,20 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
                 p.axes = Some(axes);
             }
             "text" => p.text = text_of(v),
+            "fixed" => {
+                p.fixed = match v {
+                    Value::Bool(true) => FixedDoc::All,
+                    Value::Bool(false) | Value::Null => FixedDoc::None,
+                    Value::Sequence(items) => FixedDoc::Some(
+                        items
+                            .iter()
+                            .map(|i| i.as_str().map(str::to_string))
+                            .collect::<Option<_>>()
+                            .ok_or_else(|| format!("{at}.fixed: a list of parameters"))?,
+                    ),
+                    _ => return Err(format!("{at}.fixed: true, or a list of parameters")),
+                }
+            }
             other => return Err(format!("{at}: unknown field '{other}'")),
         }
     }
@@ -928,6 +1024,104 @@ mod tests {
         assert!(yaml.contains("at: {fog: [0, 30, 70, 100]}"), "{yaml}");
         let set = check(&yaml, "a.yaml", &[]).unwrap();
         assert_eq!(set.upstream("sight_speed").unwrap(), ["sight"]);
+    }
+
+    #[test]
+    fn a_fit_is_written_into_the_document() {
+        let text = "version: 2\nquantities:\n  q:\n    parts:\n      p:\n        at: {a: [0, 10]}\n        normal: {mean: [0, 1], sd: 1, low: -9, high: 9}\n";
+        let mut doc = RulesDoc::from_yaml(text).unwrap();
+        let set = RuleSet::parse(text, "f.yaml").unwrap();
+        let rows: Vec<IndexMap<String, f64>> = (0..200)
+            .map(|i| {
+                let a = (i % 11) as f64;
+                IndexMap::from([
+                    ("a".to_string(), a),
+                    ("q".to_string(), 0.3 * a + 0.01 * (i % 7) as f64),
+                ])
+            })
+            .collect();
+        let options = openodd::rules_fit::FitOptions {
+            fixed: vec!["q.p.sd".into()],
+            ..Default::default()
+        };
+        let fit = set.fit(&rows, None, &options).unwrap();
+        doc.apply_overlay(&fit.text(None)).unwrap();
+        let dist = doc.quantities[0].parts[0].dist.as_ref().unwrap();
+        assert!((dist.params[0].values[1] - 3.0).abs() < 0.2, "{dist:?}");
+        // sd was one number and held: it stays one number.
+        assert!(dist.params[1].constant);
+        let written = doc.to_yaml().unwrap();
+        assert!(written.contains("sd: 1"), "{written}");
+        let again = RuleSet::parse(&written, "w.yaml").unwrap();
+        // The editor writes ten significant digits.
+        let got = &again.quantities["q"].parts[0].values;
+        let want = &fit.rules.quantities["q"].parts[0].values;
+        for (g, w) in got.iter().flatten().zip(want.iter().flatten()) {
+            assert!((g - w).abs() <= 1e-9 * w.abs().max(1.0), "{g} vs {w}");
+        }
+    }
+
+    #[test]
+    fn a_fit_of_a_part_an_extended_file_gives_keeps_its_grid() {
+        let base = "version: 2\nquantities:\n  q:\n    parts:\n      p:\n        at: {a: [0, 10], b: [0, 1]}\n        normal: {mean: [[0, 1], [2, 3]], sd: 1, low: -20, high: 20}\n";
+        // This file changes only the text: the points and values are the base's.
+        let text = "version: 2\nextends: base.yaml\nquantities:\n  q:\n    parts:\n      p: {text: tuned}\n";
+        let library = vec![("base.yaml".to_string(), base.to_string())];
+        let set = check(text, "over.yaml", &library).unwrap();
+        let rows: Vec<IndexMap<String, f64>> = (0..400)
+            .map(|i| {
+                let (a, b) = ((i % 11) as f64, (i % 2) as f64);
+                IndexMap::from([
+                    ("a".to_string(), a),
+                    ("b".to_string(), b),
+                    (
+                        "q".to_string(),
+                        0.5 * a + 2.0 * b + 0.1 * ((i % 5) as f64 - 2.0),
+                    ),
+                ])
+            })
+            .collect();
+        let fit = set.fit(&rows, None, &Default::default()).unwrap();
+        let mut doc = RulesDoc::from_yaml(text).unwrap();
+        doc.apply_overlay(&fit.text(None)).unwrap();
+        let written = doc.to_yaml().unwrap();
+        let again = check(&written, "over.yaml", &library).unwrap();
+        let (got, want) = (
+            &again.quantities["q"].parts[0],
+            &fit.rules.quantities["q"].parts[0],
+        );
+        assert_eq!(got.axes, want.axes);
+        for (g, w) in got
+            .values
+            .iter()
+            .flatten()
+            .zip(want.values.iter().flatten())
+        {
+            assert!((g - w).abs() <= 1e-9 * w.abs().max(1.0), "{g} vs {w}");
+        }
+        assert_eq!(got.text, "tuned");
+    }
+
+    #[test]
+    fn what_a_fit_holds_is_kept() {
+        let text = "version: 2\nquantities:\n  q:\n    parts:\n      p:\n        fixed: [sd, \"@a=0\", \"mean@a=10\"]\n        at: {a: [0, 10]}\n        normal: {mean: [0, 1], sd: 1, low: -9, high: 9}\n      r:\n        fixed: true\n        at: {a: [0, 10]}\n        uniform: {low: 0, high: 1}\n";
+        let doc = RulesDoc::from_yaml(text).unwrap();
+        let p = &doc.quantities[0].parts[0];
+        assert_eq!(
+            p.fixed,
+            FixedDoc::Some(vec!["sd".into(), "@a=0".into(), "mean@a=10".into()])
+        );
+        assert_eq!(doc.quantities[0].parts[1].fixed, FixedDoc::All);
+        let written = doc.to_yaml().unwrap();
+        let again = RulesDoc::from_yaml(&written).unwrap();
+        assert_eq!(again.quantities[0].parts[0].fixed, p.fixed);
+        let core = p.core().unwrap();
+        assert_eq!(core.fixed.len(), 3);
+        let held = |k, n| core.fixed.iter().any(|h| h.holds(k, n));
+        assert!(held(1, 1) && held(2, 0) && held(0, 1) && !held(2, 1));
+        // The core reads what the editor writes.
+        let set = RuleSet::parse(&written, "w.yaml").unwrap();
+        assert_eq!(set.quantities["q"].parts[0].fixed, core.fixed);
     }
 
     #[test]
