@@ -4,19 +4,32 @@
 //! `rules_fit`, the same code the Python package runs). What a part's
 //! `fixed:` holds stays as written; the fitted values are written into the
 //! document, and one step undoes it.
+//!
+//! The fit runs in a Web Worker (`src/bin/fit_worker.rs`), so the page stays
+//! free, and shows how far it has come and about how long is left; it can
+//! be cancelled. Where no worker starts (a page embedding the studio without
+//! the worker's files), it runs on the page's thread instead.
 
 use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use openodd::rules_fit::{observations_from_json, FitOptions, Observations, QuantityFit};
-use web_sys::HtmlInputElement;
+use openodd::rules::RuleSet;
+use openodd::rules_fit::{observations_from_json, Observations};
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use web_sys::{ErrorEvent, HtmlInputElement, MessageEvent, Worker};
 
 use crate::app::event_target;
+use crate::fit_job::{self, Job, QuantityReport, Reply};
 use crate::icons::Icon;
 use crate::io;
-use crate::rules_app::rctx;
+use crate::rules_app::{rctx, RCtx};
 use crate::rules_doc::{num, short, RulesDoc};
+
+/// The worker's script, beside the page (Trunk's loader shim for
+/// `fit_worker`).
+const WORKER: &str = "./fit_worker_loader.js";
 
 const DATA_KEY: &str = "openodd-editor/fit-data";
 const DATA_NAME_KEY: &str = "openodd-editor/fit-data-name";
@@ -29,11 +42,25 @@ pub struct FCtx {
     /// The rows of the data, as the rules read them, or why they do not read.
     pub observations: Memo<Option<Result<Observations, String>>>,
     /// The last fit's report.
-    pub report: RwSignal<Option<Vec<QuantityFit>>>,
+    pub report: RwSignal<Option<Vec<QuantityReport>>>,
     /// The document before the last fit: what undo restores.
     pub before: RwSignal<Option<RulesDoc>>,
     pub running: RwSignal<bool>,
     pub min_spread: RwSignal<f64>,
+    /// How far the running fit has come: (fraction, quantity, index, count).
+    pub progress: RwSignal<Option<(f64, String, usize, usize)>>,
+    /// When it started (`Date.now()`, ms).
+    pub started: RwSignal<f64>,
+    /// It runs on the page's thread: no progress until it ends.
+    pub on_thread: RwSignal<bool>,
+    worker: StoredValue<Option<Running>, LocalStorage>,
+}
+
+/// A fit running in a worker, and the handlers that must live as long.
+struct Running {
+    worker: Worker,
+    _message: Closure<dyn FnMut(MessageEvent)>,
+    _error: Closure<dyn FnMut(ErrorEvent)>,
 }
 
 pub fn fctx() -> FCtx {
@@ -64,6 +91,157 @@ pub fn fit_context() -> FCtx {
         before: RwSignal::new(None),
         running: RwSignal::new(false),
         min_spread: RwSignal::new(1e-3),
+        progress: RwSignal::new(None),
+        started: RwSignal::new(0.0),
+        on_thread: RwSignal::new(false),
+        worker: StoredValue::new_local(None),
+    }
+}
+
+impl FCtx {
+    /// Stop the worker, if one runs; its handlers go once this call is done.
+    fn stop_worker(&self) {
+        let mut taken = None;
+        self.worker.update_value(|w| taken = w.take());
+        if let Some(running) = taken {
+            running.worker.terminate();
+            // Not dropped here: this may run inside one of its handlers.
+            set_timeout(move || drop(running), Duration::ZERO);
+        }
+    }
+
+    fn end(&self) {
+        self.running.set(false);
+        self.progress.set(None);
+        self.on_thread.set(false);
+    }
+
+    /// Fit `set` (the rules as `job` writes them) to the job's data: in a
+    /// worker, else on the page's thread.
+    fn start(&self, r: RCtx, set: RuleSet, job: Job) {
+        let f = *self;
+        f.running.set(true);
+        f.on_thread.set(false);
+        f.progress.set(Some((0.0, String::new(), 0, 0)));
+        f.started.set(js_sys::Date::now());
+        let Ok(worker) = Worker::new(WORKER) else {
+            return f.run_here(r, set, job);
+        };
+        let heard = RwSignal::new(false);
+        let (set_m, job_e, set_e) = (set.clone(), job.clone(), set);
+        let message = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
+            heard.set(true);
+            let text = ev.data().as_string().unwrap_or_default();
+            match serde_json::from_str::<Reply>(&text) {
+                Ok(Reply::Progress {
+                    fraction,
+                    quantity,
+                    index,
+                    count,
+                }) => f.progress.set(Some((fraction, quantity, index, count))),
+                Ok(done) => {
+                    f.stop_worker();
+                    f.finish(r, &set_m, done);
+                }
+                Err(e) => {
+                    f.stop_worker();
+                    f.finish(
+                        r,
+                        &set_m,
+                        Reply::Failed {
+                            error: e.to_string(),
+                        },
+                    );
+                }
+            }
+        });
+        let error = Closure::<dyn FnMut(ErrorEvent)>::new(move |ev: ErrorEvent| {
+            f.stop_worker();
+            if heard.get_untracked() {
+                f.finish(
+                    r,
+                    &set_e,
+                    Reply::Failed {
+                        error: ev.message(),
+                    },
+                );
+            } else {
+                // The worker never started (its script is not beside the
+                // page): fit here instead.
+                f.run_here(r, set_e.clone(), job_e.clone());
+            }
+        });
+        worker.set_onmessage(Some(message.as_ref().unchecked_ref()));
+        worker.set_onerror(Some(error.as_ref().unchecked_ref()));
+        let sent = serde_json::to_string(&job)
+            .map_err(|e| e.to_string())
+            .and_then(|t| {
+                worker
+                    .post_message(&JsValue::from_str(&t))
+                    .map_err(|_| "cannot reach the fit's worker".to_string())
+            });
+        f.worker.set_value(Some(Running {
+            worker,
+            _message: message,
+            _error: error,
+        }));
+        if let Err(e) = sent {
+            f.stop_worker();
+            f.finish(r, &RuleSet::default(), Reply::Failed { error: e });
+        }
+    }
+
+    /// Fit on the page's thread: it waits, so no progress is shown.
+    fn run_here(&self, r: RCtx, set: RuleSet, job: Job) {
+        let f = *self;
+        f.on_thread.set(true);
+        // Let the page show that it runs before the fit takes the thread.
+        set_timeout(
+            move || {
+                let reply = fit_job::run(&job, &mut |_| {});
+                f.finish(r, &set, reply);
+            },
+            Duration::from_millis(30),
+        );
+    }
+
+    /// Write a finished fit into the document (`set`: the rules it fitted).
+    fn finish(&self, r: RCtx, set: &RuleSet, reply: Reply) {
+        match reply {
+            Reply::Done { overlay, report } => match fit_job::fitted(set, &overlay) {
+                Ok(fitted) => {
+                    let names: Vec<String> = report.iter().map(|q| q.name.clone()).collect();
+                    self.before.set(Some(r.doc.get_untracked()));
+                    r.doc.update(|d| d.apply_fitted(&fitted, &names));
+                    let secs = (js_sys::Date::now() - self.started.get_untracked()) / 1000.0;
+                    r.notice.set(Some((
+                        true,
+                        match names.len() {
+                            0 => "Nothing to fit: no factor has a row it reads".to_string(),
+                            1 => format!("Fitted {} in {}", names[0], duration(secs)),
+                            n => format!("Fitted {n} quantities in {}", duration(secs)),
+                        },
+                    )));
+                    self.report.set(Some(report));
+                }
+                Err(e) => r.notice.set(Some((false, format!("Fit: {e}")))),
+            },
+            Reply::Failed { error } => r.notice.set(Some((false, format!("Fit: {error}")))),
+            Reply::Progress { .. } => return,
+        }
+        self.end();
+    }
+}
+
+/// `secs` as people read it: `0.4 s`, `12 s`, `3 min 5 s`.
+fn duration(secs: f64) -> String {
+    if secs < 10.0 {
+        format!("{:.1} s", secs.max(0.0))
+    } else if secs < 60.0 {
+        format!("{:.0} s", secs)
+    } else {
+        let s = secs.round() as u64;
+        format!("{} min {} s", s / 60, s % 60)
     }
 }
 
@@ -96,47 +274,26 @@ pub fn FitCard() -> impl IntoView {
         io::save_text(DATA_KEY, "");
     };
     let run = move |_| {
-        let Ok(set) = r.checked.get_untracked() else {
+        let (Ok(set), Ok(yaml)) = (r.checked.get_untracked(), r.yaml.get_untracked()) else {
             r.notice.set(Some((
                 false,
                 "The rules do not read: fix them first".into(),
             )));
             return;
         };
-        let Some(Ok(obs)) = f.observations.get_untracked() else {
+        let Some((_, data)) = f.data.get_untracked() else {
             return;
         };
-        f.running.set(true);
-        // Let the page show that it runs before the fit takes the thread.
-        set_timeout(
-            move || {
-                let options = FitOptions {
-                    min_spread: f.min_spread.get_untracked(),
-                    ..FitOptions::default()
-                };
-                match set.fit(&obs.rows, obs.weights.as_deref(), &options) {
-                    Ok(fit) => {
-                        let names: Vec<String> =
-                            fit.quantities.iter().map(|q| q.name.clone()).collect();
-                        f.before.set(Some(r.doc.get_untracked()));
-                        r.doc.update(|d| d.apply_fitted(&fit.rules, &names));
-                        r.notice.set(Some((
-                            true,
-                            match names.len() {
-                                0 => "Nothing to fit: no factor has a row it reads".to_string(),
-                                1 => format!("Fitted {}", names[0]),
-                                n => format!("Fitted {n} quantities"),
-                            },
-                        )));
-                        f.report.set(Some(fit.quantities));
-                    }
-                    Err(e) => r.notice.set(Some((false, format!("Fit: {e}")))),
-                }
-                f.running.set(false);
-            },
-            Duration::from_millis(30),
-        );
+        let job = Job {
+            yaml,
+            name: r.name.get_untracked(),
+            library: r.library.get_untracked(),
+            data,
+            min_spread: f.min_spread.get_untracked(),
+        };
+        f.start(r, set, job);
     };
+
     let undo = move |_| {
         if let Some(doc) = f.before.get_untracked() {
             r.doc.set(doc);
@@ -184,6 +341,9 @@ pub fn FitCard() -> impl IntoView {
                     <button class="button subtle" on:click=undo>"Undo fit"</button>
                 </Show>
             </div>
+            <Show when=move || f.running.get()>
+                <FitProgress/>
+            </Show>
             <DataSummary/>
             <FitReport/>
             <details class="fit-help">
@@ -212,6 +372,55 @@ pub fn FitCard() -> impl IntoView {
                 </label>
             </details>
         </section>
+    }
+}
+
+/// The running fit: a bar of how far it has come, and about how long is left.
+#[component]
+fn FitProgress() -> impl IntoView {
+    let r = rctx();
+    let f = fctx();
+    let cancel = move |_| {
+        f.stop_worker();
+        f.end();
+        r.notice.set(Some((true, "Cancelled the fit".into())));
+    };
+    let fraction = move || f.progress.get().map_or(0.0, |p| p.0);
+    let width = move || format!("width: {:.1}%", 100.0 * fraction());
+    let text = move || {
+        if f.on_thread.get() {
+            return "Fitting on the page (no worker): it waits until done…".to_string();
+        }
+        let Some((fr, quantity, index, count)) = f.progress.get() else {
+            return String::new();
+        };
+        let elapsed = (js_sys::Date::now() - f.started.get_untracked()) / 1000.0;
+        let which = if count > 0 {
+            format!("{quantity} ({} of {count})", index + 1)
+        } else {
+            "starting".to_string()
+        };
+        // The time left, from the pace so far, once there is a pace to go by.
+        let left = if fr >= 0.03 && elapsed >= 0.3 {
+            format!(" · about {} left", duration(elapsed * (1.0 - fr) / fr))
+        } else {
+            " · estimating the time…".to_string()
+        };
+        format!("Fitting {which} · {:.0}%{left}", 100.0 * fr)
+    };
+    view! {
+        <div class="fit-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+            aria-valuenow=move || format!("{:.0}", 100.0 * fraction())>
+            <div class="fit-progress-bar" class:indeterminate=move || f.on_thread.get()>
+                <div style=width></div>
+            </div>
+            <div class="fit-progress-line">
+                <span class="hint">{text}</span>
+                <Show when=move || !f.on_thread.get()>
+                    <button class="mini" on:click=cancel>"Cancel"</button>
+                </Show>
+            </div>
+        </div>
     }
 }
 
@@ -301,7 +510,7 @@ fn FitReport() -> impl IntoView {
             .map(|q| {
                 let estimated: usize = q.parts.iter().map(|p| p.estimated).sum();
                 let state = if q.converged { "converged" } else { "stopped: max iterations" };
-                let ll = |v: f64| if v.is_finite() { short(v) } else { "−∞".to_string() };
+                let ll = |v: Option<f64>| v.map_or_else(|| "−∞".to_string(), short);
                 let title = q
                     .parts
                     .iter()

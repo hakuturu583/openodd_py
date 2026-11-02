@@ -219,8 +219,14 @@ maximum likelihood, in the browser -- the same code as Python's `Rules.fit`
    many rows it **reads** (they give its quantity and everything it reads)
    and how many it **skips** (they give its quantity but miss something it
    reads). A factor no row reads is greyed and left as it is.
-3. **Fit** writes the fitted parameters into the document, every point of
-   every part fitted; the YAML, the charts and the graph follow. The table
+3. **Fit** runs the fit in a Web Worker, so the page stays free while it
+   runs: a bar shows how far it has come -- the quantity being fitted, the
+   share done and about how long is left, from the pace so far -- and
+   **Cancel** stops it. The share done is an estimate: each quantity weighs
+   its rows, parts and the stages of its fit, and an iteration count is not
+   known ahead. When it ends, the fitted parameters are written into the
+   document, every point of every part fitted; the YAML, the charts and the
+   graph follow. The table
    below gives each quantity's rows, its log-likelihood before and after,
    the values estimated and whether the fit converged. **Undo fit** puts the
    rules back as they were.
@@ -230,8 +236,16 @@ the part, a parameter at every point (a normal's `low` and `high` always
 are), or values at points (`mean@water=0`, `@water=100`). It is the part's
 `fixed:` ([rules.md](rules.md#holding-values)); a factor holding something
 says so on the canvas (`· fixed`, `· part fixed`). The data is kept in the
-browser with the draft. The fit runs on the page's thread: the editor waits
-for it, which for thousands of rows is a second or so.
+browser with the draft.
+
+The worker is its own small program, `src/bin/fit_worker.rs`, which Trunk
+builds beside the editor (`index.html`: `data-type="worker"` with a loader
+shim) and the page starts as `fit_worker_loader.js`. It receives the rules
+as YAML, the files they extend and the data, and posts its progress (at
+most every 50 ms) and the fitted parts back as JSON (`fit_job.rs`, tested
+natively). A page that embeds the studio without the worker's files still
+fits: when the worker does not start, the fit runs on the page's thread,
+the bar runs without a share, and the page waits until it is done.
 
 ## Embedding the studio
 
@@ -250,6 +264,9 @@ cd crates/openodd-editor
 trunk serve                         # http://127.0.0.1:8080, rebuilt on change
 trunk build --release --cargo-profile wasm-release   # into dist/
 ```
+
+Trunk builds two programs: the editor, and the fit's worker
+(`fit_worker`, with its `fit_worker_loader.js`); both land in `dist/`.
 
 The `wasm-release` profile (in the workspace `Cargo.toml`) optimises for size:
 the page is under 2 MB of WebAssembly, about 770 KB gzipped.

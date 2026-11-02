@@ -15,6 +15,7 @@ pub mod binding_app;
 pub mod check;
 pub mod doc;
 pub mod fit_app;
+pub mod fit_job;
 pub mod forms;
 pub mod graph_app;
 pub mod icons;

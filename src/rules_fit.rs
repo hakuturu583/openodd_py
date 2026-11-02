@@ -109,6 +109,20 @@ pub struct QuantityFit {
     pub parts: Vec<PartFit>,
 }
 
+/// How far a fit has come ([`RuleSet::fit_with_progress`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Progress {
+    /// The share of the work done, 0 to 1: an estimate, each quantity
+    /// weighed by its rows, parts and stages, and within one the stages
+    /// done and how far the current one has come.
+    pub fraction: f64,
+    /// The quantity being fitted.
+    pub quantity: String,
+    /// Its place among the quantities fitted (from 0), and how many there are.
+    pub index: usize,
+    pub count: usize,
+}
+
 /// A fit: the fitted rules, and how each quantity was fitted.
 #[derive(Debug, Clone)]
 pub struct Fit {
@@ -357,6 +371,18 @@ impl RuleSet {
         weights: Option<&[f64]>,
         options: &FitOptions,
     ) -> Result<Fit> {
+        self.fit_with_progress(rows, weights, options, &mut |_| {})
+    }
+
+    /// [`RuleSet::fit`], telling `progress` how far it has come as it goes:
+    /// at the start of each quantity, and at every iteration.
+    pub fn fit_with_progress(
+        &self,
+        rows: &[IndexMap<String, f64>],
+        weights: Option<&[f64]>,
+        options: &FitOptions,
+        progress: &mut dyn FnMut(&Progress),
+    ) -> Result<Fit> {
         check_weights(rows, weights)?;
         if !(options.min_spread > 0.0) {
             return Err(Error::value(format!(
@@ -397,8 +423,7 @@ impl RuleSet {
                 None => parts.iter_mut().for_each(|p| p.push(Hold::ALL)),
             }
         }
-        let mut reports = Vec::new();
-        let mut fitted: Vec<(String, Vec<Vec<Vec<f64>>>)> = Vec::new();
+        let mut todo = Vec::new();
         for name in &wanted {
             let q = self.quantity(name)?;
             let held = &holds[name];
@@ -422,9 +447,41 @@ impl RuleSet {
                 }
                 continue;
             }
-            let (params, report) = fit_quantity(q, &data, held, options)?;
+            todo.push((q, held, data));
+        }
+        // The work each quantity is, roughly: its rows, times the
+        // distributions each row reads, times the stages of its fit.
+        let cost: Vec<f64> = todo
+            .iter()
+            .map(|(q, _, data)| {
+                let stages = if q.parts.iter().any(|p| p.family != Family::Normal) {
+                    BARRIER.len()
+                } else {
+                    1
+                };
+                (data.y.len() * q.parts.len() * stages) as f64
+            })
+            .collect();
+        let total: f64 = cost.iter().sum::<f64>().max(1.0);
+        let mut done = 0.0;
+        let mut reports = Vec::new();
+        let mut fitted: Vec<(String, Vec<Vec<Vec<f64>>>)> = Vec::new();
+        let count = todo.len();
+        for (index, (q, held, data)) in todo.into_iter().enumerate() {
+            let share = cost[index];
+            let mut tell = |within: f64| {
+                progress(&Progress {
+                    fraction: ((done + share * within.clamp(0.0, 1.0)) / total).min(1.0),
+                    quantity: q.name.clone(),
+                    index,
+                    count,
+                })
+            };
+            tell(0.0);
+            let (params, report) = fit_quantity(q, &data, held, options, &mut tell)?;
+            done += share;
             reports.push(report);
-            fitted.push((name.clone(), params));
+            fitted.push((q.name.clone(), params));
         }
         let overlay = overlay_text(self, &fitted);
         let rules = self
@@ -974,6 +1031,7 @@ fn fit_quantity(
     data: &Data,
     held: &[Vec<Hold>],
     options: &FitOptions,
+    progress: &mut dyn FnMut(f64),
 ) -> Result<(Vec<Vec<Vec<f64>>>, QuantityFit)> {
     let before = log_likelihood_of(q, &start_params(q), data);
     let scale = scale_of(data);
@@ -1047,8 +1105,13 @@ fn fit_quantity(
             || (q.parts[i].family == Family::Triangular && k == 1))
     });
     let stages: &[f64] = if barrier { &BARRIER } else { &[0.0] };
-    for &mu in stages {
-        let (xs, its, done) = minimize(&problem, x, mu, options);
+    let n = stages.len() as f64;
+    for (stage, &mu) in stages.iter().enumerate() {
+        // Within a stage: how many iterations it takes is not known ahead,
+        // so its share fills in as 1 - exp(-iterations / 40).
+        let mut tell = |it: usize| progress((stage as f64 + 1.0 - (-(it as f64) / 40.0).exp()) / n);
+        let (xs, its, done) = minimize(&problem, x, mu, options, &mut tell);
+        progress((stage as f64 + 1.0) / n);
         x = xs;
         iterations += its;
         converged &= done;
@@ -1154,6 +1217,7 @@ fn minimize(
     mut x: Vec<f64>,
     mu: f64,
     options: &FitOptions,
+    progress: &mut dyn FnMut(usize),
 ) -> (Vec<f64>, usize, bool) {
     const HISTORY: usize = 10;
     const ARMIJO: f64 = 1e-4;
@@ -1169,6 +1233,7 @@ fn minimize(
     let mut reach = 0.1;
     let mut stalls = 0;
     for it in 0..options.max_iterations {
+        progress(it);
         let gmax = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         if gmax < 1e-12 {
             return (x, it, true);
@@ -1776,6 +1841,26 @@ quantities:
                 .to_string();
             assert!(err.contains(says), "{spec}: {err}");
         }
+    }
+
+    #[test]
+    fn progress_rises_to_the_end() {
+        let truth = RuleSet::parse(NORMAL, "truth.yaml").unwrap();
+        let rows = draw(&truth, "grip", "water", (0.0, 100.0), 500, 9);
+        let mut seen: Vec<Progress> = Vec::new();
+        let fit = truth
+            .fit_with_progress(&rows, None, &FitOptions::default(), &mut |p| {
+                seen.push(p.clone())
+            })
+            .unwrap();
+        assert!(!seen.is_empty());
+        assert!(seen
+            .windows(2)
+            .all(|w| w[0].fraction <= w[1].fraction + 1e-12));
+        assert_eq!(seen[0].fraction, 0.0);
+        assert_eq!(seen.last().unwrap().fraction, 1.0);
+        assert!(seen.iter().all(|p| p.quantity == "grip" && p.count == 1));
+        assert_eq!(fit.quantities.len(), 1);
     }
 
     #[test]
