@@ -66,6 +66,17 @@ pub enum FixedDoc {
     Some(Vec<String>),
 }
 
+impl From<Vec<String>> for FixedDoc {
+    /// The entries a part holds: none is [`FixedDoc::None`].
+    fn from(entries: Vec<String>) -> Self {
+        if entries.is_empty() {
+            FixedDoc::None
+        } else {
+            FixedDoc::Some(entries)
+        }
+    }
+}
+
 impl PartDoc {
     /// A part over `input`, uniform between 0 and 1 at three points.
     pub fn new(name: String, input: String) -> Self {
@@ -104,31 +115,31 @@ impl PartDoc {
         if dist.params.iter().any(|p| p.values.len() != size) {
             return None;
         }
-        let mut part = Part {
-            name: self.name.clone(),
-            axes: axes
-                .iter()
-                .map(|a| Axis {
-                    input: a.input.clone(),
-                    points: a.points.clone(),
-                })
-                .collect(),
-            family: dist.family,
-            values: dist.params.iter().map(|p| p.values.clone()).collect(),
-            text: self.text.clone(),
-            fixed: Vec::new(),
-        };
-        part.fixed = match &self.fixed {
+        let axes: Vec<Axis> = axes
+            .iter()
+            .map(|a| Axis {
+                input: a.input.clone(),
+                points: a.points.clone(),
+            })
+            .collect();
+        let fixed = match &self.fixed {
             FixedDoc::None => Vec::new(),
             FixedDoc::All => vec![Hold::ALL],
             // Those that name what the part has; the file's reader says
             // what is wrong with the others.
             FixedDoc::Some(specs) => specs
                 .iter()
-                .filter_map(|spec| Hold::parse(spec, &part).ok())
+                .filter_map(|spec| Hold::parse(spec, dist.family, &axes).ok())
                 .collect(),
         };
-        Some(part)
+        Some(Part {
+            name: self.name.clone(),
+            axes,
+            family: dist.family,
+            values: dist.params.iter().map(|p| p.values.clone()).collect(),
+            text: self.text.clone(),
+            fixed,
+        })
     }
 
     /// Replace axis `k`'s points with `points` (increasing), the
@@ -405,72 +416,33 @@ pub struct RulesDoc {
 }
 
 impl RulesDoc {
-    /// Write the fitted distributions of `quantities` from `fitted` (the
-    /// rules a fit gave) into the document: each part's parameters, every
-    /// point. A quantity or a part only an extended file names is written
-    /// here, its distribution alone, to merge over that file's.
-    pub fn apply_fitted(&mut self, fitted: &RuleSet, quantities: &[String]) {
-        for name in quantities {
-            let Some(fq) = fitted.quantities.get(name) else {
-                continue;
-            };
-            if !self.quantities.iter().any(|q| q.name == *name) {
-                self.quantities.push(QuantityDoc {
-                    id: fresh_id(),
-                    name: name.clone(),
-                    combine: None,
-                    parts: vec![],
-                    text: String::new(),
-                });
-            }
-            let q = self
-                .quantities
-                .iter_mut()
-                .find(|q| q.name == *name)
-                .expect("added above");
-            for fp in &fq.parts {
-                if !q.parts.iter().any(|p| p.name == fp.name) {
-                    q.parts.push(PartDoc {
-                        id: fresh_id(),
-                        name: fp.name.clone(),
-                        axes: None,
-                        dist: None,
-                        text: String::new(),
-                        fixed: FixedDoc::None,
+    /// Write a fit's overlay (the fitted parts as a rule file,
+    /// `openodd::rules_fit::Fit::text`) into the document: each part's
+    /// distribution as the overlay writes it. A quantity or a part only an
+    /// extended file names is written here, its distribution alone, to
+    /// merge over that file's.
+    pub fn apply_overlay(&mut self, overlay: &str) -> Result<(), String> {
+        let fitted = RulesDoc::from_yaml(overlay)?;
+        for fq in fitted.quantities {
+            let i = match self.quantities.iter().position(|q| q.name == fq.name) {
+                Some(i) => i,
+                None => {
+                    self.quantities.push(QuantityDoc {
+                        parts: vec![],
+                        ..fq.clone()
                     });
+                    self.quantities.len() - 1
                 }
-                let part = q
-                    .parts
-                    .iter_mut()
-                    .find(|p| p.name == fp.name)
-                    .expect("added above");
-                let was = part.dist.take();
-                part.dist = Some(DistDoc {
-                    family: fp.family,
-                    params: fp
-                        .family
-                        .params()
-                        .iter()
-                        .zip(&fp.values)
-                        .map(|(n, values)| {
-                            let same = values.windows(2).all(|w| w[0] == w[1]);
-                            // One number stays one number while the fit
-                            // keeps it so (a parameter held, or a single point).
-                            let constant = same
-                                && was.as_ref().is_some_and(|d| {
-                                    d.family == fp.family
-                                        && d.params.iter().any(|p| p.name == *n && p.constant)
-                                });
-                            ParamDoc {
-                                name: n.to_string(),
-                                values: values.clone(),
-                                constant,
-                            }
-                        })
-                        .collect(),
-                });
+            };
+            let parts = &mut self.quantities[i].parts;
+            for fp in fq.parts {
+                match parts.iter_mut().find(|p| p.name == fp.name) {
+                    Some(p) => p.dist = fp.dist,
+                    None => parts.push(fp),
+                }
             }
         }
+        Ok(())
     }
 
     pub fn quantity(&self, id: u64) -> Option<&QuantityDoc> {
@@ -669,17 +641,7 @@ fn list(xs: &[f64]) -> String {
 
 /// `values` (the last axis fastest) as nested lists of `shape`.
 fn nested(values: &[f64], shape: &[usize]) -> String {
-    match shape {
-        [] | [_] => list(values),
-        [_, rest @ ..] => {
-            let step: usize = rest.iter().product();
-            if step == 0 {
-                return "[]".into();
-            }
-            let rows: Vec<String> = values.chunks(step).map(|c| nested(c, rest)).collect();
-            format!("[{}]", rows.join(", "))
-        }
-    }
+    openodd::rules_fit::nested_list(values, shape, &num)
 }
 
 fn read_quantity(name: &str, v: &Value) -> Result<QuantityDoc, String> {
@@ -1076,7 +1038,7 @@ mod tests {
             ..Default::default()
         };
         let fit = set.fit(&rows, None, &options).unwrap();
-        doc.apply_fitted(&fit.rules, &["q".to_string()]);
+        doc.apply_overlay(&fit.text(None)).unwrap();
         let dist = doc.quantities[0].parts[0].dist.as_ref().unwrap();
         assert!((dist.params[0].values[1] - 3.0).abs() < 0.2, "{dist:?}");
         // sd was one number and held: it stays one number.
@@ -1107,7 +1069,8 @@ mod tests {
         assert_eq!(again.quantities[0].parts[0].fixed, p.fixed);
         let core = p.core().unwrap();
         assert_eq!(core.fixed.len(), 3);
-        assert!(core.held(1, 1) && core.held(2, 0) && core.held(0, 1) && !core.held(2, 1));
+        let held = |k, n| core.fixed.iter().any(|h| h.holds(k, n));
+        assert!(held(1, 1) && held(2, 0) && held(0, 1) && !held(2, 1));
         // The core reads what the editor writes.
         let set = RuleSet::parse(&written, "w.yaml").unwrap();
         assert_eq!(set.quantities["q"].parts[0].fixed, core.fixed);

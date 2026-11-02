@@ -149,7 +149,7 @@ class TestFit:
             quantities=["grip"],
         )
         assert fit.quantities["grip"].rows == 6
-        with pytest.raises(RulesError, match="row 1: grip is 'wet', not a number"):
+        with pytest.raises(RulesError, match='row 1: grip is "wet", not a number'):
             rules.fit([{"water": 1, "grip": 1}, {"water": 1, "grip": "wet"}])
 
     def test_a_row_outside_a_normals_truncation_is_refused(self) -> None:
@@ -236,7 +236,7 @@ class TestReadRows:
 
         assert read_data(tmp_path / "b.json")[1] == "dt"
         (tmp_path / "c.json").write_text(json.dumps({"rows": [], "weights": "dt"}))
-        with pytest.raises(RulesError, match="unknown key 'weights'"):
+        with pytest.raises(RulesError, match='unknown key "weights"'):
             read_rows(tmp_path / "c.json")
         (tmp_path / "a.txt").write_text("")
         with pytest.raises(RulesError, match="data is read from"):
@@ -293,4 +293,4 @@ class TestCommand:
         (tmp_path / "weather.yaml").write_text(START)
         (tmp_path / "d.csv").write_text("water,grip\n1,wet\n")
         assert fit_main([str(tmp_path / "weather.yaml"), str(tmp_path / "d.csv"), "-o", str(tmp_path / "o.yaml")]) == 2
-        assert "grip is 'wet', not a number" in capsys.readouterr().err
+        assert 'grip is "wet", not a number' in capsys.readouterr().err

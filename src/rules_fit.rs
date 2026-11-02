@@ -37,10 +37,15 @@
 //! quantity's observed values: a likelihood grows without bound as a
 //! distribution narrows onto one value, which is no estimate.
 
+use std::cell::RefCell;
+
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::rules::{density, phi, upper, Combine, Dist, Family, Hold, Part, Quantity, RuleSet};
+use crate::rules::{
+    density, normal_mass, Combine, Dist, Family, Given, Hold, Origin, Quantity, RuleSet,
+};
 use crate::value::py_float_repr;
 
 /// How [`RuleSet::fit`] fits.
@@ -78,12 +83,12 @@ impl Default for FitOptions {
 }
 
 /// What one part's fit touched.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PartFit {
     pub name: String,
     /// The points it writes.
     pub points: usize,
-    /// The points some row reads (interpolates from): the ones estimated.
+    /// The points some row reads (interpolates from).
     pub points_with_data: usize,
     /// The values estimated: each free parameter at each point with data
     /// (a value held, by the rules' `fixed` or the fit's, is not).
@@ -91,7 +96,7 @@ pub struct PartFit {
 }
 
 /// One quantity's fit.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuantityFit {
     pub name: String,
     /// The rows that observe it and everything it reads.
@@ -99,9 +104,12 @@ pub struct QuantityFit {
     /// The rows that observe it but miss something it reads.
     pub skipped: usize,
     /// The log-likelihood of those rows (weighted) under the rules as they
-    /// were: `-inf` when a row lies outside a distribution's range.
+    /// were: `-inf` when a row lies outside a distribution's range (`null`
+    /// in JSON).
+    #[serde(with = "or_minus_infinity")]
     pub log_likelihood_before: f64,
     /// ... and under the fitted rules.
+    #[serde(with = "or_minus_infinity")]
     pub log_likelihood: f64,
     pub iterations: usize,
     /// Whether the fit stopped by converging, not at `max_iterations`.
@@ -109,8 +117,26 @@ pub struct QuantityFit {
     pub parts: Vec<PartFit>,
 }
 
+/// A log-likelihood in JSON: a number, or `null` for `-inf`, which JSON
+/// does not write.
+mod or_minus_infinity {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+        if v.is_finite() {
+            s.serialize_f64(*v)
+        } else {
+            s.serialize_none()
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NEG_INFINITY))
+    }
+}
+
 /// How far a fit has come ([`RuleSet::fit_with_progress`]).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Progress {
     /// The share of the work done, 0 to 1: an estimate, each quantity
     /// weighed by its rows, parts and stages, and within one the stages
@@ -123,64 +149,171 @@ pub struct Progress {
     pub count: usize,
 }
 
-/// A fit: the fitted rules, and how each quantity was fitted.
+/// A fit: the fitted rules, how each quantity was fitted, and the fitted
+/// parts as a rule file ([`Fit::text`]).
 #[derive(Debug, Clone)]
 pub struct Fit {
     /// The rules, every fitted part's distribution replaced.
     pub rules: RuleSet,
     pub quantities: Vec<QuantityFit>,
-    /// The fitted parts as a rule file that merges over the rules fitted
-    /// (`version: 2` and `quantities:`; [`Fit::text`] adds an `extends`).
-    pub overlay: String,
+    /// The fitted parts: a rule file's `quantities:` section.
+    body: String,
 }
 
 impl Fit {
-    /// The fitted parts as a rule file; with `extends`, one extending that
-    /// reference (the rules fitted), so it reads as the whole fitted set.
+    /// The fitted parts as a rule file that merges over the rules fitted;
+    /// with `extends`, one extending that reference (the rules fitted), so
+    /// it reads as the whole fitted set.
     pub fn text(&self, extends: Option<&str>) -> String {
-        match extends {
-            None => self.overlay.clone(),
-            Some(e) => {
-                let quoted = serde_json::to_string(e).expect("a string serializes");
-                self.overlay.replacen(
-                    "version: 2\n",
-                    &format!("version: 2\nextends: {quoted}\n"),
-                    1,
-                )
-            }
+        rule_file(extends, &self.body)
+    }
+}
+
+/// A rule file: `version: 2`, `extends` if given, and `body`.
+fn rule_file(extends: Option<&str>, body: &str) -> String {
+    let mut out = String::from("version: 2\n");
+    if let Some(e) = extends {
+        let quoted = serde_json::to_string(e).expect("a string serializes");
+        out.push_str(&format!("extends: {quoted}\n"));
+    }
+    out.push_str(body);
+    out
+}
+
+/// A value of a row of data as it was read, before it is a number.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cell {
+    /// Not given: `null`, `None`, an empty string.
+    Missing,
+    Number(f64),
+    Text(String),
+    /// Anything else -- a list, a truth value -- as written.
+    Other(String),
+}
+
+impl Cell {
+    /// The number it is: `None` when not observed (missing, NaN), an error
+    /// when not a number. Text reads as Python's `float()` reads it.
+    fn number(&self, row: usize, key: &str) -> Result<Option<f64>> {
+        let x = match self {
+            Cell::Missing => return Ok(None),
+            Cell::Number(x) => Some(*x),
+            Cell::Text(s) if s.trim().is_empty() => return Ok(None),
+            Cell::Text(s) => crate::value::parse_float(s.trim()),
+            Cell::Other(_) => None,
+        };
+        match x {
+            Some(x) if x.is_nan() => Ok(None),
+            Some(x) if x.is_finite() => Ok(Some(x)),
+            _ => Err(Error::value(format!(
+                "row {row}: {key} is {}, not a number",
+                match self {
+                    Cell::Text(s) => format!("{s:?}"),
+                    Cell::Number(x) => py_float_repr(*x),
+                    Cell::Other(s) => s.clone(),
+                    Cell::Missing => "missing".into(),
+                }
+            ))),
         }
     }
 }
 
-/// Rows of data, read from JSON ([`observations_from_json`]).
+/// A row of data as read: name -> value.
+pub type Row = IndexMap<String, Cell>;
+
+/// Rows of data, as a fit reads them ([`observations`]).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Observations {
     /// Per row, the values it gives of the names asked for.
     pub rows: Vec<IndexMap<String, f64>>,
-    /// Per row, its weight, when the data names a weight column.
-    pub weights: Option<Vec<f64>>,
-    /// The weight column, if named.
-    pub weight_column: Option<String>,
+    /// The weight column, and per row its weight (1 where a row has none),
+    /// when the data names one.
+    pub weight: Option<(String, Vec<f64>)>,
     /// Per name asked for, the rows that give it.
     pub observed: IndexMap<String, usize>,
 }
 
-/// The rows of a JSON data file, keeping the values of `names` (the
-/// quantities and inputs the rules read; every other key -- a timestamp, an
-/// id -- is ignored). The file is one of:
+impl Observations {
+    /// Per row, its weight, when the data names a weight column.
+    pub fn weights(&self) -> Option<&[f64]> {
+        self.weight.as_ref().map(|(_, w)| w.as_slice())
+    }
+}
+
+/// `rows` as a fit reads them: the values of `names` (the quantities and
+/// inputs the rules read; every other key -- a timestamp, an id -- is
+/// ignored), each a number or not observed, and each row's weight from the
+/// column `weight` names (1 where a row has none; a negative one is an
+/// error).
+pub fn observations(rows: &[Row], names: &[String], weight: Option<&str>) -> Result<Observations> {
+    let mut out = Observations {
+        observed: names.iter().map(|n| (n.clone(), 0)).collect(),
+        ..Observations::default()
+    };
+    let mut weights = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        let mut values = IndexMap::new();
+        for name in names {
+            if let Some(x) = row
+                .get(name)
+                .map(|c| c.number(r, name))
+                .transpose()?
+                .flatten()
+            {
+                values.insert(name.clone(), x);
+                out.observed[name] += 1;
+            }
+        }
+        if let Some(w) = weight {
+            match row.get(w).map(|c| c.number(r, w)).transpose()?.flatten() {
+                Some(x) if x < 0.0 => {
+                    return Err(Error::value(format!("row {r}: its weight {w} is negative")))
+                }
+                Some(x) => weights.push(x),
+                None => weights.push(1.0),
+            }
+        }
+        out.rows.push(values);
+    }
+    out.weight = weight.map(|w| (w.to_string(), weights));
+    Ok(out)
+}
+
+/// The rows of a JSON data file, and the weight column it names. The file
+/// is one of:
 ///
 /// - `{"rows": [{name: value, ...}, ...], "weight": "<column>"}` (`weight`
-///   optional: the column each row's weight is in, 1 where a row has none);
+///   optional);
 /// - a list of rows, `[{name: value, ...}, ...]`;
 /// - columns, `{name: [value, ...], ...}`, each of one length.
 ///
 /// A row need not give every name: one it leaves out, or gives as `null`,
-/// is not observed there. A value is a number, or a string of one.
-pub fn observations_from_json(text: &str, names: &[String]) -> Result<Observations> {
+/// is not observed there.
+pub fn json_rows(text: &str) -> Result<(Vec<Row>, Option<String>)> {
     use serde_json::Value as J;
     let doc: J = serde_json::from_str(text).map_err(|e| Error::value(format!("not JSON: {e}")))?;
-    let (rows, weight): (Vec<serde_json::Map<String, J>>, Option<String>) = match doc {
-        J::Array(items) => (rows_of(items)?, None),
+    let cell = |v: &J| match v {
+        J::Null => Cell::Missing,
+        J::Number(n) => n
+            .as_f64()
+            .map_or_else(|| Cell::Other(v.to_string()), Cell::Number),
+        J::String(s) => Cell::Text(s.clone()),
+        other => Cell::Other(other.to_string()),
+    };
+    let rows_of = |items: Vec<J>| -> Result<Vec<Row>> {
+        items
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| match item {
+                J::Object(m) => Ok(m.iter().map(|(k, v)| (k.clone(), cell(v))).collect()),
+                other => Err(Error::value(format!(
+                    "row {i} is {other}: a row is an object, name: value"
+                ))),
+            })
+            .collect()
+    };
+    match doc {
+        J::Array(items) => Ok((rows_of(items)?, None)),
         J::Object(mut map) if map.contains_key("rows") => {
             let weight = match map.remove("weight") {
                 None | Some(J::Null) => None,
@@ -193,8 +326,8 @@ pub fn observations_from_json(text: &str, names: &[String]) -> Result<Observatio
                 )));
             }
             match map.remove("rows") {
-                Some(J::Array(items)) => (rows_of(items)?, weight),
-                _ => return Err(Error::value("\"rows\" is a list of rows")),
+                Some(J::Array(items)) => Ok((rows_of(items)?, weight)),
+                _ => Err(Error::value("\"rows\" is a list of rows")),
             }
         }
         J::Object(columns) => {
@@ -221,81 +354,22 @@ pub fn observations_from_json(text: &str, names: &[String]) -> Result<Observatio
                 .map(|i| {
                     columns
                         .iter()
-                        .map(|(k, v)| (k.clone(), v[i].clone()))
+                        .map(|(k, v)| (k.clone(), cell(&v[i])))
                         .collect()
                 })
                 .collect();
-            (rows, None)
+            Ok((rows, None))
         }
-        _ => {
-            return Err(Error::value(
-                "the data is a list of rows, {\"rows\": [...]}, or columns",
-            ))
-        }
-    };
-    let number = |row: usize, key: &str, v: &J| -> Result<Option<f64>> {
-        let x = match v {
-            J::Null => return Ok(None),
-            J::Number(n) => n.as_f64(),
-            J::String(s) if s.trim().is_empty() => return Ok(None),
-            J::String(s) => s.trim().parse::<f64>().ok(),
-            _ => None,
-        };
-        match x {
-            Some(x) if x.is_finite() => Ok(Some(x)),
-            Some(x) if x.is_nan() => Ok(None),
-            _ => Err(Error::value(format!(
-                "row {row}: {key} is {v}, not a number"
-            ))),
-        }
-    };
-    let mut out = Observations {
-        weight_column: weight.clone(),
-        observed: names.iter().map(|n| (n.clone(), 0)).collect(),
-        ..Observations::default()
-    };
-    let mut weights = Vec::new();
-    for (r, row) in rows.iter().enumerate() {
-        let mut values = IndexMap::new();
-        for name in names {
-            if let Some(v) = row.get(name) {
-                if let Some(x) = number(r, name, v)? {
-                    values.insert(name.clone(), x);
-                    out.observed[name] += 1;
-                }
-            }
-        }
-        if let Some(w) = &weight {
-            let x = row.get(w).map(|v| number(r, w, v)).transpose()?.flatten();
-            match x {
-                Some(x) if x < 0.0 => {
-                    return Err(Error::value(format!("row {r}: its weight {w} is negative")))
-                }
-                Some(x) => weights.push(x),
-                None => weights.push(1.0),
-            }
-        }
-        out.rows.push(values);
+        _ => Err(Error::value(
+            "the data is a list of rows, {\"rows\": [...]}, or columns",
+        )),
     }
-    if weight.is_some() {
-        out.weights = Some(weights);
-    }
-    Ok(out)
 }
 
-fn rows_of(
-    items: Vec<serde_json::Value>,
-) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
-    items
-        .into_iter()
-        .enumerate()
-        .map(|(i, item)| match item {
-            serde_json::Value::Object(m) => Ok(m),
-            other => Err(Error::value(format!(
-                "row {i} is {other}: a row is an object, name: value"
-            ))),
-        })
-        .collect()
+/// [`json_rows`] read as a fit reads them ([`observations`]).
+pub fn observations_from_json(text: &str, names: &[String]) -> Result<Observations> {
+    let (rows, weight) = json_rows(text)?;
+    observations(&rows, names, weight.as_deref())
 }
 
 /// A row's value of `name`, if it has a finite one.
@@ -311,6 +385,92 @@ struct Data {
     /// `[row][part]`: (point, weight).
     corners: Vec<Vec<Vec<(usize, f64)>>>,
     skipped: usize,
+}
+
+/// A quantity ready to fit: its data, what is estimated, and how many
+/// stages its fit takes.
+struct Prepared<'a> {
+    q: &'a Quantity,
+    data: Data,
+    /// Per part, the points some row reads, in order.
+    touched: Vec<Vec<usize>>,
+    /// `[part][param][point]`: whether the value is estimated.
+    free: Vec<Vec<Vec<bool>>>,
+}
+
+impl Prepared<'_> {
+    fn new<'a>(q: &'a Quantity, data: Data, held: &[Vec<Hold>]) -> Prepared<'a> {
+        let touched = q
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(i, part)| {
+                let mut seen = vec![false; part.size()];
+                for corners in &data.corners {
+                    for &(n, _) in &corners[i] {
+                        seen[n] = true;
+                    }
+                }
+                (0..seen.len()).filter(|&n| seen[n]).collect()
+            })
+            .collect();
+        let free = q
+            .parts
+            .iter()
+            .zip(held)
+            .map(|(part, holds)| {
+                (0..part.family.params().len())
+                    .map(|k| {
+                        (0..part.size())
+                            .map(|n| {
+                                part.family.fitted_params().contains(&k)
+                                    && !holds.iter().any(|h| h.holds(k, n))
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        Prepared {
+            q,
+            data,
+            touched,
+            free,
+        }
+    }
+
+    /// The estimated values, as (part, parameter, point).
+    fn vars(&self) -> Vec<(usize, usize, usize)> {
+        let mut vars = Vec::new();
+        for (i, free) in self.free.iter().enumerate() {
+            for (k, at) in free.iter().enumerate() {
+                vars.extend(
+                    self.touched[i]
+                        .iter()
+                        .filter(|&&n| at[n])
+                        .map(|&n| (i, k, n)),
+                );
+            }
+        }
+        vars
+    }
+
+    /// The barrier's stages when the fit moves a uniform's or a
+    /// triangular's range, else the likelihood alone.
+    fn stages(&self) -> &'static [f64] {
+        let moves_range = self.q.parts.iter().enumerate().any(|(i, part)| {
+            part.family.fitted_range().is_some_and(|(lo, hi)| {
+                self.touched[i]
+                    .iter()
+                    .any(|&n| self.free[i][lo][n] || self.free[i][hi][n])
+            })
+        });
+        if moves_range {
+            &BARRIER
+        } else {
+            &[0.0]
+        }
+    }
 }
 
 impl RuleSet {
@@ -331,10 +491,9 @@ impl RuleSet {
             if data.y.is_empty() {
                 continue;
             }
-            let params = start_params(q);
             out.insert(
                 name.clone(),
-                (log_likelihood_of(q, &params, &data), data.y.len()),
+                (log_likelihood_of(q, &start_params(q), &data), data.y.len()),
             );
         }
         Ok(out)
@@ -347,8 +506,21 @@ impl RuleSet {
         self.order()
             .iter()
             .map(|name| {
-                let data = self.data_of(&self.quantities[name], rows, None);
-                (name.clone(), (data.y.len(), data.skipped))
+                let q = &self.quantities[name];
+                let inputs = q.inputs();
+                let (mut read, mut skipped) = (0, 0);
+                for row in rows.iter().filter(|row| observed(row, name).is_some()) {
+                    let has = |i: &String| {
+                        observed(row, i).is_some()
+                            || self.inputs.get(i).and_then(|i| i.default).is_some()
+                    };
+                    if inputs.iter().all(has) {
+                        read += 1;
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                (name.clone(), (read, skipped))
             })
             .collect()
     }
@@ -361,6 +533,17 @@ impl RuleSet {
             .cloned()
             .chain(self.free_inputs())
             .collect()
+    }
+
+    /// These rules with a rule file's text merged over them (a fit's
+    /// [`Fit::text`], say).
+    pub fn with_overlay(&self, text: &str) -> Result<RuleSet> {
+        self.parse_over(
+            text,
+            "<fitted rules>",
+            &Origin::Text,
+            &mut Given(IndexMap::new()),
+        )
     }
 
     /// The maximum-likelihood fit of these rules' parameters to `rows`
@@ -383,6 +566,39 @@ impl RuleSet {
         options: &FitOptions,
         progress: &mut dyn FnMut(&Progress),
     ) -> Result<Fit> {
+        let (body, quantities) = self.fit_parts(rows, weights, options, progress)?;
+        let rules = self
+            .with_overlay(&rule_file(None, &body))
+            .map_err(|e| Error::value(format!("the fitted rules are not valid: {e}")))?;
+        Ok(Fit {
+            rules,
+            quantities,
+            body,
+        })
+    }
+
+    /// [`RuleSet::fit_with_progress`] without the fitted rules: the fitted
+    /// parts as a rule file that merges over these ([`Fit::text`]), and the
+    /// report -- what a caller that merges them elsewhere needs.
+    pub fn fit_text_with_progress(
+        &self,
+        rows: &[IndexMap<String, f64>],
+        weights: Option<&[f64]>,
+        options: &FitOptions,
+        progress: &mut dyn FnMut(&Progress),
+    ) -> Result<(String, Vec<QuantityFit>)> {
+        let (body, quantities) = self.fit_parts(rows, weights, options, progress)?;
+        Ok((rule_file(None, &body), quantities))
+    }
+
+    /// The fit's work: the fitted parts' `quantities:` section, and the report.
+    fn fit_parts(
+        &self,
+        rows: &[IndexMap<String, f64>],
+        weights: Option<&[f64]>,
+        options: &FitOptions,
+        progress: &mut dyn FnMut(&Progress),
+    ) -> Result<(String, Vec<QuantityFit>)> {
         check_weights(rows, weights)?;
         if !(options.min_spread > 0.0) {
             return Err(Error::value(format!(
@@ -427,11 +643,7 @@ impl RuleSet {
         for name in &wanted {
             let q = self.quantity(name)?;
             let held = &holds[name];
-            if q.parts
-                .iter()
-                .zip(held)
-                .all(|(_, h)| h.contains(&Hold::ALL))
-            {
+            if held.iter().all(|h| h.contains(&Hold::ALL)) {
                 continue;
             }
             let data = self.data_of(q, rows, weights);
@@ -447,28 +659,21 @@ impl RuleSet {
                 }
                 continue;
             }
-            todo.push((q, held, data));
+            todo.push(Prepared::new(q, data, held));
         }
         // The work each quantity is, roughly: its rows, times the
         // distributions each row reads, times the stages of its fit.
         let cost: Vec<f64> = todo
             .iter()
-            .map(|(q, _, data)| {
-                let stages = if q.parts.iter().any(|p| p.family != Family::Normal) {
-                    BARRIER.len()
-                } else {
-                    1
-                };
-                (data.y.len() * q.parts.len() * stages) as f64
-            })
+            .map(|p| (p.data.y.len() * p.q.parts.len() * p.stages().len()) as f64)
             .collect();
         let total: f64 = cost.iter().sum::<f64>().max(1.0);
         let mut done = 0.0;
         let mut reports = Vec::new();
-        let mut fitted: Vec<(String, Vec<Vec<Vec<f64>>>)> = Vec::new();
+        let mut fitted: Vec<(&Quantity, Vec<Vec<Vec<f64>>>)> = Vec::new();
         let count = todo.len();
-        for (index, (q, held, data)) in todo.into_iter().enumerate() {
-            let share = cost[index];
+        for (index, prepared) in todo.into_iter().enumerate() {
+            let (q, share) = (prepared.q, cost[index]);
             let mut tell = |within: f64| {
                 progress(&Progress {
                     fraction: ((done + share * within.clamp(0.0, 1.0)) / total).min(1.0),
@@ -478,25 +683,12 @@ impl RuleSet {
                 })
             };
             tell(0.0);
-            let (params, report) = fit_quantity(q, &data, held, options, &mut tell)?;
+            let (params, report) = fit_quantity(prepared, options, &mut tell)?;
             done += share;
             reports.push(report);
-            fitted.push((q.name.clone(), params));
+            fitted.push((q, params));
         }
-        let overlay = overlay_text(self, &fitted);
-        let rules = self
-            .parse_over(
-                &overlay,
-                "<fitted rules>",
-                &crate::rules::Origin::Text,
-                &mut crate::rules::Given(IndexMap::new()),
-            )
-            .map_err(|e| Error::value(format!("the fitted rules are not valid: {e}")))?;
-        Ok(Fit {
-            rules,
-            quantities: reports,
-            overlay,
-        })
+        Ok((quantities_text(&fitted), reports))
     }
 
     /// What a fit's `fixed` entry names: the quantity, the part (`None`:
@@ -525,12 +717,8 @@ impl RuleSet {
                 known.join(", ")
             )));
         };
-        let rest = match (names.get(2), at) {
-            (None, None) => return Ok((q.name.clone(), Some(i), Hold::ALL)),
-            (Some(param), None) => param.to_string(),
-            (param, Some(at)) => format!("{}@{at}", param.unwrap_or(&"")),
-        };
-        let hold = Hold::parse(&rest, &q.parts[i]).map_err(bad)?;
+        let part = &q.parts[i];
+        let hold = Hold::new(names.get(2).copied(), at, part.family, &part.axes).map_err(bad)?;
         Ok((q.name.clone(), Some(i), hold))
     }
 
@@ -615,58 +803,6 @@ fn start_params(q: &Quantity) -> Vec<Vec<Vec<f64>>> {
     q.parts.iter().map(|p| p.values.clone()).collect()
 }
 
-/// The parameters of a family that are estimated (indices into
-/// [`Family::params`]): a normal's truncation is held.
-fn free_params(family: Family) -> &'static [usize] {
-    match family {
-        Family::Uniform => &[0, 1],
-        Family::Triangular => &[0, 1, 2],
-        Family::Normal => &[0, 1],
-    }
-}
-
-/// The width a distribution of `family` with parameters `p` has: what
-/// `min_spread` bounds.
-fn spread(family: Family, p: &[f64]) -> f64 {
-    match family {
-        Family::Uniform => p[1] - p[0],
-        Family::Triangular => p[2] - p[0],
-        Family::Normal => p[1],
-    }
-}
-
-/// A part's distribution at a row: its parameters interpolated from the
-/// points `corners` names.
-fn dist_at(part: &Part, params: &[Vec<f64>], corners: &[(usize, f64)]) -> Dist {
-    let mut p = [0.0; 4];
-    for &(k, w) in corners {
-        for (v, column) in p.iter_mut().zip(params) {
-            *v += w * column[k];
-        }
-    }
-    part.family.dist(&p[..params.len()])
-}
-
-/// Which part decides the quantity's density at `y`: the one whose
-/// distribution function is greatest there (`min`) or least (`max`).
-fn deciding(combine: Combine, dists: &[Dist], y: f64) -> usize {
-    let mut best = 0;
-    if dists.len() == 1 {
-        return best;
-    }
-    for (i, d) in dists.iter().enumerate().skip(1) {
-        let (c, b) = (d.cdf(y), dists[best].cdf(y));
-        let better = match combine {
-            Combine::Min => c > b,
-            Combine::Max => c < b,
-        };
-        if better {
-            best = i;
-        }
-    }
-    best
-}
-
 /// `log pdf(y)` of `d`, and its derivative by each of its parameters (in
 /// [`Family::params`]' order; a normal's `low` and `high` get 0).
 fn log_pdf_grad(d: &Dist, y: f64) -> (f64, [f64; 4]) {
@@ -714,57 +850,52 @@ fn log_pdf_grad(d: &Dist, y: f64) -> (f64, [f64; 4]) {
                 return (f64::NEG_INFINITY, [0.0; 4]);
             }
             let (a, b, z) = ((low - mean) / sd, (high - mean) / sd, (y - mean) / sd);
-            let mass = if a > 0.0 {
-                upper(a) - upper(b)
-            } else {
-                phi(b) - phi(a)
-            };
+            let mass = normal_mass(a, b);
             if !(mass > 0.0) {
                 return (f64::NEG_INFINITY, [0.0; 4]);
             }
-            let (da, db) = (finite_density(a), finite_density(b));
-            let (ta, tb) = (finite_times(a, da), finite_times(b, db));
+            // density(±inf) is 0, and so must z * density(z) be there.
+            let (da, db) = (density(a), density(b));
+            let times = |z: f64, d: f64| if z.is_finite() { z * d } else { 0.0 };
             let lp = -sd.ln() - 0.5 * z * z - 0.5 * (2.0 * std::f64::consts::PI).ln() - mass.ln();
             let d_mean = z / sd - (da - db) / (sd * mass);
-            let d_sd = (z * z - 1.0) / sd - (ta - tb) / (sd * mass);
+            let d_sd = (z * z - 1.0) / sd - (times(a, da) - times(b, db)) / (sd * mass);
             (lp, [d_mean, d_sd, 0.0, 0.0])
         }
     }
 }
 
-/// The standard normal density at `z`, 0 at an infinite one.
-fn finite_density(z: f64) -> f64 {
-    if z.is_finite() {
-        density(z)
-    } else {
-        0.0
-    }
-}
-
-/// `z * density(z)`, 0 at an infinite `z`.
-fn finite_times(z: f64, d: f64) -> f64 {
-    if z.is_finite() {
-        z * d
-    } else {
-        0.0
-    }
+/// One row's term of the likelihood: each part's distribution there (into
+/// `dists`), the part deciding the quantity's density at `y`, and that
+/// part's `log pdf(y)` and its gradient ([`log_pdf_grad`]).
+fn row_term(
+    q: &Quantity,
+    params: &[Vec<Vec<f64>>],
+    corners: &[Vec<(usize, f64)>],
+    y: f64,
+    dists: &mut Vec<Dist>,
+) -> (usize, f64, [f64; 4]) {
+    dists.clear();
+    dists.extend(
+        q.parts
+            .iter()
+            .zip(params)
+            .zip(corners)
+            .map(|((part, p), c)| part.dist_with(p, c)),
+    );
+    let (j, _) = q.combine.deciding(dists.iter().map(|d| d.cdf(y)));
+    let (lp, g) = log_pdf_grad(&dists[j], y);
+    (j, lp, g)
 }
 
 /// The weighted log-likelihood of `data` under `q` with `params`.
 fn log_likelihood_of(q: &Quantity, params: &[Vec<Vec<f64>>], data: &Data) -> f64 {
-    let mut total = 0.0;
-    for (r, &y) in data.y.iter().enumerate() {
-        let dists: Vec<Dist> = q
-            .parts
-            .iter()
-            .zip(params)
-            .zip(&data.corners[r])
-            .map(|((part, p), c)| dist_at(part, p, c))
-            .collect();
-        let j = deciding(q.combine, &dists, y);
-        total += data.weight[r] * log_pdf_grad(&dists[j], y).0;
-    }
-    total
+    let mut dists = Vec::with_capacity(q.parts.len());
+    data.y
+        .iter()
+        .enumerate()
+        .map(|(r, &y)| data.weight[r] * row_term(q, params, &data.corners[r], y, &mut dists).1)
+        .sum()
 }
 
 /// The barrier's weights, stage by stage, down to the likelihood alone
@@ -775,19 +906,17 @@ const BARRIER: [f64; 9] = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 0.0];
 /// observed values): the variables are, per part, per estimated parameter,
 /// the value at each point with data.
 struct Problem<'a> {
-    q: &'a Quantity,
-    data: &'a Data,
-    /// The parameters as they start; the variables overwrite theirs.
-    base: Vec<Vec<Vec<f64>>>,
+    p: &'a Prepared<'a>,
     /// (part, parameter, point) of each variable.
     vars: Vec<(usize, usize, usize)>,
-    /// Per part, the points with data.
-    touched: Vec<Vec<usize>>,
-    /// `[part][param][point]`: whether the value is estimated.
-    free: Vec<Vec<Vec<bool>>>,
     scale: f64,
     floor: f64,
     total_weight: f64,
+    /// The parameters at the last `x`: the start's, the variables'
+    /// overwritten -- kept, so an evaluation allocates nothing for them.
+    params: RefCell<Vec<Vec<Vec<f64>>>>,
+    /// The gradient by the parameters, likewise kept.
+    grad: RefCell<Vec<Vec<Vec<f64>>>>,
 }
 
 /// How a variable maps to the parameter it sets.
@@ -816,10 +945,14 @@ fn sigmoid(s: f64) -> f64 {
 }
 
 impl Problem<'_> {
-    fn params(&self, x: &[f64]) -> Vec<Vec<Vec<f64>>> {
-        let mut p = self.base.clone();
+    fn family(&self, i: usize) -> Family {
+        self.p.q.parts[i].family
+    }
+
+    /// Write the parameters at `x` into `p`.
+    fn set_params(&self, x: &[f64], p: &mut [Vec<Vec<f64>>]) {
         for (&(i, k, n), v) in self.vars.iter().zip(x) {
-            match var_kind(self.q.parts[i].family, k) {
+            match var_kind(self.family(i), k) {
                 Var::Linear => p[i][k][n] = v * self.scale,
                 Var::LogSd => p[i][k][n] = v.exp() * self.scale,
                 Var::ModeLogit => {}
@@ -827,20 +960,27 @@ impl Problem<'_> {
         }
         // A mode after the range it is a share of.
         for (&(i, k, n), v) in self.vars.iter().zip(x) {
-            if var_kind(self.q.parts[i].family, k) == Var::ModeLogit {
+            if var_kind(self.family(i), k) == Var::ModeLogit {
                 let (low, high) = (p[i][0][n], p[i][2][n]);
                 p[i][1][n] = low + sigmoid(*v) * (high - low);
             }
         }
+    }
+
+    /// The parameters at `x`.
+    fn params(&self, x: &[f64]) -> Vec<Vec<Vec<f64>>> {
+        let mut p = self.params.borrow().clone();
+        self.set_params(x, &mut p);
         p
     }
 
     fn start(&self) -> Vec<f64> {
+        let base = self.params.borrow();
         self.vars
             .iter()
             .map(|&(i, k, n)| {
-                let b = &self.base[i];
-                match var_kind(self.q.parts[i].family, k) {
+                let b = &base[i];
+                match var_kind(self.family(i), k) {
                     Var::Linear => b[k][n] / self.scale,
                     Var::LogSd => (b[k][n] / self.scale).ln(),
                     Var::ModeLogit => {
@@ -860,9 +1000,9 @@ impl Problem<'_> {
             .zip(x)
             .map(|(&(i, k, n), v)| {
                 let (p, g) = (&params[i], &grad[i]);
-                match (var_kind(self.q.parts[i].family, k), self.q.parts[i].family) {
-                    // A triangular's mode moves with its range.
-                    (Var::Linear, Family::Triangular) if self.free[i][1][n] => {
+                match (var_kind(self.family(i), k), self.family(i)) {
+                    // A triangular's mode, a share of its range, moves with it.
+                    (Var::Linear, Family::Triangular) if self.p.free[i][1][n] => {
                         let t = (p[1][n] - p[0][n]) / (p[2][n] - p[0][n]);
                         let share = if k == 0 { 1.0 - t } else { t };
                         (g[k][n] + g[1][n] * share) * self.scale
@@ -878,26 +1018,25 @@ impl Problem<'_> {
             .collect()
     }
 
-    /// Whether every distribution at a point with data is valid and wide
-    /// enough.
+    /// Whether every distribution at a point with data is valid, and wide
+    /// enough where the fit moves its width.
     fn valid(&self, params: &[Vec<Vec<f64>>]) -> bool {
-        for (i, part) in self.q.parts.iter().enumerate() {
-            for &n in &self.touched[i] {
-                let p: Vec<f64> = params[i].iter().map(|c| c[n]).collect();
-                if p.iter().any(|v| !v.is_finite()) {
+        for (i, part) in self.p.q.parts.iter().enumerate() {
+            let f = &self.p.free[i];
+            let width: &[usize] = match part.family.fitted_range() {
+                Some((lo, hi)) => &[lo, hi],
+                None => &[1],
+            };
+            for &n in &self.p.touched[i] {
+                let mut p = [0.0; 4];
+                for (v, column) in p.iter_mut().zip(&params[i]) {
+                    *v = column[n];
+                }
+                let p = &p[..params[i].len()];
+                if p.iter().any(|v| !v.is_finite()) || part.family.dist(p).check().is_err() {
                     return false;
                 }
-                if part.family.dist(&p).check().is_err() {
-                    return false;
-                }
-                // Only a width the fit moves is bounded below.
-                let f = &self.free[i];
-                let moved = match part.family {
-                    Family::Uniform => f[0][n] || f[1][n],
-                    Family::Triangular => f[0][n] || f[2][n],
-                    Family::Normal => f[1][n],
-                };
-                if moved && spread(part.family, &p) < self.floor {
+                if width.iter().any(|&k| f[k][n]) && part.family.spread(p) < self.floor {
                     return false;
                 }
             }
@@ -911,40 +1050,35 @@ impl Problem<'_> {
     /// impossible.
     ///
     /// The barrier is `log(y - low)` and `log(high - y)` (flattened to 0
-    /// one scale away from the edge) of the deciding
-    /// part, and of every other part the side that bounds the quantity: its
-    /// `high` under `min` (the least of the parts' values is at most each
-    /// one's), its `low` under `max`. Only a uniform's and a triangular's
-    /// range is estimated, so only theirs take part.
+    /// one scale away from the edge) of the deciding part, and of every
+    /// other part the side that bounds the quantity: its `high` under `min`
+    /// (the least of the parts' values is at most each one's), its `low`
+    /// under `max`. Only a uniform's and a triangular's range is estimated,
+    /// so only theirs take part.
     fn eval(&self, x: &[f64], mu: f64) -> Option<(f64, Vec<f64>)> {
-        let params = self.params(x);
+        let mut params = self.params.borrow_mut();
+        self.set_params(x, &mut params);
         if !self.valid(&params) {
             return None;
         }
-        // d log-likelihood / d parameter at each point, per part and parameter.
-        let mut grad: Vec<Vec<Vec<f64>>> = params
-            .iter()
-            .map(|p| p.iter().map(|c| vec![0.0; c.len()]).collect())
-            .collect();
+        let mut grad = self.grad.borrow_mut();
+        for (i, g) in grad.iter_mut().enumerate() {
+            for column in g.iter_mut() {
+                for &n in &self.p.touched[i] {
+                    column[n] = 0.0;
+                }
+            }
+        }
+        let (q, data) = (self.p.q, &self.p.data);
         let mut total = 0.0;
-        let mut dists: Vec<Dist> = Vec::with_capacity(self.q.parts.len());
-        for (r, &y) in self.data.y.iter().enumerate() {
-            let corners = &self.data.corners[r];
-            dists.clear();
-            dists.extend(
-                self.q
-                    .parts
-                    .iter()
-                    .zip(&params)
-                    .zip(corners)
-                    .map(|((part, p), c)| dist_at(part, p, c)),
-            );
-            let j = deciding(self.q.combine, &dists, y);
-            let (lp, g) = log_pdf_grad(&dists[j], y);
+        let mut dists: Vec<Dist> = Vec::with_capacity(q.parts.len());
+        for (r, &y) in data.y.iter().enumerate() {
+            let corners = &data.corners[r];
+            let (j, lp, g) = row_term(q, &params, corners, y, &mut dists);
             if !lp.is_finite() {
                 return None;
             }
-            let w = self.data.weight[r];
+            let w = data.weight[r];
             total += w * lp;
             for &(n, cw) in &corners[j] {
                 for (k, gk) in g.iter().take(grad[j].len()).enumerate() {
@@ -955,15 +1089,13 @@ impl Problem<'_> {
                 continue;
             }
             for (i, d) in dists.iter().enumerate() {
-                let (lo, hi) = match self.q.parts[i].family {
-                    Family::Uniform => (0, 1),
-                    Family::Triangular => (0, 2),
-                    Family::Normal => continue,
+                let Some((lo, hi)) = q.parts[i].family.fitted_range() else {
+                    continue;
                 };
                 let (low, high) = d.support();
                 let sides = [
-                    (lo, y - low, -1.0, i == j || self.q.combine == Combine::Max),
-                    (hi, high - y, 1.0, i == j || self.q.combine == Combine::Min),
+                    (lo, y - low, -1.0, i == j || q.combine == Combine::Max),
+                    (hi, high - y, 1.0, i == j || q.combine == Combine::Min),
                 ];
                 for (k, gap, sign, applies) in sides {
                     if !applies {
@@ -995,9 +1127,13 @@ impl Problem<'_> {
     }
 }
 
-/// The weighted standard deviation of `y` (or, when that is 0 to rounding,
-/// the size of its values, or 1): the unit a quantity is fitted in.
+/// The weighted standard deviation of `y` (or, when the values are all one,
+/// the size of their values, or 1): the unit a quantity is fitted in.
 fn scale_of(data: &Data) -> f64 {
+    let size = data.y.iter().fold(0.0f64, |m, y| m.max(y.abs()));
+    if data.y.windows(2).all(|w| w[0] == w[1]) {
+        return if size > 0.0 { size } else { 1.0 };
+    }
     let total: f64 = data.weight.iter().sum();
     let mean = data
         .y
@@ -1013,104 +1149,51 @@ fn scale_of(data: &Data) -> f64 {
         .map(|(y, w)| w * (y - mean).powi(2))
         .sum::<f64>()
         / total;
-    let sd = var.sqrt();
-    let size = data.y.iter().fold(0.0f64, |m, y| m.max(y.abs()));
-    // Values all one (to rounding) have no spread to speak of.
-    if sd > 1e-9 * size && sd.is_finite() {
-        return sd;
-    }
-    if size > 0.0 {
-        size
-    } else {
-        1.0
-    }
+    var.sqrt()
 }
 
 fn fit_quantity(
-    q: &Quantity,
-    data: &Data,
-    held: &[Vec<Hold>],
+    prepared: Prepared,
     options: &FitOptions,
     progress: &mut dyn FnMut(f64),
 ) -> Result<(Vec<Vec<Vec<f64>>>, QuantityFit)> {
+    let (q, data) = (prepared.q, &prepared.data);
     let before = log_likelihood_of(q, &start_params(q), data);
     let scale = scale_of(data);
     let floor = options.min_spread * scale;
-    let total_weight: f64 = data.weight.iter().sum();
-    let mut touched: Vec<Vec<usize>> = vec![Vec::new(); q.parts.len()];
-    for corners in &data.corners {
-        for (i, c) in corners.iter().enumerate() {
-            for &(n, _) in c {
-                if !touched[i].contains(&n) {
-                    touched[i].push(n);
-                }
-            }
-        }
-    }
-    for t in &mut touched {
-        t.sort_unstable();
-    }
-    let free: Vec<Vec<Vec<bool>>> = q
-        .parts
+    let base = feasible_start(&prepared, floor)?;
+    let grad = base
         .iter()
-        .zip(held)
-        .map(|(part, holds)| {
-            (0..part.family.params().len())
-                .map(|k| {
-                    (0..part.size())
-                        .map(|n| {
-                            free_params(part.family).contains(&k)
-                                && !holds.iter().any(|h| h.holds(k, n))
-                        })
-                        .collect()
-                })
-                .collect()
-        })
+        .map(|p| p.iter().map(|c| vec![0.0; c.len()]).collect())
         .collect();
-    let base = feasible_start(q, data, &touched, &free, floor)?;
-    let mut vars = Vec::new();
-    for (i, part) in q.parts.iter().enumerate() {
-        for &k in free_params(part.family) {
-            for &n in &touched[i] {
-                if free[i][k][n] {
-                    vars.push((i, k, n));
-                }
-            }
-        }
-    }
     let problem = Problem {
-        q,
-        data,
-        base,
-        vars,
-        touched: touched.clone(),
-        free,
+        p: &prepared,
+        vars: prepared.vars(),
         scale,
         floor,
-        total_weight,
+        total_weight: data.weight.iter().sum(),
+        params: RefCell::new(base),
+        grad: RefCell::new(grad),
     };
+    let stages = prepared.stages();
     let x0 = problem.start();
-    if problem.eval(&x0, BARRIER[0]).is_none() {
+    let Some(first) = problem.eval(&x0, stages[0]) else {
         return Err(Error::value(format!(
             "{}: {}: cannot start the fit: a row lies outside the range of a \
              distribution, where its low or high is held (fixed)",
             q.source, q.name
         )));
-    }
+    };
     // Interior point: the barrier's weight lowered stage by stage, each
     // stage starting where the last ended, then the likelihood alone.
     let (mut x, mut iterations, mut converged) = (x0, 0, true);
-    let barrier = problem.vars.iter().any(|&(i, k, _)| {
-        !(q.parts[i].family == Family::Normal
-            || (q.parts[i].family == Family::Triangular && k == 1))
-    });
-    let stages: &[f64] = if barrier { &BARRIER } else { &[0.0] };
+    let mut first = Some(first);
     let n = stages.len() as f64;
     for (stage, &mu) in stages.iter().enumerate() {
         // Within a stage: how many iterations it takes is not known ahead,
         // so its share fills in as 1 - exp(-iterations / 40).
         let mut tell = |it: usize| progress((stage as f64 + 1.0 - (-(it as f64) / 40.0).exp()) / n);
-        let (xs, its, done) = minimize(&problem, x, mu, options, &mut tell);
+        let (xs, its, done) = minimize(&problem, x, first.take(), mu, options, &mut tell);
         progress((stage as f64 + 1.0) / n);
         x = xs;
         iterations += its;
@@ -1129,12 +1212,11 @@ fn fit_quantity(
         parts: q
             .parts
             .iter()
-            .zip(&touched)
             .enumerate()
-            .map(|(i, (p, t))| PartFit {
+            .map(|(i, p)| PartFit {
                 name: p.name.clone(),
                 points: p.size(),
-                points_with_data: t.len(),
+                points_with_data: prepared.touched[i].len(),
                 estimated: problem.vars.iter().filter(|v| v.0 == i).count(),
             })
             .collect(),
@@ -1148,46 +1230,40 @@ fn fit_quantity(
 /// near each point (each point's `low` below the least of them, `high` above
 /// the greatest -- so the range interpolated at a row, a weighted mean of
 /// the points', holds the row's value), a normal's `sd` raised to `floor`.
-fn feasible_start(
-    q: &Quantity,
-    data: &Data,
-    touched: &[Vec<usize>],
-    free: &[Vec<Vec<bool>>],
-    floor: f64,
-) -> Result<Vec<Vec<Vec<f64>>>> {
+fn feasible_start(prepared: &Prepared, floor: f64) -> Result<Vec<Vec<Vec<f64>>>> {
+    let (q, data) = (prepared.q, &prepared.data);
     let mut params = start_params(q);
     for (i, part) in q.parts.iter().enumerate() {
-        let size = part.size();
-        let mut least = vec![f64::INFINITY; size];
-        let mut most = vec![f64::NEG_INFINITY; size];
-        for (r, &y) in data.y.iter().enumerate() {
-            for &(n, _) in &data.corners[r][i] {
-                least[n] = least[n].min(y);
-                most[n] = most[n].max(y);
-            }
-        }
+        let (free, touched) = (&prepared.free[i], &prepared.touched[i]);
         let p = &mut params[i];
-        match part.family {
-            Family::Uniform | Family::Triangular => {
-                let hi = p.len() - 1;
-                for &n in &touched[i] {
-                    if free[i][0][n] {
-                        p[0][n] = p[0][n].min(least[n] - floor);
+        match part.family.fitted_range() {
+            Some((lo, hi)) => {
+                let size = part.size();
+                let mut least = vec![f64::INFINITY; size];
+                let mut most = vec![f64::NEG_INFINITY; size];
+                for (r, &y) in data.y.iter().enumerate() {
+                    for &(n, _) in &data.corners[r][i] {
+                        least[n] = least[n].min(y);
+                        most[n] = most[n].max(y);
                     }
-                    if free[i][hi][n] {
+                }
+                for &n in touched {
+                    if free[lo][n] {
+                        p[lo][n] = p[lo][n].min(least[n] - floor);
+                    }
+                    if free[hi][n] {
                         p[hi][n] = p[hi][n].max(most[n] + floor);
                     }
                 }
             }
-            Family::Normal => {
-                for &n in &touched[i] {
-                    if free[i][1][n] {
+            None => {
+                for &n in touched {
+                    if free[1][n] {
                         p[1][n] = p[1][n].max(floor);
                     }
                 }
                 for (r, &y) in data.y.iter().enumerate() {
-                    let d = dist_at(part, p, &data.corners[r][i]);
-                    let (low, high) = d.support();
+                    let (low, high) = part.dist_with(p, &data.corners[r][i]).support();
                     if !(low <= y && y <= high) {
                         return Err(Error::value(format!(
                             "{}: {}.{}: a row's {} ({}) lies outside the normal \
@@ -1210,11 +1286,13 @@ fn feasible_start(
 }
 
 /// L-BFGS with a backtracking line search that refuses steps out of the
-/// feasible set: `x` minimizing `problem.eval`, the iterations taken, and
-/// whether it converged.
+/// feasible set: `x` minimizing `problem.eval` (whose value and gradient at
+/// `x` may be given, `first`), the iterations taken, and whether it
+/// converged.
 fn minimize(
     problem: &Problem,
     mut x: Vec<f64>,
+    first: Option<(f64, Vec<f64>)>,
     mu: f64,
     options: &FitOptions,
     progress: &mut dyn FnMut(usize),
@@ -1226,7 +1304,9 @@ fn minimize(
     if x.is_empty() {
         return (x, 0, true);
     }
-    let (mut f, mut g) = problem.eval(&x, mu).expect("the start is feasible");
+    let (mut f, mut g) = first
+        .or_else(|| problem.eval(&x, mu))
+        .expect("each stage starts where the last ended, inside");
     let mut history: Vec<(Vec<f64>, Vec<f64>, f64)> = Vec::new();
     // The first step of a steepest descent: at most this far, in units of
     // the quantity's spread.
@@ -1336,18 +1416,15 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// The fitted parts as a rule file to merge over `rules`: each fitted
-/// part's distribution, every parameter at every point.
-fn overlay_text(rules: &RuleSet, fitted: &[(String, Vec<Vec<Vec<f64>>>)]) -> String {
-    let mut out = String::from("version: 2\nquantities:");
+/// The fitted parts, a rule file's `quantities:` section: each fitted
+/// part's distribution, a parameter one number where it is one everywhere.
+fn quantities_text(fitted: &[(&Quantity, Vec<Vec<Vec<f64>>>)]) -> String {
     if fitted.is_empty() {
-        out.push_str(" {}\n");
-        return out;
+        return "quantities: {}\n".into();
     }
-    out.push('\n');
-    for (name, params) in fitted {
-        let q = &rules.quantities[name];
-        out.push_str(&format!("  {name}:\n    parts:\n"));
+    let mut out = String::from("quantities:\n");
+    for (q, params) in fitted {
+        out.push_str(&format!("  {}:\n    parts:\n", q.name));
         for (part, p) in q.parts.iter().zip(params) {
             out.push_str(&format!(
                 "      {}:\n        {}:\n",
@@ -1356,35 +1433,40 @@ fn overlay_text(rules: &RuleSet, fitted: &[(String, Vec<Vec<Vec<f64>>>)]) -> Str
             ));
             let shape: Vec<usize> = part.axes.iter().map(|a| a.points.len()).collect();
             for (k, column) in part.family.params().iter().zip(p) {
-                out.push_str(&format!("          {k}: {}\n", nested(column, &shape)));
+                let written = if column.windows(2).all(|w| w[0] == w[1]) {
+                    py_float_repr(column[0])
+                } else {
+                    nested_list(column, &shape, &py_float_repr)
+                };
+                out.push_str(&format!("          {k}: {written}\n"));
             }
         }
     }
     out
 }
 
-/// `values` (the last axis fastest) as nested flow lists of `shape`.
-fn nested(values: &[f64], shape: &[usize]) -> String {
+/// `values` (the last axis fastest) as nested YAML flow lists of `shape`,
+/// each number written by `number`.
+pub fn nested_list(values: &[f64], shape: &[usize], number: &dyn Fn(f64) -> String) -> String {
     match shape {
-        [] => py_float_repr(values[0]),
-        [_] => format!(
+        [] | [_] => format!(
             "[{}]",
             values
                 .iter()
-                .map(|v| py_float_repr(*v))
+                .map(|v| number(*v))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        [n, rest @ ..] => {
-            let stride = values.len() / n;
-            format!(
-                "[{}]",
-                values
-                    .chunks(stride)
-                    .map(|c| nested(c, rest))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+        [_, rest @ ..] => {
+            let step: usize = rest.iter().product();
+            if step == 0 {
+                return "[]".into();
+            }
+            let rows: Vec<String> = values
+                .chunks(step)
+                .map(|c| nested_list(c, rest, number))
+                .collect();
+            format!("[{}]", rows.join(", "))
         }
     }
 }
@@ -1659,14 +1741,7 @@ quantities:
             text.starts_with("version: 2\nextends: \"start.yaml\"\n"),
             "{text}"
         );
-        let again = start
-            .parse_over(
-                &fit.overlay,
-                "o.yaml",
-                &crate::rules::Origin::Text,
-                &mut crate::rules::Given(IndexMap::new()),
-            )
-            .unwrap();
+        let again = start.with_overlay(&fit.text(None)).unwrap();
         assert_eq!(
             again.quantities["grip"].parts,
             fit.rules.quantities["grip"].parts
@@ -1877,14 +1952,14 @@ quantities:
         assert_eq!(o.rows[0], row(&[("water", 70.0), ("grip", 0.62)]));
         assert_eq!(o.rows[1], row(&[("water", 20.0)]));
         assert_eq!(o.rows[2], row(&[("water", 5.0)]));
-        assert_eq!(o.weights, Some(vec![0.5, 1.0, 1.0, 1.0]));
+        assert_eq!(o.weights(), Some(&[0.5, 1.0, 1.0, 1.0][..]));
         assert_eq!(
             o.observed,
             IndexMap::from([("water".to_string(), 3), ("grip".to_string(), 1)])
         );
         let list = observations_from_json(r#"[{"water": 1, "grip": 0.9}]"#, &names).unwrap();
         assert_eq!(list.rows, vec![row(&[("water", 1.0), ("grip", 0.9)])]);
-        assert_eq!(list.weights, None);
+        assert_eq!(list.weights(), None);
         let columns =
             observations_from_json(r#"{"water": [1, 2], "grip": [0.9, null]}"#, &names).unwrap();
         assert_eq!(
@@ -1911,6 +1986,28 @@ quantities:
             let err = observations_from_json(bad, &names).unwrap_err().to_string();
             assert!(err.contains(says), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn a_report_travels_as_json_minus_infinity_as_null() {
+        let q = QuantityFit {
+            name: "grip".into(),
+            rows: 3,
+            skipped: 1,
+            log_likelihood_before: f64::NEG_INFINITY,
+            log_likelihood: 2.5,
+            iterations: 7,
+            converged: true,
+            parts: vec![PartFit {
+                name: "water".into(),
+                points: 2,
+                points_with_data: 1,
+                estimated: 2,
+            }],
+        };
+        let text = serde_json::to_string(&q).unwrap();
+        assert!(text.contains(r#""log_likelihood_before":null"#), "{text}");
+        assert_eq!(serde_json::from_str::<QuantityFit>(&text).unwrap(), q);
     }
 
     #[test]
@@ -1972,7 +2069,7 @@ quantities:
             let y = 0.6;
             let (_, g) = log_pdf_grad(&d, y);
             let p = d.params();
-            for k in free_params(d.family()) {
+            for k in d.family().fitted_params() {
                 let h = 1e-6;
                 let mut up = p.clone();
                 let mut down = p.clone();

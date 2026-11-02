@@ -96,6 +96,37 @@ impl Family {
         }
     }
 
+    /// The parameters a fit to data estimates (indices into
+    /// [`Family::params`]): all but a normal's truncation, the physical
+    /// range it is held to.
+    pub fn fitted_params(self) -> &'static [usize] {
+        match self {
+            Family::Uniform => &[0, 1],
+            Family::Triangular => &[0, 1, 2],
+            Family::Normal => &[0, 1],
+        }
+    }
+
+    /// The indices of `low` and `high` when a fit estimates them -- the
+    /// range every value lies in -- else `None` (a normal's are held).
+    pub fn fitted_range(self) -> Option<(usize, usize)> {
+        match self {
+            Family::Uniform => Some((0, 1)),
+            Family::Triangular => Some((0, 2)),
+            Family::Normal => None,
+        }
+    }
+
+    /// How wide the distribution of parameters `p` is: `high - low`, or a
+    /// normal's `sd`.
+    pub fn spread(self, p: &[f64]) -> f64 {
+        match self {
+            Family::Uniform => p[1] - p[0],
+            Family::Triangular => p[2] - p[0],
+            Family::Normal => p[1],
+        }
+    }
+
     /// The distribution of these parameters (in [`Family::params`]' order).
     pub fn dist(self, p: &[f64]) -> Dist {
         match self {
@@ -299,11 +330,7 @@ impl Dist {
                 high,
             } => {
                 let (a, b, z) = ((low - mean) / sd, (high - mean) / sd, (x - mean) / sd);
-                let mass = if a > 0.0 {
-                    upper(a) - upper(b)
-                } else {
-                    phi(b) - phi(a)
-                };
+                let mass = normal_mass(a, b);
                 density(z) / (sd * mass)
             }
         }
@@ -320,11 +347,7 @@ impl Dist {
                 high,
             } => {
                 let (a, b) = ((low - mean) / sd, (high - mean) / sd);
-                let mass = if a > 0.0 {
-                    upper(a) - upper(b)
-                } else {
-                    phi(b) - phi(a)
-                };
+                let mass = normal_mass(a, b);
                 (mean + sd * (density(a) - density(b)) / mass).clamp(low, high)
             }
         }
@@ -332,6 +355,16 @@ impl Dist {
 }
 
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
+
+/// The standard normal's mass between `a` and `b` (`a <= b`), worked out in
+/// the tail the interval sits in, for precision.
+pub(crate) fn normal_mass(a: f64, b: f64) -> f64 {
+    if a > 0.0 {
+        upper(a) - upper(b)
+    } else {
+        phi(b) - phi(a)
+    }
+}
 
 /// The standard normal's distribution function.
 pub(crate) fn phi(z: f64) -> f64 {
@@ -455,60 +488,53 @@ impl Hold {
         point: None,
     };
 
-    /// The hold `spec` names in `part` (see [`Hold`]).
-    pub fn parse(spec: &str, part: &Part) -> std::result::Result<Hold, String> {
+    /// The hold `spec` names in a part of `family` over `axes` (see [`Hold`]).
+    pub fn parse(spec: &str, family: Family, axes: &[Axis]) -> std::result::Result<Hold, String> {
         let spec = spec.trim();
-        let (param, point) = match spec.split_once('@') {
+        let (param, at) = match spec.split_once('@') {
             Some((p, at)) => (p.trim(), Some(at)),
             None => (spec, None),
         };
-        let param = if param.is_empty() && point.is_some() {
-            None
-        } else {
-            let names = part.family.params();
-            match names.iter().position(|n| *n == param) {
-                Some(k) => Some(k),
-                None => {
-                    return Err(format!(
-                        "'{spec}': {} has no parameter '{param}'; it has {}",
-                        part.family.name(),
+        let param = (!param.is_empty() || at.is_none()).then_some(param);
+        Hold::new(param, at, family, axes).map_err(|e| format!("'{spec}': {e}"))
+    }
+
+    /// The hold of parameter `param` (`None`: every one) at the point `at`
+    /// names (`input=point,...`; `None`: every point), in a part of `family`
+    /// over `axes`.
+    pub fn new(
+        param: Option<&str>,
+        at: Option<&str>,
+        family: Family,
+        axes: &[Axis],
+    ) -> std::result::Result<Hold, String> {
+        let param = match param {
+            None => None,
+            Some(name) => {
+                let names = family.params();
+                Some(names.iter().position(|n| *n == name).ok_or_else(|| {
+                    format!(
+                        "{} has no parameter '{name}'; it has {}",
+                        family.name(),
                         names.join(", ")
-                    ))
-                }
+                    )
+                })?)
             }
         };
-        let point = match point {
-            None => None,
-            Some(at) => Some(part.point_of(at).map_err(|e| format!("'{spec}': {e}"))?),
-        };
+        let point = at.map(|at| point_of(axes, at)).transpose()?;
         Ok(Hold { param, point })
     }
 
     /// As a part's `fixed:` writes it (`mean`, `mean@water=50`,
     /// `@water=50`); `None` for [`Hold::ALL`], which is `fixed: true`.
-    pub fn spec(&self, part: &Part) -> Option<String> {
+    pub fn spec(&self, family: Family, axes: &[Axis]) -> Option<String> {
         if *self == Hold::ALL {
             return None;
         }
-        let param = self
-            .param
-            .map(|k| part.family.params()[k])
-            .unwrap_or_default();
+        let param = self.param.map(|k| family.params()[k]).unwrap_or_default();
         Some(match self.point {
             None => param.to_string(),
-            Some(n) => {
-                let strides = part.strides();
-                let at: Vec<String> = part
-                    .axes
-                    .iter()
-                    .enumerate()
-                    .map(|(d, a)| {
-                        let i = n / strides[d] % a.points.len();
-                        format!("{}={}", a.input, py_float_repr(a.points[i]))
-                    })
-                    .collect();
-                format!("{param}@{}", at.join(","))
-            }
+            Some(n) => format!("{param}@{}", point_coords(axes, n).join(",")),
         })
     }
 
@@ -518,58 +544,73 @@ impl Hold {
     }
 }
 
+/// Per axis, how far apart its points' combinations are (the last axis
+/// fastest; see [`Part::values`]).
+fn strides_of(axes: &[Axis]) -> Vec<usize> {
+    let mut strides = vec![1; axes.len()];
+    for d in (0..axes.len().saturating_sub(1)).rev() {
+        strides[d] = strides[d + 1] * axes[d + 1].points.len();
+    }
+    strides
+}
+
+/// Combination `k` of `axes`' points, as `input=point` per axis.
+pub fn point_coords(axes: &[Axis], k: usize) -> Vec<String> {
+    let strides = strides_of(axes);
+    axes.iter()
+        .enumerate()
+        .map(|(d, a)| {
+            let i = k / strides[d] % a.points.len();
+            format!("{}={}", a.input, py_float_repr(a.points[i]))
+        })
+        .collect()
+}
+
+/// The combination of `axes`' points `at` names (`input=point,...`, every
+/// input once, each value one of its points).
+pub fn point_of(axes: &[Axis], at: &str) -> std::result::Result<usize, String> {
+    let mut given: IndexMap<String, f64> = IndexMap::new();
+    for pair in at.split(',') {
+        let Some((input, v)) = pair.split_once('=') else {
+            return Err(format!("'{}' is not input=point", pair.trim()));
+        };
+        let input = input.trim();
+        let v = crate::value::parse_float(v.trim())
+            .ok_or_else(|| format!("{input}={}: not a number", v.trim()))?;
+        if given.insert(input.to_string(), v).is_some() {
+            return Err(format!("{input} is named twice"));
+        }
+    }
+    let strides = strides_of(axes);
+    let mut index = 0;
+    for (d, axis) in axes.iter().enumerate() {
+        let Some(v) = given.shift_remove(&axis.input) else {
+            return Err(format!(
+                "a point names every input the part reads: {} is missing",
+                axis.input
+            ));
+        };
+        let Some(i) = axis.points.iter().position(|p| *p == v) else {
+            return Err(format!(
+                "{}={} is not one of its points ({})",
+                axis.input,
+                py_float_repr(v),
+                axis.points
+                    .iter()
+                    .map(|p| py_float_repr(*p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        };
+        index += i * strides[d];
+    }
+    if let Some(extra) = given.keys().next() {
+        return Err(format!("the part does not read {extra}"));
+    }
+    Ok(index)
+}
+
 impl Part {
-    /// The combination of points `at` names (`input=point,...`, every
-    /// input once, each value one of its points).
-    pub fn point_of(&self, at: &str) -> std::result::Result<usize, String> {
-        let mut given: IndexMap<String, f64> = IndexMap::new();
-        for pair in at.split(',') {
-            let Some((input, v)) = pair.split_once('=') else {
-                return Err(format!("'{}' is not input=point", pair.trim()));
-            };
-            let input = input.trim();
-            let v: f64 = v
-                .trim()
-                .parse()
-                .map_err(|_| format!("{input}={}: not a number", v.trim()))?;
-            if given.insert(input.to_string(), v).is_some() {
-                return Err(format!("{input} is named twice"));
-            }
-        }
-        let strides = self.strides();
-        let mut index = 0;
-        for (d, axis) in self.axes.iter().enumerate() {
-            let Some(v) = given.shift_remove(&axis.input) else {
-                return Err(format!(
-                    "a point names every input the part reads: {} is missing",
-                    axis.input
-                ));
-            };
-            let Some(i) = axis.points.iter().position(|p| *p == v) else {
-                return Err(format!(
-                    "{}={} is not one of its points ({})",
-                    axis.input,
-                    py_float_repr(v),
-                    axis.points
-                        .iter()
-                        .map(|p| py_float_repr(*p))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            };
-            index += i * strides[d];
-        }
-        if let Some(extra) = given.keys().next() {
-            return Err(format!("the part does not read {extra}"));
-        }
-        Ok(index)
-    }
-
-    /// Whether `fixed` holds parameter `k` at combination `n`.
-    pub fn held(&self, k: usize, n: usize) -> bool {
-        self.fixed.iter().any(|h| h.holds(k, n))
-    }
-
     /// How many combinations of points it writes.
     pub fn size(&self) -> usize {
         self.axes.iter().map(|a| a.points.len()).product()
@@ -578,13 +619,26 @@ impl Part {
     /// Its distribution at `values` (one per axis, in order), each held at
     /// its axis' outermost points.
     pub fn dist(&self, values: &[f64]) -> Dist {
-        let mut params = vec![0.0; self.values.len()];
-        for (index, w) in self.weights(values) {
+        let mut params = [0.0; 4];
+        self.each_corner(values, |index, w| {
             for (p, column) in params.iter_mut().zip(&self.values) {
                 *p += w * column[index];
             }
+        });
+        self.family.dist(&params[..self.values.len()])
+    }
+
+    /// The distribution of parameters `params` (per parameter, a value at
+    /// every combination of points, as [`Part::values`]) where `corners`
+    /// ([`Part::weights`]) says: [`Part::dist`] over other values.
+    pub fn dist_with(&self, params: &[Vec<f64>], corners: &[(usize, f64)]) -> Dist {
+        let mut p = [0.0; 4];
+        for &(index, w) in corners {
+            for (v, column) in p.iter_mut().zip(params) {
+                *v += w * column[index];
+            }
         }
-        self.family.dist(&params)
+        self.family.dist(&p[..params.len()])
     }
 
     /// The combinations of points the parameters at `values` (one per axis,
@@ -592,6 +646,13 @@ impl Part {
     /// parameter there is `sum(w * values[index])`. Weights are positive and
     /// add up to 1.
     pub fn weights(&self, values: &[f64]) -> Vec<(usize, f64)> {
+        let mut out = Vec::with_capacity(1 << self.axes.len());
+        self.each_corner(values, |index, w| out.push((index, w)));
+        out
+    }
+
+    /// [`Part::weights`], each given to `f` rather than collected.
+    fn each_corner(&self, values: &[f64], mut f: impl FnMut(usize, f64)) {
         // Each axis: the lower corner's index and the weight of the upper.
         let cells: Vec<(usize, f64)> = self
             .axes
@@ -600,7 +661,6 @@ impl Part {
             .map(|(axis, v)| segment(&axis.points, *v))
             .collect();
         let strides = self.strides();
-        let mut out = Vec::new();
         for corner in 0..(1usize << cells.len()) {
             let mut w = 1.0;
             let mut index = 0;
@@ -612,10 +672,9 @@ impl Part {
                 index += j * strides[d];
             }
             if w != 0.0 {
-                out.push((index, w));
+                f(index, w);
             }
         }
-        out
     }
 
     /// The distribution written at combination `index` (see [`Part::values`]).
@@ -625,11 +684,7 @@ impl Part {
     }
 
     fn strides(&self) -> Vec<usize> {
-        let mut strides = vec![1; self.axes.len()];
-        for d in (0..self.axes.len().saturating_sub(1)).rev() {
-            strides[d] = strides[d + 1] * self.axes[d + 1].points.len();
-        }
-        strides
+        strides_of(&self.axes)
     }
 }
 
@@ -660,6 +715,24 @@ impl Combine {
             Combine::Min => "min",
             Combine::Max => "max",
         }
+    }
+
+    /// Which of the parts whose distribution functions at a value are `cdfs`
+    /// decides the quantity there, and the quantity's distribution function
+    /// there: the greatest (`min`: the least of the parts is at or below the
+    /// value as soon as any one is) or the least (`max`). The first, on a tie.
+    pub fn deciding(self, cdfs: impl IntoIterator<Item = f64>) -> (usize, f64) {
+        let mut best = (0, f64::NAN);
+        for (i, c) in cdfs.into_iter().enumerate() {
+            let better = match self {
+                Combine::Min => c > best.1,
+                Combine::Max => c < best.1,
+            };
+            if i == 0 || better {
+                best = (i, c);
+            }
+        }
+        best
     }
 
     fn join(self, a: f64, b: f64) -> f64 {
@@ -714,11 +787,9 @@ impl Joined {
     /// The share of its mass at or below `x`. The parts move together, so
     /// the least of them is at or below `x` as soon as any one is.
     pub fn cdf(&self, x: f64) -> f64 {
-        let each = self.parts.iter().map(|(_, d)| d.cdf(x));
-        match self.combine {
-            Combine::Min => each.fold(0.0, f64::max),
-            Combine::Max => each.fold(1.0, f64::min),
-        }
+        self.combine
+            .deciding(self.parts.iter().map(|(_, d)| d.cdf(x)))
+            .1
     }
 
     pub fn mean(&self) -> f64 {
@@ -1691,24 +1762,17 @@ fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
         };
         values.push(read_grid(raw, &shape, size, &here)?);
     }
-    let part = Part {
-        name: name.to_string(),
-        axes,
-        family,
-        values,
-        text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
-        fixed: Vec::new(),
-    };
-    let mut part = part;
-    if let Some(raw) = get(map, "fixed") {
-        let here = at.key("fixed");
-        part.fixed = match untag(raw) {
+    let fixed = match get(map, "fixed") {
+        None => Vec::new(),
+        Some(raw) => {
+            let here = at.key("fixed");
+            match untag(raw) {
             Node::Bool(true) => vec![Hold::ALL],
             Node::Bool(false) | Node::Null => Vec::new(),
             Node::Sequence(items) => items
                 .iter()
                 .map(|item| match untag(item) {
-                    Node::String(spec) => Hold::parse(spec, &part).map_err(|e| here.error(e)),
+                    Node::String(spec) => Hold::parse(spec, family, &axes).map_err(|e| here.error(e)),
                     _ => Err(here.error(
                         "a parameter (mean), a parameter at a point (mean@water=50), or a point (@water=50)",
                     )),
@@ -1719,8 +1783,17 @@ fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
                     "true (every value), or a list of a parameter (mean), a parameter at a point (mean@water=50), or a point (@water=50)",
                 ))
             }
-        };
-    }
+            }
+        }
+    };
+    let part = Part {
+        name: name.to_string(),
+        axes,
+        family,
+        values,
+        text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
+        fixed,
+    };
     for k in 0..size {
         part.dist_at(k)
             .check()
@@ -1763,18 +1836,11 @@ fn read_grid(node: &Node, shape: &[usize], size: usize, at: &Where) -> Result<Ve
 }
 
 /// Where combination `k` of a part's points is, in words: `at water=50:`.
-fn point_words(part: &Part, mut k: usize) -> String {
+fn point_words(part: &Part, k: usize) -> String {
     if part.axes.is_empty() {
         return "everywhere:".into();
     }
-    let mut words = Vec::new();
-    for a in part.axes.iter().rev() {
-        let n = a.points.len();
-        words.push(format!("{}={}", a.input, py_float_repr(a.points[k % n])));
-        k /= n;
-    }
-    words.reverse();
-    format!("at {}:", words.join(", "))
+    format!("at {}:", point_coords(&part.axes, k).join(", "))
 }
 
 /// Where in a file a node is, for messages: `file: quantities.x.rules[0]`.
@@ -1982,12 +2048,14 @@ quantities:
                 point: Some(0)
             }
         );
-        assert!(part.held(1, 2) && part.held(0, 3) && part.held(3, 0));
-        assert!(!part.held(0, 1));
-        let specs: Vec<_> = holds.iter().map(|h| h.spec(part).unwrap()).collect();
+        let held = |k, n| holds.iter().any(|h: &Hold| h.holds(k, n));
+        assert!(held(1, 2) && held(0, 3) && held(3, 0));
+        assert!(!held(0, 1));
+        let spec = |h: &Hold| h.spec(part.family, &part.axes).unwrap();
+        let specs: Vec<_> = holds.iter().map(spec).collect();
         assert_eq!(specs, ["sd", "mean@a=10.0,b=1.0", "@a=0.0,b=0.0"]);
         for h in holds {
-            assert_eq!(&Hold::parse(&h.spec(part).unwrap(), part).unwrap(), h);
+            assert_eq!(&Hold::parse(&spec(h), part.family, &part.axes).unwrap(), h);
         }
         let all = text.replace(
             "fixed: [sd, \"mean@a=10,b=1\", \"@b=0,a=0\"]",

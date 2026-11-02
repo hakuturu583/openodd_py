@@ -12,19 +12,19 @@
 
 use std::time::Duration;
 
+use indexmap::IndexMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use openodd::rules::RuleSet;
-use openodd::rules_fit::{observations_from_json, Observations};
+use openodd::rules_fit::{observations_from_json, Observations, Progress, QuantityFit};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{ErrorEvent, HtmlInputElement, MessageEvent, Worker};
 
 use crate::app::event_target;
-use crate::fit_job::{self, Job, QuantityReport, Reply};
+use crate::fit_job::{self, Job, Reply};
 use crate::icons::Icon;
 use crate::io;
-use crate::rules_app::{rctx, RCtx};
+use crate::rules_app::{parse_num, rctx, RCtx};
 use crate::rules_doc::{num, short, RulesDoc};
 
 /// The worker's script, beside the page (Trunk's loader shim for
@@ -41,22 +41,32 @@ pub struct FCtx {
     pub data: RwSignal<Option<(String, String)>>,
     /// The rows of the data, as the rules read them, or why they do not read.
     pub observations: Memo<Option<Result<Observations, String>>>,
+    /// Per quantity, the rows its factor reads and those it skips.
+    usable: Memo<Option<IndexMap<String, (usize, usize)>>>,
     /// The last fit's report.
-    pub report: RwSignal<Option<Vec<QuantityReport>>>,
+    pub report: RwSignal<Option<Vec<QuantityFit>>>,
     /// The document before the last fit: what undo restores.
     pub before: RwSignal<Option<RulesDoc>>,
-    pub running: RwSignal<bool>,
+    /// The fit running, if one is.
+    pub run: RwSignal<Option<Run>>,
     pub min_spread: RwSignal<f64>,
-    /// How far the running fit has come: (fraction, quantity, index, count).
-    pub progress: RwSignal<Option<(f64, String, usize, usize)>>,
-    /// When it started (`Date.now()`, ms).
-    pub started: RwSignal<f64>,
-    /// It runs on the page's thread: no progress until it ends.
-    pub on_thread: RwSignal<bool>,
     worker: StoredValue<Option<Running>, LocalStorage>,
+    /// The job a worker gets once it says it is ready.
+    job: StoredValue<Option<Job>, LocalStorage>,
 }
 
-/// A fit running in a worker, and the handlers that must live as long.
+/// A fit running.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    /// How far it has come, once the worker says.
+    pub progress: Option<Progress>,
+    /// It runs on the page's thread: no progress until it ends.
+    pub on_thread: bool,
+    /// When it started (`Date.now()`, ms).
+    pub started: f64,
+}
+
+/// A worker, and the handlers that must live as long.
 struct Running {
     worker: Worker,
     _message: Closure<dyn FnMut(MessageEvent)>,
@@ -70,39 +80,59 @@ pub fn fctx() -> FCtx {
 pub fn fit_context() -> FCtx {
     let r = rctx();
     let data = RwSignal::new(
-        io::load_text(DATA_KEY).map(|t| (io::load_text(DATA_NAME_KEY).unwrap_or_default(), t)),
+        io::load_text(DATA_KEY)
+            .filter(|t| !t.is_empty())
+            .map(|t| (io::load_text(DATA_NAME_KEY).unwrap_or_default(), t)),
     );
+    // The names the rules read: an edit that leaves them be leaves the data
+    // unread again.
+    let names = Memo::new(move |_| r.good.with(|g| g.as_ref().map(|s| s.data_names())));
     let observations = Memo::new(move |_| {
-        let (_, text) = data.get()?;
-        let names = r.good.with(|g| g.as_ref().map(|s| s.data_names()))?;
-        Some(observations_from_json(&text, &names).map_err(|e| e.to_string()))
+        let names = names.get()?;
+        data.with(|d| {
+            d.as_ref()
+                .map(|(_, text)| observations_from_json(text, &names).map_err(|e| e.to_string()))
+        })
     });
-    // Keep the data between visits, as the rules are kept.
-    Effect::new(move |_| {
-        if let Some((name, text)) = data.get() {
-            io::save_text(DATA_NAME_KEY, &name);
-            io::save_text(DATA_KEY, &text);
-        }
+    let usable = Memo::new(move |_| {
+        observations.with(|o| match o {
+            Some(Ok(o)) => r.good.with(|g| g.as_ref().map(|s| s.usable(&o.rows))),
+            _ => None,
+        })
+    });
+    // Keep the data between visits, as the rules are kept (not on the first
+    // run: that is the data just loaded from there).
+    Effect::new(move |seen: Option<()>| {
+        data.with(|d| {
+            if let (Some(()), Some((name, text))) = (seen, d) {
+                io::save_text(DATA_NAME_KEY, name);
+                io::save_text(DATA_KEY, text);
+            }
+        })
     });
     FCtx {
         data,
         observations,
+        usable,
         report: RwSignal::new(None),
         before: RwSignal::new(None),
-        running: RwSignal::new(false),
+        run: RwSignal::new(None),
         min_spread: RwSignal::new(1e-3),
-        progress: RwSignal::new(None),
-        started: RwSignal::new(0.0),
-        on_thread: RwSignal::new(false),
         worker: StoredValue::new_local(None),
+        job: StoredValue::new_local(None),
     }
 }
 
 impl FCtx {
+    pub fn running(&self) -> bool {
+        self.run.with(Option::is_some)
+    }
+
     /// Stop the worker, if one runs; its handlers go once this call is done.
     fn stop_worker(&self) {
         let mut taken = None;
         self.worker.update_value(|w| taken = w.take());
+        self.job.set_value(None);
         if let Some(running) = taken {
             running.worker.terminate();
             // Not dropped here: this may run inside one of its handlers.
@@ -110,126 +140,144 @@ impl FCtx {
         }
     }
 
-    fn end(&self) {
-        self.running.set(false);
-        self.progress.set(None);
-        self.on_thread.set(false);
-    }
-
-    /// Fit `set` (the rules as `job` writes them) to the job's data: in a
-    /// worker, else on the page's thread.
-    fn start(&self, r: RCtx, set: RuleSet, job: Job) {
+    /// Fit as `job` says: in a worker, else on the page's thread.
+    fn start(&self, r: RCtx, job: Job) {
         let f = *self;
-        f.running.set(true);
-        f.on_thread.set(false);
-        f.progress.set(Some((0.0, String::new(), 0, 0)));
-        f.started.set(js_sys::Date::now());
+        f.run.set(Some(Run {
+            progress: None,
+            on_thread: false,
+            started: js_sys::Date::now(),
+        }));
         let Ok(worker) = Worker::new(WORKER) else {
-            return f.run_here(r, set, job);
+            return f.run_here(r);
         };
-        let heard = RwSignal::new(false);
-        let (set_m, job_e, set_e) = (set.clone(), job.clone(), set);
+        f.job.set_value(Some(job));
+        let ready = RwSignal::new(false);
         let message = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
-            heard.set(true);
             let text = ev.data().as_string().unwrap_or_default();
             match serde_json::from_str::<Reply>(&text) {
-                Ok(Reply::Progress {
-                    fraction,
-                    quantity,
-                    index,
-                    count,
-                }) => f.progress.set(Some((fraction, quantity, index, count))),
-                Ok(done) => {
+                Ok(Reply::Ready) => {
+                    ready.set(true);
+                    f.send_job();
+                }
+                Ok(Reply::Progress(p)) => f.run.update(|run| {
+                    if let Some(run) = run {
+                        run.progress = Some(p);
+                    }
+                }),
+                Ok(Reply::Done { overlay, report }) => {
                     f.stop_worker();
-                    f.finish(r, &set_m, done);
+                    f.finish(r, Ok((overlay, report)));
+                }
+                Ok(Reply::Failed { error }) => {
+                    f.stop_worker();
+                    f.finish(r, Err(error));
                 }
                 Err(e) => {
                     f.stop_worker();
-                    f.finish(
-                        r,
-                        &set_m,
-                        Reply::Failed {
-                            error: e.to_string(),
-                        },
-                    );
+                    f.finish(r, Err(e.to_string()));
                 }
             }
         });
         let error = Closure::<dyn FnMut(ErrorEvent)>::new(move |ev: ErrorEvent| {
             f.stop_worker();
-            if heard.get_untracked() {
-                f.finish(
-                    r,
-                    &set_e,
-                    Reply::Failed {
-                        error: ev.message(),
-                    },
-                );
+            if ready.get_untracked() {
+                f.finish(r, Err(ev.message()));
             } else {
-                // The worker never started (its script is not beside the
-                // page): fit here instead.
-                f.run_here(r, set_e.clone(), job_e.clone());
+                // No worker started (its script is not beside the page):
+                // fit here instead.
+                f.run_here(r);
             }
         });
         worker.set_onmessage(Some(message.as_ref().unchecked_ref()));
         worker.set_onerror(Some(error.as_ref().unchecked_ref()));
-        let sent = serde_json::to_string(&job)
-            .map_err(|e| e.to_string())
-            .and_then(|t| {
-                worker
-                    .post_message(&JsValue::from_str(&t))
-                    .map_err(|_| "cannot reach the fit's worker".to_string())
-            });
         f.worker.set_value(Some(Running {
             worker,
             _message: message,
             _error: error,
         }));
+    }
+
+    /// Give the ready worker its job.
+    fn send_job(&self) {
+        let mut job = None;
+        self.job.update_value(|j| job = j.take());
+        let sent = self.worker.with_value(|w| {
+            let (Some(w), Some(job)) = (w, job) else {
+                return Ok(());
+            };
+            let text = serde_json::to_string(&job).map_err(|e| e.to_string())?;
+            w.worker
+                .post_message(&JsValue::from_str(&text))
+                .map_err(|_| "cannot reach the fit's worker".to_string())
+        });
         if let Err(e) = sent {
-            f.stop_worker();
-            f.finish(r, &RuleSet::default(), Reply::Failed { error: e });
+            self.stop_worker();
+            self.finish(rctx(), Err(e));
         }
     }
 
-    /// Fit on the page's thread: it waits, so no progress is shown.
-    fn run_here(&self, r: RCtx, set: RuleSet, job: Job) {
+    /// Fit on the page's thread, the rules and the data as read already:
+    /// it waits, so no progress is shown.
+    fn run_here(&self, r: RCtx) {
         let f = *self;
-        f.on_thread.set(true);
+        f.run.update(|run| {
+            if let Some(run) = run {
+                run.on_thread = true;
+            }
+        });
         // Let the page show that it runs before the fit takes the thread.
         set_timeout(
             move || {
-                let reply = fit_job::run(&job, &mut |_| {});
-                f.finish(r, &set, reply);
+                let reply = match (r.checked.get_untracked(), f.observations.get_untracked()) {
+                    (Ok(set), Some(Ok(obs))) => {
+                        fit_job::run_parsed(&set, &obs, f.min_spread.get_untracked(), &mut |_| {})
+                    }
+                    (Err(e), _) | (_, Some(Err(e))) => Reply::Failed { error: e },
+                    _ => Reply::Failed {
+                        error: "no data".into(),
+                    },
+                };
+                f.finish(
+                    r,
+                    match reply {
+                        Reply::Done { overlay, report } => Ok((overlay, report)),
+                        Reply::Failed { error } => Err(error),
+                        _ => Err("the fit did not end".into()),
+                    },
+                );
             },
             Duration::from_millis(30),
         );
     }
 
-    /// Write a finished fit into the document (`set`: the rules it fitted).
-    fn finish(&self, r: RCtx, set: &RuleSet, reply: Reply) {
-        match reply {
-            Reply::Done { overlay, report } => match fit_job::fitted(set, &overlay) {
-                Ok(fitted) => {
-                    let names: Vec<String> = report.iter().map(|q| q.name.clone()).collect();
-                    self.before.set(Some(r.doc.get_untracked()));
-                    r.doc.update(|d| d.apply_fitted(&fitted, &names));
-                    let secs = (js_sys::Date::now() - self.started.get_untracked()) / 1000.0;
-                    r.notice.set(Some((
-                        true,
-                        match names.len() {
-                            0 => "Nothing to fit: no factor has a row it reads".to_string(),
-                            1 => format!("Fitted {} in {}", names[0], duration(secs)),
-                            n => format!("Fitted {n} quantities in {}", duration(secs)),
-                        },
-                    )));
-                    self.report.set(Some(report));
-                }
-                Err(e) => r.notice.set(Some((false, format!("Fit: {e}")))),
-            },
-            Reply::Failed { error } => r.notice.set(Some((false, format!("Fit: {error}")))),
-            Reply::Progress { .. } => return,
+    /// Write a finished fit (its overlay and report) into the document.
+    fn finish(&self, r: RCtx, result: Result<(String, Vec<QuantityFit>), String>) {
+        let started = self
+            .run
+            .with_untracked(|run| run.as_ref().map(|run| run.started));
+        self.run.set(None);
+        let (overlay, report) = match result {
+            Ok(done) => done,
+            Err(e) => return r.notice.set(Some((false, format!("Fit: {e}")))),
+        };
+        let before = r.doc.get_untracked();
+        let mut doc = before.clone();
+        if let Err(e) = doc.apply_overlay(&overlay) {
+            return r.notice.set(Some((false, format!("Fit: {e}"))));
         }
-        self.end();
+        self.before.set(Some(before));
+        r.doc.set(doc);
+        let secs = started.map_or(0.0, |s| (js_sys::Date::now() - s) / 1000.0);
+        r.notice.set(Some((
+            true,
+            match report.as_slice() {
+                [] => "Nothing to fit: no factor has a row it reads".to_string(),
+                [q] => format!("Fitted {} in {}", q.name, duration(secs)),
+                qs => format!("Fitted {} quantities in {}", qs.len(), duration(secs)),
+            },
+        )));
+        self.report.set(Some(report));
     }
 }
 
@@ -274,7 +322,10 @@ pub fn FitCard() -> impl IntoView {
         io::save_text(DATA_KEY, "");
     };
     let run = move |_| {
-        let (Ok(set), Ok(yaml)) = (r.checked.get_untracked(), r.yaml.get_untracked()) else {
+        let (true, Ok(yaml)) = (
+            r.checked.with_untracked(Result::is_ok),
+            r.yaml.get_untracked(),
+        ) else {
             r.notice.set(Some((
                 false,
                 "The rules do not read: fix them first".into(),
@@ -291,7 +342,7 @@ pub fn FitCard() -> impl IntoView {
             data,
             min_spread: f.min_spread.get_untracked(),
         };
-        f.start(r, set, job);
+        f.start(r, job);
     };
 
     let undo = move |_| {
@@ -303,9 +354,10 @@ pub fn FitCard() -> impl IntoView {
         }
     };
     let can_fit = move || {
-        !f.running.get()
-            && r.checked.with(|c| c.is_ok())
-            && matches!(f.observations.get(), Some(Ok(o)) if !o.rows.is_empty())
+        !f.running()
+            && r.checked.with(Result::is_ok)
+            && f.observations
+                .with(|o| matches!(o, Some(Ok(o)) if !o.rows.is_empty()))
     };
     view! {
         <section class="card fit-card">
@@ -313,7 +365,7 @@ pub fn FitCard() -> impl IntoView {
                 <Icon name="flask"/>"Fit to data"
                 <span class="hint">"maximum likelihood, factor by factor"</span>
             </div>
-            {move || match f.data.get() {
+            {move || match f.data.with(|d| d.as_ref().map(|(name, _)| name.clone())) {
                 None => view! {
                     <p class="muted">
                         "Load rows measured in the real world, as JSON: each row the values seen together. "
@@ -321,7 +373,7 @@ pub fn FitCard() -> impl IntoView {
                     </p>
                 }
                 .into_any(),
-                Some((name, _)) => view! {
+                Some(name) => view! {
                     <div class="fit-file">
                         <Icon name="doc"/><span class="fit-name">{name}</span>
                         <button class="mini" on:click=clear title="Forget the data"><Icon name="x"/></button>
@@ -335,13 +387,13 @@ pub fn FitCard() -> impl IntoView {
                     <input type="file" accept=".json,application/json" class="hidden" on:change=load/>
                 </label>
                 <button class="button primary" disabled=move || !can_fit() on:click=run>
-                    <Icon name="sparkle"/>{move || if f.running.get() { "Fitting…" } else { "Fit" }}
+                    <Icon name="sparkle"/>{move || if f.running() { "Fitting…" } else { "Fit" }}
                 </button>
                 <Show when=move || f.before.with(|b| b.is_some())>
                     <button class="button subtle" on:click=undo>"Undo fit"</button>
                 </Show>
             </div>
-            <Show when=move || f.running.get()>
+            <Show when=move || f.running()>
                 <FitProgress/>
             </Show>
             <DataSummary/>
@@ -365,8 +417,8 @@ pub fn FitCard() -> impl IntoView {
                     <input type="number" step="0.0001" min="0"
                         prop:value=move || num(f.min_spread.get())
                         on:change=move |ev| {
-                            if let Ok(v) = event_target_value(&ev).trim().parse::<f64>() {
-                                if v > 0.0 { f.min_spread.set(v); }
+                            if let Some(v) = parse_num(&event_target_value(&ev)).filter(|v| *v > 0.0) {
+                                f.min_spread.set(v);
                             }
                         }/>
                 </label>
@@ -382,41 +434,60 @@ fn FitProgress() -> impl IntoView {
     let f = fctx();
     let cancel = move |_| {
         f.stop_worker();
-        f.end();
+        f.run.set(None);
         r.notice.set(Some((true, "Cancelled the fit".into())));
     };
-    let fraction = move || f.progress.get().map_or(0.0, |p| p.0);
+    let on_thread = move || {
+        f.run
+            .with(|run| run.as_ref().is_some_and(|run| run.on_thread))
+    };
+    let fraction = move || {
+        f.run.with(|run| {
+            run.as_ref()
+                .and_then(|run| run.progress.as_ref())
+                .map_or(0.0, |p| p.fraction)
+        })
+    };
     let width = move || format!("width: {:.1}%", 100.0 * fraction());
     let text = move || {
-        if f.on_thread.get() {
-            return "Fitting on the page (no worker): it waits until done…".to_string();
-        }
-        let Some((fr, quantity, index, count)) = f.progress.get() else {
-            return String::new();
-        };
-        let elapsed = (js_sys::Date::now() - f.started.get_untracked()) / 1000.0;
-        let which = if count > 0 {
-            format!("{quantity} ({} of {count})", index + 1)
-        } else {
-            "starting".to_string()
-        };
-        // The time left, from the pace so far, once there is a pace to go by.
-        let left = if fr >= 0.03 && elapsed >= 0.3 {
-            format!(" · about {} left", duration(elapsed * (1.0 - fr) / fr))
-        } else {
-            " · estimating the time…".to_string()
-        };
-        format!("Fitting {which} · {:.0}%{left}", 100.0 * fr)
+        f.run.with(|run| {
+            let Some(run) = run else {
+                return String::new();
+            };
+            if run.on_thread {
+                return "Fitting on the page (no worker): it waits until done…".to_string();
+            }
+            let Some(p) = &run.progress else {
+                return "Starting…".to_string();
+            };
+            let elapsed = (js_sys::Date::now() - run.started) / 1000.0;
+            // The time left, from the pace so far, once there is a pace to go by.
+            let left = if p.fraction >= 0.03 && elapsed >= 0.3 {
+                format!(
+                    " · about {} left",
+                    duration(elapsed * (1.0 - p.fraction) / p.fraction)
+                )
+            } else {
+                " · estimating the time…".to_string()
+            };
+            format!(
+                "Fitting {} ({} of {}) · {:.0}%{left}",
+                p.quantity,
+                p.index + 1,
+                p.count,
+                100.0 * p.fraction
+            )
+        })
     };
     view! {
         <div class="fit-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
             aria-valuenow=move || format!("{:.0}", 100.0 * fraction())>
-            <div class="fit-progress-bar" class:indeterminate=move || f.on_thread.get()>
+            <div class="fit-progress-bar" class:indeterminate=on_thread>
                 <div style=width></div>
             </div>
             <div class="fit-progress-line">
                 <span class="hint">{text}</span>
-                <Show when=move || !f.on_thread.get()>
+                <Show when=move || !on_thread()>
                     <button class="mini" on:click=cancel>"Cancel"</button>
                 </Show>
             </div>
@@ -428,71 +499,74 @@ fn FitProgress() -> impl IntoView {
 /// rows it reads and those it skips.
 #[component]
 fn DataSummary() -> impl IntoView {
-    let r = rctx();
     let f = fctx();
     move || {
-        let obs = match f.observations.get()? {
-            Ok(o) => o,
-            Err(e) => {
-                return Some(view! { <p class="fit-error"><Icon name="warn"/>{e}</p> }.into_any())
-            }
-        };
-        let n = obs.rows.len();
-        let usable = r
-            .good
-            .with(|g| g.as_ref().map(|s| s.usable(&obs.rows)))
-            .unwrap_or_default();
-        let variables = obs
-            .observed
-            .iter()
-            .map(|(name, k)| {
-                let share = if n == 0 { 0.0 } else { *k as f64 / n as f64 };
-                let width = format!("width: {:.1}%", 100.0 * share);
-                view! {
-                    <tr>
-                        <td>{name.clone()}</td>
-                        <td class="num">{format!("{k}")}</td>
-                        <td class="fit-bar-cell"><div class="fit-bar"><div style=width></div></div></td>
-                    </tr>
+        f.observations.with(|obs| {
+            let obs = match obs.as_ref()? {
+                Ok(o) => o,
+                Err(e) => {
+                    let e = e.clone();
+                    return Some(
+                        view! { <p class="fit-error"><Icon name="warn"/>{e}</p> }.into_any(),
+                    );
                 }
-            })
-            .collect_view();
-        let factors = usable
-            .iter()
-            .map(|(q, (rows, skipped))| {
-                let class = if *rows == 0 { "fit-none" } else { "" };
-                let skips = *skipped > 0;
+            };
+            let n = obs.rows.len();
+            let variables = obs
+                .observed
+                .iter()
+                .map(|(name, k)| {
+                    let share = if n == 0 { 0.0 } else { *k as f64 / n as f64 };
+                    let width = format!("width: {:.1}%", 100.0 * share);
+                    view! {
+                        <tr>
+                            <td>{name.clone()}</td>
+                            <td class="num">{format!("{k}")}</td>
+                            <td class="fit-bar-cell"><div class="fit-bar"><div style=width></div></div></td>
+                        </tr>
+                    }
+                })
+                .collect_view();
+            let factors = f.usable.with(|u| {
+                u.iter()
+                    .flatten()
+                    .map(|(q, (rows, skipped))| {
+                        let class = if *rows == 0 { "fit-none" } else { "" };
+                        let skips = *skipped > 0;
+                        view! {
+                            <tr class=class>
+                                <td>{q.clone()}</td>
+                                <td class="num">{format!("{rows}")}</td>
+                                <td class="num" class:fit-skipped=skips>{format!("{skipped}")}</td>
+                            </tr>
+                        }
+                    })
+                    .collect_view()
+            });
+            let weight = obs
+                .weight
+                .as_ref()
+                .map(|(w, _)| format!(", weighed by {w}"))
+                .unwrap_or_default();
+            Some(
                 view! {
-                    <tr class=class>
-                        <td>{q.clone()}</td>
-                        <td class="num">{format!("{rows}")}</td>
-                        <td class="num" class:fit-skipped=skips>{format!("{skipped}")}</td>
-                    </tr>
+                    <p class="hint">{format!("{n} rows{weight}")}</p>
+                    <table class="rules-table fit-table">
+                        <thead><tr><th>"Variable"</th><th class="num">"rows giving it"</th><th></th></tr></thead>
+                        <tbody>{variables}</tbody>
+                    </table>
+                    <table class="rules-table fit-table">
+                        <thead><tr>
+                            <th>"Factor of"</th>
+                            <th class="num" title="Rows giving the quantity and everything it reads">"rows read"</th>
+                            <th class="num" title="Rows giving the quantity but missing something it reads">"skipped"</th>
+                        </tr></thead>
+                        <tbody>{factors}</tbody>
+                    </table>
                 }
-            })
-            .collect_view();
-        let weight = obs
-            .weight_column
-            .map(|w| format!(", weighed by {w}"))
-            .unwrap_or_default();
-        Some(
-            view! {
-                <p class="hint">{format!("{n} rows{weight}")}</p>
-                <table class="rules-table fit-table">
-                    <thead><tr><th>"Variable"</th><th class="num">"rows giving it"</th><th></th></tr></thead>
-                    <tbody>{variables}</tbody>
-                </table>
-                <table class="rules-table fit-table">
-                    <thead><tr>
-                        <th>"Factor of"</th>
-                        <th class="num" title="Rows giving the quantity and everything it reads">"rows read"</th>
-                        <th class="num" title="Rows giving the quantity but missing something it reads">"skipped"</th>
-                    </tr></thead>
-                    <tbody>{factors}</tbody>
-                </table>
-            }
-            .into_any(),
-        )
+                .into_any(),
+            )
+        })
     }
 }
 
@@ -510,7 +584,7 @@ fn FitReport() -> impl IntoView {
             .map(|q| {
                 let estimated: usize = q.parts.iter().map(|p| p.estimated).sum();
                 let state = if q.converged { "converged" } else { "stopped: max iterations" };
-                let ll = |v: Option<f64>| v.map_or_else(|| "−∞".to_string(), short);
+                let ll = |v: f64| if v.is_finite() { short(v) } else { "−∞".to_string() };
                 let title = q
                     .parts
                     .iter()

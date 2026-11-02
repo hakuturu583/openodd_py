@@ -68,12 +68,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import os
 import sys
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -349,26 +348,30 @@ class Rules:
         self,
         rows: Iterable[Mapping[str, Any]],
         weights: Optional[Sequence[float]] = None,
+        *,
+        weight_column: Optional[str] = None,
     ) -> dict[str, tuple[float, int]]:
         """The log-likelihood of *rows* under these rules, per quantity:
         ``(log-likelihood, rows)``, of the rows that give the quantity and
         every value its parts read (an input missing reads its ``default``).
         ``-inf`` when a row lies outside the quantity's range. A row is a
         mapping of names to values, a value ``None``, ``""`` or NaN not
-        observed; *weights* weighs each row.
+        observed; *weights*, or the column *weight_column* names, weighs
+        each row.
 
         Raises:
             RulesError: On a value that is not a number, or *weights* not one
                 per row, or one negative.
         """
-        data = self._rows(rows)
-        return dict(self._call(self._core.log_likelihood, data, _weights(weights)))
+        data, weights = self._rows(rows, weights, weight_column)
+        return dict(self._call(self._core.log_likelihood, data, weights))
 
     def fit(
         self,
         rows: Iterable[Mapping[str, Any]],
         weights: Optional[Sequence[float]] = None,
         *,
+        weight_column: Optional[str] = None,
         quantities: Optional[Sequence[str]] = None,
         max_iterations: int = 1000,
         tolerance: float = 1e-10,
@@ -395,6 +398,8 @@ class Rules:
         Args:
             rows: The data.
             weights: Each row's weight (1 when not given).
+            weight_column: Instead of *weights*, the column each row's weight
+                is in (1 where a row has none).
             quantities: The quantities to fit; by default every one some row
                 gives with all it reads. One named that no row gives is an
                 error.
@@ -404,9 +409,8 @@ class Rules:
             min_spread: The least width of a distribution at a point with
                 data (``high - low``, or a normal's ``sd``), as a share of
                 the standard deviation of the quantity's values (of their
-                size, when they do not vary): a
-                likelihood grows without bound as a distribution narrows
-                onto one value.
+                size, when they are all one): a likelihood grows without
+                bound as a distribution narrows onto one value.
             fixed: Values held as written, besides those the rules' own
                 ``fixed`` holds: ``"grip"`` (a quantity), ``"grip.water"``
                 (a part), ``"grip.water.sd"`` (a parameter at every point),
@@ -423,11 +427,11 @@ class Rules:
         """
         if max_iterations < 0:
             raise RulesError(f"max_iterations must not be negative, not {max_iterations}")
-        data = self._rows(rows)
-        core, overlay, report = self._call(
+        data, weights = self._rows(rows, weights, weight_column)
+        core = self._call(
             self._core.fit,
             data,
-            _weights(weights),
+            weights,
             None if quantities is None else [str(q) for q in quantities],
             int(max_iterations),
             float(tolerance),
@@ -435,44 +439,25 @@ class Rules:
             [str(f) for f in fixed],
         )
         fitted = {
-            name: QuantityFit(
-                name=name,
-                rows=n,
-                skipped=skipped,
-                log_likelihood_before=before,
-                log_likelihood=after,
-                iterations=iterations,
-                converged=converged,
-                parts=tuple(PartFit(*part) for part in parts),
-            )
-            for name, n, skipped, before, after, iterations, converged, parts in report
+            q["name"]: QuantityFit(**{**q, "parts": tuple(PartFit(**p) for p in q["parts"])})
+            for q in core.quantities
         }
-        return RulesFit(rules=Rules(core), quantities=fitted, overlay=overlay)
+        return RulesFit(rules=Rules(core.rules), quantities=fitted, _core=core)
 
-    def _rows(self, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, float]]:
-        """*rows* as the core reads them: the values these rules read, as
-        numbers, those not observed left out."""
-        names = set(self.quantities) | set(self.free_inputs)
-        out: list[dict[str, float]] = []
-        for i, row in enumerate(rows):
-            values: dict[str, float] = {}
-            for key, value in row.items():
-                if key not in names or value is None:
-                    continue
-                if isinstance(value, str):
-                    value = value.strip()
-                    if not value:
-                        continue
-                try:
-                    x = float(value)
-                except (TypeError, ValueError):
-                    raise RulesError(
-                        f"row {i}: {key} is {value!r}, not a number"
-                    ) from None
-                if not math.isnan(x):
-                    values[key] = x
-            out.append(values)
-        return out
+    def _rows(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        weights: Optional[Sequence[float]],
+        weight_column: Optional[str],
+    ) -> tuple[list[dict[str, float]], Optional[list[float]]]:
+        """*rows* as the core reads them -- the values these rules read, as
+        numbers -- and their weights, given or from *weight_column*."""
+        if weights is not None and weight_column is not None:
+            raise RulesError("give weights or weight_column, not both")
+        data, from_column = self._call(
+            self._core.observations, [dict(r) for r in rows], weight_column
+        )
+        return data, from_column if weights is None else [float(w) for w in weights]
 
     @staticmethod
     def _call(f, *args):  # type: ignore[no-untyped-def]
@@ -528,18 +513,19 @@ class RulesFit:
     rules: Rules
     #: Per quantity fitted, in :attr:`Rules.order`.
     quantities: dict[str, QuantityFit]
-    #: The fitted parts as a rule file that merges over the rules fitted.
-    overlay: str
+    _core: "_core.RuleFit" = field(repr=False)
 
-    def text(self, extends: Union[str, "os.PathLike[str]", None] = None) -> str:
+    @property
+    def overlay(self) -> str:
+        """The fitted parts as a rule file that merges over the rules fitted."""
+        return self.text()
+
+    def text(self, extends: Optional[str] = None) -> str:
         """The fitted parts as a rule file. With *extends* -- a reference to
         the rules fitted, as a rule file's ``extends`` takes it -- the file
         extends them, so :meth:`Rules.read` reads it as the whole fitted
         set; without, it merges over them (:meth:`Rules.read_over`)."""
-        if extends is None:
-            return self.overlay
-        reference = json.dumps(Path(extends).as_posix() if not _is_url(extends) else str(extends))
-        return self.overlay.replace("version: 2\n", f"version: 2\nextends: {reference}\n", 1)
+        return self._core.text(None if extends is None else str(extends))
 
     def write(
         self,
@@ -594,28 +580,11 @@ def read_data(path: Union[str, "os.PathLike[str]"]) -> tuple[list[dict[str, Any]
         if suffix in (".jsonl", ".ndjson"):
             rows = [json.loads(line) for line in text.splitlines() if line.strip()]
         elif suffix == ".json":
-            data = json.loads(text)
-            if isinstance(data, dict) and "rows" in data:
-                extra = set(data) - {"rows", "weight"}
-                if extra:
-                    raise RulesError(f"{path}: unknown key {sorted(extra)[0]!r}")
-                weight = data.get("weight")
-                if weight is not None and not isinstance(weight, str):
-                    raise RulesError(f"{path}: \"weight\" names a column: a string")
-                rows = data["rows"]
-            elif isinstance(data, dict):
-                columns = {str(k): list(v) for k, v in data.items()}
-                n = {len(v) for v in columns.values()}
-                if len(n) > 1:
-                    raise RulesError(f"{path}: its columns are not all of one length")
-                rows = [
-                    {k: v[i] for k, v in columns.items()} for i in range(n.pop() if n else 0)
-                ]
-            else:
-                rows = data
+            # The editor's reader: rows, {"rows", "weight"} or columns.
+            rows, weight = _core.json_rows(text)
         else:
             raise RulesError(f"{path}: data is read from .csv, .tsv, .json, .jsonl or .ndjson")
-    except (json.JSONDecodeError, TypeError) as e:
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
         raise RulesError(f"{path}: {e}") from None
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise RulesError(f"{path}: rows are objects (name: value)")
@@ -653,29 +622,15 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
     try:
         rules = Rules.read(args.rules)
         rows: list[dict[str, Any]] = []
-        # Each row's weight column: --weight, else what its JSON file names.
-        columns: list[Optional[str]] = []
+        # The weight column: --weight, else the one a JSON file names.
+        weight = args.weight
         for path in args.data:
             part, named = read_data(path)
             rows.extend(part)
-            columns.extend([args.weight or named] * len(part))
-        weights: Optional[list[float]] = None
-        if any(columns):
-            weights = []
-            for i, (row, column) in enumerate(zip(rows, columns)):
-                value = row.get(column) if column else None
-                if value is None or value == "":
-                    if args.weight:
-                        raise RulesError(f"row {i}: no number in the weight column {column!r}")
-                    weights.append(1.0)  # as the editor reads it: 1 where a row has none
-                    continue
-                try:
-                    weights.append(float(value))
-                except (TypeError, ValueError):
-                    raise RulesError(f"row {i}: {column} is {value!r}, not a number") from None
+            weight = weight or named
         fit = rules.fit(
             rows,
-            weights,
+            weight_column=weight,
             quantities=args.quantities,
             max_iterations=args.max_iterations,
             min_spread=args.min_spread,
@@ -702,10 +657,6 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
             )
     print(f"wrote {args.output}")
     return 0
-
-
-def _weights(weights: Optional[Sequence[float]]) -> Optional[list[float]]:
-    return None if weights is None else [float(w) for w in weights]
 
 
 def _values(inputs: Optional[Mapping[str, float]]) -> dict[str, float]:

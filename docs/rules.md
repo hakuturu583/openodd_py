@@ -165,8 +165,10 @@ never decides is free, within the bound it puts on the quantity.
 **Rows.** A row is a mapping of names to values: a quantity's name gives
 its observed value, an input's name the input. Values may be numbers or
 numeric strings (a CSV's); `None`, `""` and NaN are not observed, and
-columns the rules do not read -- a timestamp -- are ignored. `weights` (or
-`--weight COLUMN`) weighs each row, as a time step's duration would.
+columns the rules do not read -- a timestamp -- are ignored. `weights`, or
+the column `weight_column` (`--weight COLUMN`) names, weighs each row, as a
+time step's duration would; a row without a weight weighs 1. Python, the
+command and the editor read rows with the same reader, the core's.
 `read_rows` reads CSV and TSV with a header, JSON lines, and JSON: a list of
 objects, `{"rows": [...], "weight": "<column>"}` (the weight column, 1 where
 a row has none; `openodd-rules-fit` uses it unless `--weight` is given), or
@@ -191,7 +193,7 @@ own envelope, which is as wide as the data happened to be.
 
 | `Rules` member | |
 |---|---|
-| `fit(rows, weights=None, *, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3, fixed=())` | A `RulesFit`. `quantities` limits the fit; one named that no row gives is an error. `fixed` holds values besides the file's ([below](#holding-values)) |
+| `fit(rows, weights=None, *, weight_column=None, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3, fixed=())` | A `RulesFit`. `quantities` limits the fit; one named that no row gives is an error. `fixed` holds values besides the file's ([below](#holding-values)) |
 | `log_likelihood(rows, weights=None)` | Per quantity, `(log-likelihood, rows)`: how well rules -- fitted or written -- explain data; compare two on the same rows |
 
 | `RulesFit` member | |

@@ -2468,12 +2468,9 @@ impl RuleSet {
             .map_err(err)
     }
 
-    /// The maximum-likelihood fit to `rows` (`crate::rules_fit`): the fitted
-    /// rules, the fitted parts as a rule file to merge over these, and per
-    /// quantity fitted (name, rows, skipped, log-likelihood before, after,
-    /// iterations, converged, [(part, points, points with data, values
-    /// estimated)]); `fixed` holds values besides the rules' own `fixed`.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    /// The maximum-likelihood fit to `rows` (`crate::rules_fit`); `fixed`
+    /// holds values besides the rules' own `fixed`.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (rows, weights=None, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3, fixed=Vec::new()))]
     fn fit(
         &self,
@@ -2485,20 +2482,7 @@ impl RuleSet {
         tolerance: f64,
         min_spread: f64,
         fixed: Vec<String>,
-    ) -> PyResult<(
-        RuleSet,
-        String,
-        Vec<(
-            String,
-            usize,
-            usize,
-            f64,
-            f64,
-            usize,
-            bool,
-            Vec<(String, usize, usize, usize)>,
-        )>,
-    )> {
+    ) -> PyResult<RuleFit> {
         let options = crate::rules_fit::FitOptions {
             quantities,
             max_iterations,
@@ -2506,29 +2490,123 @@ impl RuleSet {
             min_spread,
             fixed,
         };
-        let fit = py
+        let inner = py
             .allow_threads(|| self.inner.fit(&rows, weights.as_deref(), &options))
             .map_err(err)?;
-        let report = fit
+        Ok(RuleFit { inner })
+    }
+
+    /// `rows` (name -> value as read) as a fit reads them, keeping the
+    /// values these rules read (`crate::rules_fit::observations`): the rows
+    /// as numbers, and each row's weight from the column `weight` names.
+    #[pyo3(signature = (rows, weight=None))]
+    #[allow(clippy::type_complexity)]
+    fn observations(
+        &self,
+        rows: Vec<indexmap::IndexMap<String, Bound<'_, PyAny>>>,
+        weight: Option<&str>,
+    ) -> PyResult<(Vec<indexmap::IndexMap<String, f64>>, Option<Vec<f64>>)> {
+        let cells: Vec<crate::rules_fit::Row> = rows
+            .iter()
+            .map(|row| row.iter().map(|(k, v)| (k.clone(), cell(v))).collect())
+            .collect();
+        let obs = crate::rules_fit::observations(&cells, &self.inner.data_names(), weight)
+            .map_err(err)?;
+        let weights = obs.weights().map(<[f64]>::to_vec);
+        Ok((obs.rows, weights))
+    }
+}
+
+/// A value of a row of data, as `crate::rules_fit` reads it.
+fn cell(v: &Bound<'_, PyAny>) -> crate::rules_fit::Cell {
+    use crate::rules_fit::Cell;
+    if v.is_none() {
+        Cell::Missing
+    } else if v.is_instance_of::<pyo3::types::PyBool>() {
+        Cell::Other(v.to_string())
+    } else if let Ok(s) = v.extract::<String>() {
+        Cell::Text(s)
+    } else if let Ok(x) = v.extract::<f64>() {
+        Cell::Number(x)
+    } else {
+        Cell::Other(v.repr().map_or_else(|_| "?".into(), |r| r.to_string()))
+    }
+}
+
+/// The rows of a JSON data file, values as read, and the weight column it
+/// names (`crate::rules_fit::json_rows`).
+#[pyfunction]
+fn json_rows(py: Python<'_>, text: &str) -> PyResult<(Vec<PyObject>, Option<String>)> {
+    use crate::rules_fit::Cell;
+    let (rows, weight) = crate::rules_fit::json_rows(text).map_err(err)?;
+    let rows = rows
+        .iter()
+        .map(|row| {
+            let d = PyDict::new(py);
+            for (k, v) in row {
+                match v {
+                    Cell::Missing => d.set_item(k, py.None())?,
+                    Cell::Number(x) => d.set_item(k, x)?,
+                    Cell::Text(s) | Cell::Other(s) => d.set_item(k, s)?,
+                }
+            }
+            Ok(d.into_any().unbind())
+        })
+        .collect::<PyResult<_>>()?;
+    Ok((rows, weight))
+}
+
+/// A fit of rules to data (`crate::rules_fit::Fit`).
+#[pyclass(frozen, module = "openodd._core")]
+struct RuleFit {
+    inner: crate::rules_fit::Fit,
+}
+
+#[pymethods]
+impl RuleFit {
+    /// The fitted rules.
+    #[getter]
+    fn rules(&self) -> RuleSet {
+        RuleSet {
+            inner: self.inner.rules.clone(),
+        }
+    }
+
+    /// Per quantity fitted, its report as a dict (the fields of
+    /// `crate::rules_fit::QuantityFit`, `parts` a list of dicts).
+    #[getter]
+    fn quantities(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        self.inner
             .quantities
             .iter()
             .map(|q| {
-                (
-                    q.name.clone(),
-                    q.rows,
-                    q.skipped,
-                    q.log_likelihood_before,
-                    q.log_likelihood,
-                    q.iterations,
-                    q.converged,
-                    q.parts
-                        .iter()
-                        .map(|p| (p.name.clone(), p.points, p.points_with_data, p.estimated))
-                        .collect(),
-                )
+                let d = PyDict::new(py);
+                d.set_item("name", &q.name)?;
+                d.set_item("rows", q.rows)?;
+                d.set_item("skipped", q.skipped)?;
+                d.set_item("log_likelihood_before", q.log_likelihood_before)?;
+                d.set_item("log_likelihood", q.log_likelihood)?;
+                d.set_item("iterations", q.iterations)?;
+                d.set_item("converged", q.converged)?;
+                let parts = PyList::empty(py);
+                for p in &q.parts {
+                    let pd = PyDict::new(py);
+                    pd.set_item("name", &p.name)?;
+                    pd.set_item("points", p.points)?;
+                    pd.set_item("points_with_data", p.points_with_data)?;
+                    pd.set_item("estimated", p.estimated)?;
+                    parts.append(pd)?;
+                }
+                d.set_item("parts", parts)?;
+                Ok(d.into_any().unbind())
             })
-            .collect();
-        Ok((RuleSet { inner: fit.rules }, fit.overlay, report))
+            .collect()
+    }
+
+    /// The fitted parts as a rule file; with `extends`, one extending it.
+    #[pyo3(signature = (extends=None))]
+    fn text(&self, extends: Option<&str>) -> String {
+        self.inner.text(extends)
     }
 }
 
@@ -2562,6 +2640,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ParamSpace>()?;
     m.add_class::<FlakinessModel>()?;
     m.add_class::<RuleSet>()?;
+    m.add_class::<RuleFit>()?;
     for f in [
         wrap_pyfunction!(is_in, m)?,
         wrap_pyfunction!(equals, m)?,
@@ -2587,6 +2666,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(coverage_from_entries, m)?,
         wrap_pyfunction!(fetch, m)?,
         wrap_pyfunction!(cache_dir, m)?,
+        wrap_pyfunction!(json_rows, m)?,
     ] {
         m.add_function(f)?;
     }

@@ -162,7 +162,7 @@ impl RCtx {
     }
 }
 
-fn parse_num(s: &str) -> Option<f64> {
+pub(crate) fn parse_num(s: &str) -> Option<f64> {
     s.trim().parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
@@ -230,7 +230,13 @@ fn part_doc(p: &openodd::rules::Part) -> PartDoc {
         } else if p.fixed.is_empty() {
             FixedDoc::None
         } else {
-            FixedDoc::Some(p.fixed.iter().filter_map(|h| h.spec(p)).collect())
+            // Each but `Hold::ALL` (taken above) has a spec.
+            FixedDoc::Some(
+                p.fixed
+                    .iter()
+                    .filter_map(|h| h.spec(p.family, &p.axes))
+                    .collect(),
+            )
         },
     }
 }
@@ -953,13 +959,11 @@ fn HoldsCard(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
         _ => vec![],
     };
     let toggle_all = move |ev: leptos::ev::Event| {
-        let on = event_target_checked(&ev);
-        set_fixed(if on {
+        // Off, it holds nothing: "all" replaced whatever it held before.
+        set_fixed(if event_target_checked(&ev) {
             FixedDoc::All
-        } else if list().is_empty() {
-            FixedDoc::None
         } else {
-            FixedDoc::Some(list())
+            FixedDoc::None
         });
     };
     let toggle = move |name: &'static str, on: bool| {
@@ -968,11 +972,7 @@ fn HoldsCard(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
         if on {
             l.push(name.to_string());
         }
-        set_fixed(if l.is_empty() {
-            FixedDoc::None
-        } else {
-            FixedDoc::Some(l)
-        });
+        set_fixed(l.into());
     };
     // The entries at points: those that are not a parameter alone.
     let at_points = move || {
@@ -989,25 +989,24 @@ fn HoldsCard(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
                 .split_whitespace()
                 .map(str::to_string),
         );
-        set_fixed(if l.is_empty() {
-            FixedDoc::None
-        } else {
-            FixedDoc::Some(l)
-        });
+        set_fixed(l.into());
     };
     let params = move || {
         let Some(family) = family.get() else {
             return vec![];
         };
         let all = fixed.get() == FixedDoc::All;
+        let held = list();
         family
             .params()
             .iter()
-            .map(|&name| {
-                let always = family == Family::Normal && (name == "low" || name == "high");
-                let checked = all || always || list().iter().any(|s| s == name);
+            .enumerate()
+            .map(|(k, &name)| {
+                // What a fit never estimates (a normal's truncation) is held.
+                let always = !family.fitted_params().contains(&k);
+                let checked = all || always || held.iter().any(|s| s == name);
                 view! {
-                    <label class="check" title=if always { "A normal's truncation is the physical range: a fit always holds it" } else { "Hold it at every point" }>
+                    <label class="check" title=if always { "A fit always holds it: a normal's truncation is the physical range" } else { "Hold it at every point" }>
                         <input type="checkbox" prop:checked=checked disabled=all || always
                             on:change=move |ev| toggle(name, event_target_checked(&ev))/>
                         {name}
