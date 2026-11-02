@@ -437,7 +437,14 @@ impl RulesDoc {
             let parts = &mut self.quantities[i].parts;
             for fp in fq.parts {
                 match parts.iter_mut().find(|p| p.name == fp.name) {
-                    Some(p) => p.dist = fp.dist,
+                    Some(p) => {
+                        // Points an extended file gives come along: the
+                        // values are laid out over them.
+                        if p.axes.is_none() {
+                            p.axes = fp.axes;
+                        }
+                        p.dist = fp.dist;
+                    }
                     None => parts.push(fp),
                 }
             }
@@ -1052,6 +1059,47 @@ mod tests {
         for (g, w) in got.iter().flatten().zip(want.iter().flatten()) {
             assert!((g - w).abs() <= 1e-9 * w.abs().max(1.0), "{g} vs {w}");
         }
+    }
+
+    #[test]
+    fn a_fit_of_a_part_an_extended_file_gives_keeps_its_grid() {
+        let base = "version: 2\nquantities:\n  q:\n    parts:\n      p:\n        at: {a: [0, 10], b: [0, 1]}\n        normal: {mean: [[0, 1], [2, 3]], sd: 1, low: -20, high: 20}\n";
+        // This file changes only the text: the points and values are the base's.
+        let text = "version: 2\nextends: base.yaml\nquantities:\n  q:\n    parts:\n      p: {text: tuned}\n";
+        let library = vec![("base.yaml".to_string(), base.to_string())];
+        let set = check(text, "over.yaml", &library).unwrap();
+        let rows: Vec<IndexMap<String, f64>> = (0..400)
+            .map(|i| {
+                let (a, b) = ((i % 11) as f64, (i % 2) as f64);
+                IndexMap::from([
+                    ("a".to_string(), a),
+                    ("b".to_string(), b),
+                    (
+                        "q".to_string(),
+                        0.5 * a + 2.0 * b + 0.1 * ((i % 5) as f64 - 2.0),
+                    ),
+                ])
+            })
+            .collect();
+        let fit = set.fit(&rows, None, &Default::default()).unwrap();
+        let mut doc = RulesDoc::from_yaml(text).unwrap();
+        doc.apply_overlay(&fit.text(None)).unwrap();
+        let written = doc.to_yaml().unwrap();
+        let again = check(&written, "over.yaml", &library).unwrap();
+        let (got, want) = (
+            &again.quantities["q"].parts[0],
+            &fit.rules.quantities["q"].parts[0],
+        );
+        assert_eq!(got.axes, want.axes);
+        for (g, w) in got
+            .values
+            .iter()
+            .flatten()
+            .zip(want.values.iter().flatten())
+        {
+            assert!((g - w).abs() <= 1e-9 * w.abs().max(1.0), "{g} vs {w}");
+        }
+        assert_eq!(got.text, "tuned");
     }
 
     #[test]

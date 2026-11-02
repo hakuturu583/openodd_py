@@ -1254,26 +1254,36 @@ fn fit_quantity(
     let before = log_likelihood_of(q, &start_params(q), data);
     let scale = scale_of(data);
     let floor = options.min_spread * scale;
-    // Rules under which every row is possible start as they are; others
-    // are widened until it is.
-    let base = feasible_start(&prepared, floor, before.is_finite())?;
-    let grad = base
-        .iter()
-        .map(|p| p.iter().map(|c| vec![0.0; c.len()]).collect())
-        .collect();
-    let problem = Problem {
-        p: &prepared,
-        vars: prepared.vars(),
-        scale,
-        floor,
-        total_weight: data.weight.iter().sum(),
-        params: RefCell::new(base),
-        grad: RefCell::new(grad),
+    let make = |base: Vec<Vec<Vec<f64>>>| {
+        let grad = base
+            .iter()
+            .map(|p| p.iter().map(|c| vec![0.0; c.len()]).collect())
+            .collect();
+        Problem {
+            p: &prepared,
+            vars: prepared.vars(),
+            scale,
+            floor,
+            total_weight: data.weight.iter().sum(),
+            params: RefCell::new(base),
+            grad: RefCell::new(grad),
+        }
     };
     let stages = prepared.stages();
-    let x0 = problem.start();
+    // Rules under which every row is possible start as they are; others
+    // are widened until it is.
+    let mut problem = make(feasible_start(&prepared, floor, before.is_finite())?);
+    let mut x0 = problem.start();
+    let mut first = problem.eval(&x0, stages[0]);
+    if first.is_none() && before.is_finite() {
+        // A row on a range's end is possible, but the barrier holds rows
+        // strictly inside: widen as for an impossible one.
+        problem = make(feasible_start(&prepared, floor, false)?);
+        x0 = problem.start();
+        first = problem.eval(&x0, stages[0]);
+    }
     let x0_kept = x0.clone();
-    let Some(first) = problem.eval(&x0, stages[0]) else {
+    let Some(first) = first else {
         return Err(Error::value(format!(
             "{}: {}: cannot start the fit: a row lies outside the range of a \
              distribution, where its low or high is held (fixed)",
@@ -1532,11 +1542,26 @@ fn quantities_text(fitted: &[(&Quantity, Vec<Vec<Vec<f64>>>)]) -> String {
     }
     let mut out = String::from("quantities:\n");
     for (q, params) in fitted {
-        out.push_str(&format!("  {}:\n    parts:\n", q.name));
+        // Names quoted: a name such as `true` or `null` is a string.
+        out.push_str(&format!("  {}:\n    parts:\n", quoted(&q.name)));
         for (part, p) in q.parts.iter().zip(params) {
+            // The points too, as the rules have them (from an extended file,
+            // say), so the file says the shape its values have.
+            let at: Vec<String> = part
+                .axes
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{}: {}",
+                        quoted(&a.input),
+                        nested_list(&a.points, &[a.points.len()], &py_float_repr)
+                    )
+                })
+                .collect();
             out.push_str(&format!(
-                "      {}:\n        {}:\n",
-                part.name,
+                "      {}:\n        at: {{{}}}\n        {}:\n",
+                quoted(&part.name),
+                at.join(", "),
                 part.family.name()
             ));
             let shape: Vec<usize> = part.axes.iter().map(|a| a.points.len()).collect();
@@ -1562,6 +1587,11 @@ fn quantities_text(fitted: &[(&Quantity, Vec<Vec<Vec<f64>>>)]) -> String {
         }
     }
     out
+}
+
+/// `s` as a YAML string scalar (a JSON string is one).
+fn quoted(s: &str) -> String {
+    serde_json::to_string(s).expect("a string serializes")
 }
 
 /// `v` rounded to ten significant digits, up or down.
@@ -2164,6 +2194,36 @@ quantities:
             let err = observations_from_json(bad, &names).unwrap_err().to_string();
             assert!(err.contains(says), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn a_row_on_a_range_end_starts_a_fit() {
+        let text = "version: 2\nquantities:\n  grip:\n    parts:\n      water:\n        at: {water: [0, 1]}\n        uniform: {low: 0, high: 1}\n";
+        let set = RuleSet::parse(text, "e.yaml").unwrap();
+        let rows = vec![
+            row(&[("water", 0.5), ("grip", 0.0)]),
+            row(&[("water", 0.5), ("grip", 0.5)]),
+        ];
+        let fit = set.fit(&rows, None, &FitOptions::default()).unwrap();
+        assert!(fit.quantities[0].log_likelihood >= fit.quantities[0].log_likelihood_before);
+    }
+
+    #[test]
+    fn names_yaml_reads_otherwise_are_written_quoted() {
+        let text = "version: 2\nquantities:\n  \"true\":\n    parts:\n      \"null\":\n        at: {water: [0, 100]}\n        normal: {mean: 0.7, sd: 0.3, low: 0, high: 2}\n";
+        let set = RuleSet::parse(text, "q.yaml").unwrap();
+        let rows: Vec<_> = (0..50)
+            .map(|i| row(&[("water", (i * 2) as f64), ("true", 0.5 + 0.004 * i as f64)]))
+            .collect();
+        let fit = set.fit(&rows, None, &FitOptions::default()).unwrap();
+        let text = fit.text(None);
+        assert!(
+            text.contains(
+                "  \"true\":\n    parts:\n      \"null\":\n        at: {\"water\": [0.0, 100.0]}"
+            ),
+            "{text}"
+        );
+        assert_eq!(fit.quantities[0].name, "true");
     }
 
     #[test]
