@@ -106,7 +106,12 @@ else is this library's.
   It holds its own (`Backend.rules`), a run reads another file over them
   (`Backend.use_rules`), `Backend.derived_range("tire_friction", {"water": 70})`
   gives the range and `Backend.derived_at(..., quantile)` the value a run draws
-  ([docs/rules.md](docs/rules.md)). In the browser, `RulesView` draws them as an
+  ([docs/rules.md](docs/rules.md)). **Fit them to data**: `Rules.fit(rows)`
+  (or `openodd-rules-fit rules.yaml drives.csv -o fitted.yaml`) estimates
+  every parameter at every point by maximum likelihood from values measured
+  together in the real world, factor by factor through the graph, and writes
+  the fitted rules as a file extending the original
+  ([docs/rules.md](docs/rules.md#fitting-to-data)). In the browser, `RulesView` draws them as an
   embeddable component: each part's distribution over its input, and the
   quantity's at the inputs chosen ([docs/wasm.md](docs/wasm.md#rules)).
 

@@ -19,6 +19,7 @@ classifiers = [
 [project.scripts]
 openodd-coverage = "openodd.report:main"
 openodd-test-report = "openodd.testreport:main"
+openodd-rules-fit = "openodd.rules:fit_main"
 
 [project.optional-dependencies]
 # Claude's analysis in openodd-test-report (openodd.agent).

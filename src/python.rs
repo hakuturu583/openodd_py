@@ -2455,6 +2455,78 @@ impl RuleSet {
     ) -> PyResult<indexmap::IndexMap<String, f64>> {
         self.inner.sample(&inputs, &quantiles).map_err(err)
     }
+
+    /// Per quantity some row observes with all it reads: (log-likelihood, rows).
+    #[pyo3(signature = (rows, weights=None))]
+    fn log_likelihood(
+        &self,
+        py: Python<'_>,
+        rows: Vec<indexmap::IndexMap<String, f64>>,
+        weights: Option<Vec<f64>>,
+    ) -> PyResult<indexmap::IndexMap<String, (f64, usize)>> {
+        py.allow_threads(|| self.inner.log_likelihood(&rows, weights.as_deref()))
+            .map_err(err)
+    }
+
+    /// The maximum-likelihood fit to `rows` (`crate::rules_fit`): the fitted
+    /// rules, the fitted parts as a rule file to merge over these, and per
+    /// quantity fitted (name, rows, skipped, log-likelihood before, after,
+    /// iterations, converged, [(part, points, points with data)]).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[pyo3(signature = (rows, weights=None, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3))]
+    fn fit(
+        &self,
+        py: Python<'_>,
+        rows: Vec<indexmap::IndexMap<String, f64>>,
+        weights: Option<Vec<f64>>,
+        quantities: Option<Vec<String>>,
+        max_iterations: usize,
+        tolerance: f64,
+        min_spread: f64,
+    ) -> PyResult<(
+        RuleSet,
+        String,
+        Vec<(
+            String,
+            usize,
+            usize,
+            f64,
+            f64,
+            usize,
+            bool,
+            Vec<(String, usize, usize)>,
+        )>,
+    )> {
+        let options = crate::rules_fit::FitOptions {
+            quantities,
+            max_iterations,
+            tolerance,
+            min_spread,
+        };
+        let fit = py
+            .allow_threads(|| self.inner.fit(&rows, weights.as_deref(), &options))
+            .map_err(err)?;
+        let report = fit
+            .quantities
+            .iter()
+            .map(|q| {
+                (
+                    q.name.clone(),
+                    q.rows,
+                    q.skipped,
+                    q.log_likelihood_before,
+                    q.log_likelihood,
+                    q.iterations,
+                    q.converged,
+                    q.parts
+                        .iter()
+                        .map(|p| (p.name.clone(), p.points, p.points_with_data))
+                        .collect(),
+                )
+            })
+            .collect();
+        Ok((RuleSet { inner: fit.rules }, fit.overlay, report))
+    }
 }
 
 #[pymodule]

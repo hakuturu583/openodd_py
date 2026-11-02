@@ -334,16 +334,16 @@ impl Dist {
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
 
 /// The standard normal's distribution function.
-fn phi(z: f64) -> f64 {
+pub(crate) fn phi(z: f64) -> f64 {
     0.5 * libm::erfc(-z / SQRT_2)
 }
 
 /// Its upper tail, 1 - phi(z), without cancelling.
-fn upper(z: f64) -> f64 {
+pub(crate) fn upper(z: f64) -> f64 {
     0.5 * libm::erfc(z / SQRT_2)
 }
 
-fn density(z: f64) -> f64 {
+pub(crate) fn density(z: f64) -> f64 {
     (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt()
 }
 
@@ -441,6 +441,20 @@ impl Part {
     /// Its distribution at `values` (one per axis, in order), each held at
     /// its axis' outermost points.
     pub fn dist(&self, values: &[f64]) -> Dist {
+        let mut params = vec![0.0; self.values.len()];
+        for (index, w) in self.weights(values) {
+            for (p, column) in params.iter_mut().zip(&self.values) {
+                *p += w * column[index];
+            }
+        }
+        self.family.dist(&params)
+    }
+
+    /// The combinations of points the parameters at `values` (one per axis,
+    /// in order) are interpolated from, and the weight of each: every
+    /// parameter there is `sum(w * values[index])`. Weights are positive and
+    /// add up to 1.
+    pub fn weights(&self, values: &[f64]) -> Vec<(usize, f64)> {
         // Each axis: the lower corner's index and the weight of the upper.
         let cells: Vec<(usize, f64)> = self
             .axes
@@ -449,7 +463,7 @@ impl Part {
             .map(|(axis, v)| segment(&axis.points, *v))
             .collect();
         let strides = self.strides();
-        let mut params = vec![0.0; self.values.len()];
+        let mut out = Vec::new();
         for corner in 0..(1usize << cells.len()) {
             let mut w = 1.0;
             let mut index = 0;
@@ -460,14 +474,11 @@ impl Part {
                 w *= if up { t } else { 1.0 - t };
                 index += j * strides[d];
             }
-            if w == 0.0 {
-                continue;
-            }
-            for (p, column) in params.iter_mut().zip(&self.values) {
-                *p += w * column[index];
+            if w != 0.0 {
+                out.push((index, w));
             }
         }
-        self.family.dist(&params)
+        out
     }
 
     /// The distribution written at combination `index` (see [`Part::values`]).

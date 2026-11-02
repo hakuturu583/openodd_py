@@ -20,6 +20,7 @@ pub mod loader;
 pub mod model;
 pub mod report;
 pub mod rules;
+pub mod rules_fit;
 pub mod sampler;
 pub mod shares;
 pub mod sources;

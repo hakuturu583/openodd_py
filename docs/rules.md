@@ -110,6 +110,92 @@ quantities:
 `examples/wasm-viewer/chain_rules.yaml` chains the weather's grip and
 visibility to the speed and the time gap drivers keep.
 
+## Fitting to data
+
+Rules written by hand are a guess. `Rules.fit` estimates them from data
+measured in the real world -- a log of drives, each row the values seen
+together -- by **maximum likelihood**: the parameters under which the rows
+are most likely.
+
+```python
+import openodd
+
+rules = openodd.Rules.read("weather.yaml")
+rows = openodd.read_rows("drives.csv")       # water, fog, grip, visibility, ...
+fit = rules.fit(rows)
+report = fit.quantities["grip"]               # a QuantityFit
+report.rows, report.skipped                   # the rows it was fitted from, and those missing something it reads
+report.log_likelihood_before, report.log_likelihood
+fit.rules.range("grip", {"water": 70})       # the fitted rules
+fit.write("weather_fitted.yaml", extends="weather.yaml")
+backend.use_rules("weather_fitted.yaml")     # runs follow the fitted rules
+```
+
+or from the shell:
+
+```sh
+openodd-rules-fit weather.yaml drives/*.csv -o weather_fitted.yaml [-q grip] [--weight w]
+```
+
+**What is estimated.** The rule file's own numbers: every parameter at every
+point a part writes. The families, the inputs and their points stay as
+written, so the fitted file is the same rules with other numbers, and a
+point no row falls near (no row interpolates from it) keeps its value.
+
+| Family | Estimated | Held |
+|---|---|---|
+| `uniform` | `low`, `high` | |
+| `triangular` | `low`, `mode`, `high` | |
+| `normal` | `mean`, `sd` | `low`, `high`: the physical range it is truncated to |
+
+**The graph factors.** The rules are a factor graph, each quantity a
+conditional distribution given what its parts read, so the likelihood of a
+row is the product of each quantity's density at its value given what it
+reads there, and the log-likelihood is a sum, one term per quantity. Each
+quantity is fitted on its own, from the rows that give it **and** everything
+it reads: a row missing the visibility tells nothing of `sight_speed`'s
+factor (it is counted in `skipped`), nor of the visibility's. An input
+missing from a row reads its `default`, as everywhere in the rules; a
+quantity read has none. With several parts, the parts move together, so the
+quantity's density at a value is the density of the part deciding it there
+(the one whose distribution function is greatest under `min`); a part that
+never decides is free, within the bound it puts on the quantity.
+
+**Rows.** A row is a mapping of names to values: a quantity's name gives
+its observed value, an input's name the input. Values may be numbers or
+numeric strings (a CSV's); `None`, `""` and NaN are not observed, and
+columns the rules do not read -- a timestamp -- are ignored. `weights` (or
+`--weight COLUMN`) weighs each row, as a time step's duration would.
+`read_rows` reads CSV and TSV with a header, JSON lines, and JSON (a list of
+objects, or an object of columns).
+
+**How.** The likelihood is maximized by L-BFGS from the rules' current
+values. A row must lie inside a uniform's or a triangular's range, so the
+start is widened where one does not, and the fit closes the range on the
+data through a log barrier whose weight falls to 0 stage by stage. A
+triangular's `mode` is fitted as its share of the range, a normal's `sd` on
+a log scale, so each stays valid. A row outside a normal's `low`..`high` is
+an error: the range is the file's to say.
+
+**Degenerate data.** A likelihood grows without bound as a distribution
+narrows onto one value (every row the same grip, or one row near a point).
+`min_spread` (default 0.001) keeps the width at each point with data --
+`high - low`, or `sd` -- at least that share of the standard deviation of
+the quantity's values. Write points where there is data to estimate them
+from: the maximum-likelihood estimate of a uniform's range is the data's
+own envelope, which is as wide as the data happened to be.
+
+| `Rules` member | |
+|---|---|
+| `fit(rows, weights=None, *, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3)` | A `RulesFit`. `quantities` limits the fit; one named that no row gives is an error |
+| `log_likelihood(rows, weights=None)` | Per quantity, `(log-likelihood, rows)`: how well rules -- fitted or written -- explain data; compare two on the same rows |
+
+| `RulesFit` member | |
+|---|---|
+| `rules` | The fitted rules |
+| `quantities` | Per quantity fitted: a `QuantityFit` -- `rows`, `skipped`, `log_likelihood_before` (`-inf` when a row lay outside the rules' range), `log_likelihood`, `iterations`, `converged`, and per part `points` and `points_with_data` |
+| `text(extends=None)`, `write(path, extends=None)` | The fitted parts as a rule file. With `extends`, the rules fitted (a path, written relative to `path`, or a URL), it extends them and reads as the whole fitted set; without, it merges over them (`Rules.read_over`, `Backend.use_rules`) |
+
 ## Checks
 
 A rule file is checked when it is read, and `RulesError` (a `ValueError`) says
