@@ -40,7 +40,7 @@
 use indexmap::IndexMap;
 
 use crate::error::{Error, Result};
-use crate::rules::{density, phi, upper, Combine, Dist, Family, Part, Quantity, RuleSet};
+use crate::rules::{density, phi, upper, Combine, Dist, Family, Hold, Part, Quantity, RuleSet};
 use crate::value::py_float_repr;
 
 /// How [`RuleSet::fit`] fits.
@@ -58,6 +58,11 @@ pub struct FitOptions {
     /// The least width of a distribution at a point with data, as a share
     /// of the spread (standard deviation) of the quantity's observed values.
     pub min_spread: f64,
+    /// Values held as written, besides those the rules' own `fixed` holds:
+    /// `quantity`, `quantity.part`, `quantity.part.param`,
+    /// `quantity.part.param@input=point,...` or `quantity.part@input=point,...`
+    /// ([`crate::rules::Hold`]).
+    pub fixed: Vec<String>,
 }
 
 impl Default for FitOptions {
@@ -67,6 +72,7 @@ impl Default for FitOptions {
             max_iterations: 1000,
             tolerance: 1e-10,
             min_spread: 1e-3,
+            fixed: Vec::new(),
         }
     }
 }
@@ -79,6 +85,9 @@ pub struct PartFit {
     pub points: usize,
     /// The points some row reads (interpolates from): the ones estimated.
     pub points_with_data: usize,
+    /// The values estimated: each free parameter at each point with data
+    /// (a value held, by the rules' `fixed` or the fit's, is not).
+    pub estimated: usize,
 }
 
 /// One quantity's fit.
@@ -205,10 +214,32 @@ impl RuleSet {
             }
             None => self.order().to_vec(),
         };
+        // Per quantity, per part: what is held, the rules' own and the fit's.
+        let mut holds: IndexMap<String, Vec<Vec<Hold>>> = self
+            .quantities
+            .iter()
+            .map(|(n, q)| (n.clone(), q.parts.iter().map(|p| p.fixed.clone()).collect()))
+            .collect();
+        for spec in &options.fixed {
+            let (quantity, part, hold) = self.fixed_of(spec)?;
+            let parts = &mut holds[&quantity];
+            match part {
+                Some(i) => parts[i].push(hold),
+                None => parts.iter_mut().for_each(|p| p.push(Hold::ALL)),
+            }
+        }
         let mut reports = Vec::new();
         let mut fitted: Vec<(String, Vec<Vec<Vec<f64>>>)> = Vec::new();
         for name in &wanted {
             let q = self.quantity(name)?;
+            let held = &holds[name];
+            if q.parts
+                .iter()
+                .zip(held)
+                .all(|(_, h)| h.contains(&Hold::ALL))
+            {
+                continue;
+            }
             let data = self.data_of(q, rows, weights);
             if data.y.is_empty() {
                 if options.quantities.is_some() {
@@ -222,7 +253,7 @@ impl RuleSet {
                 }
                 continue;
             }
-            let (params, report) = fit_quantity(q, &data, options)?;
+            let (params, report) = fit_quantity(q, &data, held, options)?;
             reports.push(report);
             fitted.push((name.clone(), params));
         }
@@ -240,6 +271,41 @@ impl RuleSet {
             quantities: reports,
             overlay,
         })
+    }
+
+    /// What a fit's `fixed` entry names: the quantity, the part (`None`:
+    /// every one) and the values of it.
+    fn fixed_of(&self, spec: &str) -> Result<(String, Option<usize>, Hold)> {
+        let bad = |e: String| Error::value(format!("fixed '{spec}': {e}"));
+        let (path, at) = match spec.split_once('@') {
+            Some((p, a)) => (p, Some(a)),
+            None => (spec, None),
+        };
+        let names: Vec<&str> = path.trim().splitn(3, '.').collect();
+        let q = self.quantity(names[0]).map_err(|e| bad(e.to_string()))?;
+        let Some(part_name) = names.get(1) else {
+            if at.is_some() {
+                return Err(bad(
+                    "a point is named in a part: quantity.part@input=point".into()
+                ));
+            }
+            return Ok((q.name.clone(), None, Hold::ALL));
+        };
+        let Some(i) = q.parts.iter().position(|p| p.name == *part_name) else {
+            let known: Vec<&str> = q.parts.iter().map(|p| p.name.as_str()).collect();
+            return Err(bad(format!(
+                "{} has no part '{part_name}'; it has {}",
+                q.name,
+                known.join(", ")
+            )));
+        };
+        let rest = match (names.get(2), at) {
+            (None, None) => return Ok((q.name.clone(), Some(i), Hold::ALL)),
+            (Some(param), None) => param.to_string(),
+            (param, Some(at)) => format!("{}@{at}", param.unwrap_or(&"")),
+        };
+        let hold = Hold::parse(&rest, &q.parts[i]).map_err(bad)?;
+        Ok((q.name.clone(), Some(i), hold))
     }
 
     /// The values `q`'s parts read that have no default: what a row must give.
@@ -491,6 +557,8 @@ struct Problem<'a> {
     vars: Vec<(usize, usize, usize)>,
     /// Per part, the points with data.
     touched: Vec<Vec<usize>>,
+    /// `[part][param][point]`: whether the value is estimated.
+    free: Vec<Vec<Vec<bool>>>,
     scale: f64,
     floor: f64,
     total_weight: f64,
@@ -568,7 +636,7 @@ impl Problem<'_> {
                 let (p, g) = (&params[i], &grad[i]);
                 match (var_kind(self.q.parts[i].family, k), self.q.parts[i].family) {
                     // A triangular's mode moves with its range.
-                    (Var::Linear, Family::Triangular) => {
+                    (Var::Linear, Family::Triangular) if self.free[i][1][n] => {
                         let t = (p[1][n] - p[0][n]) / (p[2][n] - p[0][n]);
                         let share = if k == 0 { 1.0 - t } else { t };
                         (g[k][n] + g[1][n] * share) * self.scale
@@ -593,7 +661,17 @@ impl Problem<'_> {
                 if p.iter().any(|v| !v.is_finite()) {
                     return false;
                 }
-                if part.family.dist(&p).check().is_err() || spread(part.family, &p) < self.floor {
+                if part.family.dist(&p).check().is_err() {
+                    return false;
+                }
+                // Only a width the fit moves is bounded below.
+                let f = &self.free[i];
+                let moved = match part.family {
+                    Family::Uniform => f[0][n] || f[1][n],
+                    Family::Triangular => f[0][n] || f[2][n],
+                    Family::Normal => f[1][n],
+                };
+                if moved && spread(part.family, &p) < self.floor {
                     return false;
                 }
             }
@@ -725,6 +803,7 @@ fn scale_of(data: &Data) -> f64 {
 fn fit_quantity(
     q: &Quantity,
     data: &Data,
+    held: &[Vec<Hold>],
     options: &FitOptions,
 ) -> Result<(Vec<Vec<Vec<f64>>>, QuantityFit)> {
     let before = log_likelihood_of(q, &start_params(q), data);
@@ -744,12 +823,31 @@ fn fit_quantity(
     for t in &mut touched {
         t.sort_unstable();
     }
-    let base = feasible_start(q, data, &touched, floor)?;
+    let free: Vec<Vec<Vec<bool>>> = q
+        .parts
+        .iter()
+        .zip(held)
+        .map(|(part, holds)| {
+            (0..part.family.params().len())
+                .map(|k| {
+                    (0..part.size())
+                        .map(|n| {
+                            free_params(part.family).contains(&k)
+                                && !holds.iter().any(|h| h.holds(k, n))
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let base = feasible_start(q, data, &touched, &free, floor)?;
     let mut vars = Vec::new();
     for (i, part) in q.parts.iter().enumerate() {
         for &k in free_params(part.family) {
             for &n in &touched[i] {
-                vars.push((i, k, n));
+                if free[i][k][n] {
+                    vars.push((i, k, n));
+                }
             }
         }
     }
@@ -759,6 +857,7 @@ fn fit_quantity(
         base,
         vars,
         touched: touched.clone(),
+        free,
         scale,
         floor,
         total_weight,
@@ -766,7 +865,8 @@ fn fit_quantity(
     let x0 = problem.start();
     if problem.eval(&x0, BARRIER[0]).is_none() {
         return Err(Error::value(format!(
-            "{}: {}: cannot start the fit: a row lies outside the rules' range",
+            "{}: {}: cannot start the fit: a row lies outside the range of a \
+             distribution, where its low or high is held (fixed)",
             q.source, q.name
         )));
     }
@@ -798,10 +898,12 @@ fn fit_quantity(
             .parts
             .iter()
             .zip(&touched)
-            .map(|(p, t)| PartFit {
+            .enumerate()
+            .map(|(i, (p, t))| PartFit {
                 name: p.name.clone(),
                 points: p.size(),
                 points_with_data: t.len(),
+                estimated: problem.vars.iter().filter(|v| v.0 == i).count(),
             })
             .collect(),
     };
@@ -818,6 +920,7 @@ fn feasible_start(
     q: &Quantity,
     data: &Data,
     touched: &[Vec<usize>],
+    free: &[Vec<Vec<bool>>],
     floor: f64,
 ) -> Result<Vec<Vec<Vec<f64>>>> {
     let mut params = start_params(q);
@@ -836,16 +939,19 @@ fn feasible_start(
             Family::Uniform | Family::Triangular => {
                 let hi = p.len() - 1;
                 for &n in &touched[i] {
-                    p[0][n] = p[0][n].min(least[n] - floor);
-                    p[hi][n] = p[hi][n].max(most[n] + floor);
-                    if part.family == Family::Triangular {
-                        p[1][n] = p[1][n].clamp(p[0][n], p[2][n]);
+                    if free[i][0][n] {
+                        p[0][n] = p[0][n].min(least[n] - floor);
+                    }
+                    if free[i][hi][n] {
+                        p[hi][n] = p[hi][n].max(most[n] + floor);
                     }
                 }
             }
             Family::Normal => {
                 for &n in &touched[i] {
-                    p[1][n] = p[1][n].max(floor);
+                    if free[i][1][n] {
+                        p[1][n] = p[1][n].max(floor);
+                    }
                 }
                 for (r, &y) in data.y.iter().enumerate() {
                     let d = dist_at(part, p, &data.corners[r][i]);
@@ -1368,6 +1474,139 @@ quantities:
             .unwrap();
         assert!(fit.quantities.is_empty());
         assert_eq!(fit.rules.quantities, start.quantities);
+    }
+
+    fn options(fixed: &[&str]) -> FitOptions {
+        FitOptions {
+            fixed: fixed.iter().map(|s| s.to_string()).collect(),
+            ..FitOptions::default()
+        }
+    }
+
+    #[test]
+    fn what_the_rules_hold_stays_as_written() {
+        let truth = RuleSet::parse(NORMAL, "truth.yaml").unwrap();
+        let rows = draw(&truth, "grip", "water", (0.0, 100.0), 3000, 6);
+        let start = NORMAL.replace("[0.9, 0.5], sd: [0.05, 0.1]", "[0.7, 0.7], sd: [0.3, 0.3]");
+        // The file holds sd everywhere, and the mean where water is 0.
+        let held = RuleSet::parse(
+            &format!("{start}        fixed: [sd, \"mean@water=0\"]\n"),
+            "held.yaml",
+        )
+        .unwrap();
+        let fit = held.fit(&rows, None, &FitOptions::default()).unwrap();
+        let part = &fit.rules.quantities["grip"].parts[0];
+        assert_eq!(part.values[1], vec![0.3, 0.3]);
+        assert_eq!(part.values[0][0], 0.7);
+        // The one value free moves to make up for those held (0.7 at
+        // water 0 where the truth is 0.9): the best given them, not the truth.
+        assert!(part.values[0][1] != 0.7, "{:?}", part.values);
+        assert!(fit.quantities[0].log_likelihood > fit.quantities[0].log_likelihood_before);
+        assert_eq!(fit.quantities[0].parts[0].estimated, 1);
+        // What it holds survives the fitted overlay.
+        assert_eq!(part.fixed, held.quantities["grip"].parts[0].fixed);
+        // The same, held by the fit instead of the file.
+        let free = RuleSet::parse(&start, "start.yaml").unwrap();
+        let by_call = free
+            .fit(
+                &rows,
+                None,
+                &options(&["grip.water.sd", "grip.water.mean@water=0"]),
+            )
+            .unwrap();
+        assert_eq!(
+            by_call.rules.quantities["grip"].parts[0].values,
+            part.values
+        );
+        // A point held whole; a part held whole; a quantity held whole.
+        let at = free
+            .fit(&rows, None, &options(&["grip.water@water=100"]))
+            .unwrap();
+        let v = &at.rules.quantities["grip"].parts[0].values;
+        assert_eq!((v[0][1], v[1][1]), (0.7, 0.3));
+        assert!(v[0][0] != 0.7 && v[1][0] != 0.3, "{v:?}");
+        assert_eq!(at.quantities[0].parts[0].estimated, 2);
+        for whole in ["grip", "grip.water"] {
+            let none = free.fit(&rows, None, &options(&[whole])).unwrap();
+            assert!(none.quantities.is_empty(), "{whole}");
+            assert_eq!(
+                none.rules.quantities["grip"].parts,
+                free.quantities["grip"].parts
+            );
+        }
+    }
+
+    #[test]
+    fn a_triangular_holds_its_mode_or_its_range() {
+        let text = r#"version: 2
+quantities:
+  speed:
+    parts:
+      sight:
+        at: {visibility: [0, 400]}
+        triangular: {low: [5, 25], mode: [8, 35], high: [10, 45]}
+"#;
+        let truth = RuleSet::parse(text, "truth.yaml").unwrap();
+        let rows = draw(&truth, "speed", "visibility", (0.0, 400.0), 3000, 8);
+        let start =
+            RuleSet::parse(&text.replace("mode: [8, 35]", "mode: [6, 40]"), "s.yaml").unwrap();
+        // The mode held: the range is still fitted around it.
+        let fit = start
+            .fit(&rows, None, &options(&["speed.sight.mode"]))
+            .unwrap();
+        let v = &fit.rules.quantities["speed"].parts[0].values;
+        assert_eq!(v[1], vec![6.0, 40.0]);
+        assert!(fit.quantities[0].log_likelihood > fit.quantities[0].log_likelihood_before);
+        // The range held: the mode alone is fitted, inside it.
+        let fit = start
+            .fit(
+                &rows,
+                None,
+                &options(&["speed.sight.low", "speed.sight.high"]),
+            )
+            .unwrap();
+        let v = &fit.rules.quantities["speed"].parts[0].values;
+        assert_eq!(
+            (v[0].clone(), v[2].clone()),
+            (vec![5.0, 25.0], vec![10.0, 45.0])
+        );
+        assert!(
+            (v[1][0] - 8.0).abs() < 0.5 && (v[1][1] - 35.0).abs() < 1.0,
+            "{v:?}"
+        );
+        // A range held too narrow for the data cannot be fitted.
+        let narrow =
+            RuleSet::parse(&text.replace("high: [10, 45]", "high: [9, 40]"), "n.yaml").unwrap();
+        let err = narrow
+            .fit(&rows, None, &options(&["speed.sight.high"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("where its low or high is held"), "{err}");
+    }
+
+    #[test]
+    fn a_fixed_entry_must_name_something() {
+        let start = RuleSet::parse(NORMAL, "n.yaml").unwrap();
+        let rows = vec![row(&[("water", 10.0), ("grip", 0.8)])];
+        for (spec, says) in [
+            ("nope", "fixed 'nope': unknown quantity 'nope'"),
+            (
+                "grip.ice",
+                "fixed 'grip.ice': grip has no part 'ice'; it has water",
+            ),
+            ("grip.water.median", "normal has no parameter 'median'"),
+            (
+                "grip.water.mean@water=5",
+                "water=5.0 is not one of its points",
+            ),
+            ("grip@water=0", "a point is named in a part"),
+        ] {
+            let err = start
+                .fit(&rows, None, &options(&[spec]))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(says), "{spec}: {err}");
+        }
     }
 
     #[test]

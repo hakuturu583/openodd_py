@@ -2471,9 +2471,10 @@ impl RuleSet {
     /// The maximum-likelihood fit to `rows` (`crate::rules_fit`): the fitted
     /// rules, the fitted parts as a rule file to merge over these, and per
     /// quantity fitted (name, rows, skipped, log-likelihood before, after,
-    /// iterations, converged, [(part, points, points with data)]).
+    /// iterations, converged, [(part, points, points with data, values
+    /// estimated)]); `fixed` holds values besides the rules' own `fixed`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    #[pyo3(signature = (rows, weights=None, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3))]
+    #[pyo3(signature = (rows, weights=None, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3, fixed=Vec::new()))]
     fn fit(
         &self,
         py: Python<'_>,
@@ -2483,6 +2484,7 @@ impl RuleSet {
         max_iterations: usize,
         tolerance: f64,
         min_spread: f64,
+        fixed: Vec<String>,
     ) -> PyResult<(
         RuleSet,
         String,
@@ -2494,7 +2496,7 @@ impl RuleSet {
             f64,
             usize,
             bool,
-            Vec<(String, usize, usize)>,
+            Vec<(String, usize, usize, usize)>,
         )>,
     )> {
         let options = crate::rules_fit::FitOptions {
@@ -2502,6 +2504,7 @@ impl RuleSet {
             max_iterations,
             tolerance,
             min_spread,
+            fixed,
         };
         let fit = py
             .allow_threads(|| self.inner.fit(&rows, weights.as_deref(), &options))
@@ -2520,7 +2523,7 @@ impl RuleSet {
                     q.converged,
                     q.parts
                         .iter()
-                        .map(|p| (p.name.clone(), p.points, p.points_with_data))
+                        .map(|p| (p.name.clone(), p.points, p.points_with_data, p.estimated))
                         .collect(),
                 )
             })

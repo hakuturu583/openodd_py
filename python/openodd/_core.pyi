@@ -186,10 +186,11 @@ class RuleSet:
         max_iterations: int = 1000,
         tolerance: float = 1e-10,
         min_spread: float = 1e-3,
+        fixed: list[str] = ...,
     ) -> tuple[
         RuleSet,
         str,
-        list[tuple[str, int, int, float, float, int, bool, list[tuple[str, int, int]]]],
+        list[tuple[str, int, int, float, float, int, bool, list[tuple[str, int, int, int]]]],
     ]: ...
 
 def convert(value: float, from_unit: str, to_unit: str) -> float: ...

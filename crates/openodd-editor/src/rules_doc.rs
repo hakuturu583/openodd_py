@@ -10,7 +10,7 @@
 //! not kept.
 
 use indexmap::IndexMap;
-use openodd::rules::{Axis, Dist, Family, Fetch, Origin, Part, RuleSet};
+use openodd::rules::{Axis, Dist, Family, Fetch, Hold, Origin, Part, RuleSet};
 use serde_norway::{Mapping, Value};
 
 use crate::doc::fresh_id;
@@ -49,6 +49,21 @@ pub struct PartDoc {
     /// `None`: the file does not name it.
     pub dist: Option<DistDoc>,
     pub text: String,
+    /// What a fit to data holds as written (`fixed:`), kept as the file
+    /// writes it.
+    pub fixed: FixedDoc,
+}
+
+/// A part's `fixed:`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum FixedDoc {
+    /// Not written: a fit estimates every value.
+    #[default]
+    None,
+    /// `fixed: true`: every value.
+    All,
+    /// `fixed: [mean, "sd@water=50", ...]`.
+    Some(Vec<String>),
 }
 
 impl PartDoc {
@@ -68,6 +83,7 @@ impl PartDoc {
                 params: vec![param("low", vec![0.0; 3]), param("high", vec![1.0; 3])],
             }),
             text: String::new(),
+            fixed: FixedDoc::None,
         }
     }
 
@@ -88,7 +104,7 @@ impl PartDoc {
         if dist.params.iter().any(|p| p.values.len() != size) {
             return None;
         }
-        Some(Part {
+        let mut part = Part {
             name: self.name.clone(),
             axes: axes
                 .iter()
@@ -100,7 +116,19 @@ impl PartDoc {
             family: dist.family,
             values: dist.params.iter().map(|p| p.values.clone()).collect(),
             text: self.text.clone(),
-        })
+            fixed: Vec::new(),
+        };
+        part.fixed = match &self.fixed {
+            FixedDoc::None => Vec::new(),
+            FixedDoc::All => vec![Hold::ALL],
+            // Those that name what the part has; the file's reader says
+            // what is wrong with the others.
+            FixedDoc::Some(specs) => specs
+                .iter()
+                .filter_map(|spec| Hold::parse(spec, &part).ok())
+                .collect(),
+        };
+        Some(part)
     }
 
     /// Replace axis `k`'s points with `points` (increasing), the
@@ -508,7 +536,11 @@ impl RulesDoc {
             out.push_str("    parts:\n");
             for p in &q.parts {
                 out.push_str(&format!("      {}:\n", scalar(&p.name)));
-                if p.axes.is_none() && p.dist.is_none() && p.text.is_empty() {
+                if p.axes.is_none()
+                    && p.dist.is_none()
+                    && p.text.is_empty()
+                    && p.fixed == FixedDoc::None
+                {
                     out.push_str("        {}\n");
                 }
                 if !p.text.is_empty() {
@@ -520,6 +552,18 @@ impl RulesDoc {
                         .map(|a| format!("{}: {}", scalar(&a.input), list(&a.points)))
                         .collect();
                     out.push_str(&format!("        at: {{{}}}\n", at.join(", ")));
+                }
+                match &p.fixed {
+                    FixedDoc::None => {}
+                    FixedDoc::All => out.push_str("        fixed: true\n"),
+                    FixedDoc::Some(specs) => out.push_str(&format!(
+                        "        fixed: [{}]\n",
+                        specs
+                            .iter()
+                            .map(|s| scalar(s))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
                 }
                 if let Some(d) = &p.dist {
                     out.push_str(&format!("        {}:\n", d.family.name()));
@@ -609,6 +653,7 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
         axes: None,
         dist: None,
         text: String::new(),
+        fixed: FixedDoc::None,
     };
     let mut raw_dist: Option<(Family, &Value)> = None;
     for (k, v) in m {
@@ -639,6 +684,20 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
                 p.axes = Some(axes);
             }
             "text" => p.text = text_of(v),
+            "fixed" => {
+                p.fixed = match v {
+                    Value::Bool(true) => FixedDoc::All,
+                    Value::Bool(false) | Value::Null => FixedDoc::None,
+                    Value::Sequence(items) => FixedDoc::Some(
+                        items
+                            .iter()
+                            .map(|i| i.as_str().map(str::to_string))
+                            .collect::<Option<_>>()
+                            .ok_or_else(|| format!("{at}.fixed: a list of parameters"))?,
+                    ),
+                    _ => return Err(format!("{at}.fixed: true, or a list of parameters")),
+                }
+            }
             other => return Err(format!("{at}: unknown field '{other}'")),
         }
     }
@@ -928,6 +987,27 @@ mod tests {
         assert!(yaml.contains("at: {fog: [0, 30, 70, 100]}"), "{yaml}");
         let set = check(&yaml, "a.yaml", &[]).unwrap();
         assert_eq!(set.upstream("sight_speed").unwrap(), ["sight"]);
+    }
+
+    #[test]
+    fn what_a_fit_holds_is_kept() {
+        let text = "version: 2\nquantities:\n  q:\n    parts:\n      p:\n        fixed: [sd, \"@a=0\", \"mean@a=10\"]\n        at: {a: [0, 10]}\n        normal: {mean: [0, 1], sd: 1, low: -9, high: 9}\n      r:\n        fixed: true\n        at: {a: [0, 10]}\n        uniform: {low: 0, high: 1}\n";
+        let doc = RulesDoc::from_yaml(text).unwrap();
+        let p = &doc.quantities[0].parts[0];
+        assert_eq!(
+            p.fixed,
+            FixedDoc::Some(vec!["sd".into(), "@a=0".into(), "mean@a=10".into()])
+        );
+        assert_eq!(doc.quantities[0].parts[1].fixed, FixedDoc::All);
+        let written = doc.to_yaml().unwrap();
+        let again = RulesDoc::from_yaml(&written).unwrap();
+        assert_eq!(again.quantities[0].parts[0].fixed, p.fixed);
+        let core = p.core().unwrap();
+        assert_eq!(core.fixed.len(), 3);
+        assert!(core.held(1, 1) && core.held(2, 0) && core.held(0, 1) && !core.held(2, 1));
+        // The core reads what the editor writes.
+        let set = RuleSet::parse(&written, "w.yaml").unwrap();
+        assert_eq!(set.quantities["q"].parts[0].fixed, core.fixed);
     }
 
     #[test]

@@ -18,7 +18,8 @@ use crate::doc::fresh_id;
 use crate::icons::Icon;
 use crate::io;
 use crate::rules_doc::{
-    self, num, short, tidy, AxisDoc, DistDoc, InputDoc, ParamDoc, PartDoc, QuantityDoc, RulesDoc,
+    self, num, short, tidy, AxisDoc, DistDoc, FixedDoc, InputDoc, ParamDoc, PartDoc, QuantityDoc,
+    RulesDoc,
 };
 
 pub const SAMPLE: &str = include_str!("../../../examples/wasm-viewer/sample_rules.yaml");
@@ -224,6 +225,13 @@ fn part_doc(p: &openodd::rules::Part) -> PartDoc {
                 .collect(),
         }),
         text: p.text.clone(),
+        fixed: if p.fixed.contains(&openodd::rules::Hold::ALL) {
+            FixedDoc::All
+        } else if p.fixed.is_empty() {
+            FixedDoc::None
+        } else {
+            FixedDoc::Some(p.fixed.iter().filter_map(|h| h.spec(p)).collect())
+        },
     }
 }
 

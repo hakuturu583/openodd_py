@@ -172,6 +172,48 @@ class TestFit:
         assert math.isfinite(fit.quantities["grip"].log_likelihood)
 
 
+class TestFixed:
+    def test_the_rule_file_holds_what_must_not_move(self, rows) -> None:
+        held = START.replace(
+            "        normal: {mean: [0.7, 0.7], sd: [0.3, 0.3], low: 0, high: 2}",
+            "        normal: {mean: [0.7, 0.7], sd: [0.3, 0.3], low: 0, high: 2}\n"
+            "        fixed: [sd]",
+        ).replace(
+            "        uniform: {low: [100, 100], high: [200, 200]}",
+            "        uniform: {low: [100, 100], high: [200, 200]}\n        fixed: true",
+        )
+        rules = Rules.from_text(held)
+        fit = rules.fit(rows)
+        # visibility is held whole: not fitted.
+        assert list(fit.quantities) == ["grip", "sight_speed"]
+        assert fit.rules.range("visibility", {"fog": 50}) == rules.range("visibility", {"fog": 50})
+        grip = dict(fit.rules.distributions("grip", {"water": 0})[0][2])
+        assert grip["sd"] == 0.3
+        assert grip["mean"] == pytest.approx(0.9, abs=0.03)
+        assert fit.quantities["grip"].parts[0].estimated == 2  # the mean at two points
+
+    def test_a_fit_holds_more(self, rows) -> None:
+        rules = Rules.from_text(START)
+        fit = rules.fit(
+            rows,
+            fixed=["visibility", "grip.water.mean@water=100", "sight_speed.sight@visibility=15"],
+        )
+        assert list(fit.quantities) == ["grip", "sight_speed"]
+        assert dict(fit.rules.distributions("grip", {"water": 100})[0][2])["mean"] == 0.7
+        assert fit.rules.distributions("sight_speed", {"visibility": 15}) == rules.distributions(
+            "sight_speed", {"visibility": 15}
+        )
+        assert [p.estimated for p in fit.quantities["sight_speed"].parts] == [3]
+        with pytest.raises(RulesError, match="fixed 'grip.ice': grip has no part 'ice'"):
+            rules.fit(rows, fixed=["grip.ice"])
+
+    def test_a_range_held_too_narrow_is_refused(self) -> None:
+        with pytest.raises(RulesError, match="where its low or high is held"):
+            Rules.from_text(START).fit(
+                [{"fog": 0, "visibility": 300}], fixed=["visibility.fog.high"]
+            )
+
+
 class TestReadRows:
     def test_csv_jsonl_and_json(self, tmp_path: Path) -> None:
         (tmp_path / "a.csv").write_text("water,grip\n10,0.8\n20,\n")
@@ -212,17 +254,17 @@ class TestCommand:
                 "grip",
                 "--weight",
                 "w",
+                "--fix",
+                "grip.water.sd",
             ]
         )
         assert code == 0
         printed = capsys.readouterr().out
         assert "3000 rows" in printed
         assert "grip: 3000 rows (0 skipped)" in printed
-        assert "water: 2 of 2 points estimated" in printed
+        assert "water: 2 of 2 points with data, 2 values estimated" in printed
         fitted = Rules.read(out)
-        assert dict(fitted.distributions("grip", {"water": 100})[0][2])["mean"] == pytest.approx(
-            0.5, abs=0.02
-        )
+        assert dict(fitted.distributions("grip", {"water": 100})[0][2])["sd"] == 0.3
 
     def test_an_error_is_reported(self, tmp_path: Path, capsys) -> None:
         (tmp_path / "weather.yaml").write_text(START)

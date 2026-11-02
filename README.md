@@ -109,7 +109,9 @@ else is this library's.
   ([docs/rules.md](docs/rules.md)). **Fit them to data**: `Rules.fit(rows)`
   (or `openodd-rules-fit rules.yaml drives.csv -o fitted.yaml`) estimates
   every parameter at every point by maximum likelihood from values measured
-  together in the real world, factor by factor through the graph, and writes
+  together in the real world, factor by factor through the graph -- holding
+  what the rule file (`fixed:`) or the call (`fixed=[...]`) says must not
+  move -- and writes
   the fitted rules as a file extending the original
   ([docs/rules.md](docs/rules.md#fitting-to-data)). In the browser, `RulesView` draws them as an
   embeddable component: each part's distribution over its input, and the

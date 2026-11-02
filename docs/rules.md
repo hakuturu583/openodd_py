@@ -40,11 +40,12 @@ quantities:
 | `inputs` | Optional: name → `default` (the value read when none is given) and `text` |
 | `quantities` | Name → a quantity: `parts`, `combine` and an optional `text` |
 | `combine` | How the parts' values are joined: `min` (the default) or `max` |
-| `parts` | Name → a part: `at`, one distribution, and an optional `text` |
+| `parts` | Name → a part: `at`, one distribution, an optional `text`, and an optional `fixed` |
 | `at` | Input → its points, increasing. The order of the inputs is the order of the values' nesting |
 | `uniform` | `low`, `high` |
 | `triangular` | `low`, `mode`, `high` |
 | `normal` | `mean`, `sd`, truncated to `low`..`high` |
+| `fixed` | What a fit to data holds as written ([Holding values](#holding-values)): `true`, or a list of `param`, `param@input=point,...`, `@input=point,...` |
 
 - **Values.** A parameter is one number, the same everywhere, or one value per
   point. With several inputs it is nested lists, one level per input in `at`'s
@@ -187,14 +188,60 @@ own envelope, which is as wide as the data happened to be.
 
 | `Rules` member | |
 |---|---|
-| `fit(rows, weights=None, *, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3)` | A `RulesFit`. `quantities` limits the fit; one named that no row gives is an error |
+| `fit(rows, weights=None, *, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3, fixed=())` | A `RulesFit`. `quantities` limits the fit; one named that no row gives is an error. `fixed` holds values besides the file's ([below](#holding-values)) |
 | `log_likelihood(rows, weights=None)` | Per quantity, `(log-likelihood, rows)`: how well rules -- fitted or written -- explain data; compare two on the same rows |
 
 | `RulesFit` member | |
 |---|---|
 | `rules` | The fitted rules |
-| `quantities` | Per quantity fitted: a `QuantityFit` -- `rows`, `skipped`, `log_likelihood_before` (`-inf` when a row lay outside the rules' range), `log_likelihood`, `iterations`, `converged`, and per part `points` and `points_with_data` |
+| `quantities` | Per quantity fitted: a `QuantityFit` -- `rows`, `skipped`, `log_likelihood_before` (`-inf` when a row lay outside the rules' range), `log_likelihood`, `iterations`, `converged`, and per part `points`, `points_with_data` and `estimated` (the values fitted) |
 | `text(extends=None)`, `write(path, extends=None)` | The fitted parts as a rule file. With `extends`, the rules fitted (a path, written relative to `path`, or a URL), it extends them and reads as the whole fitted set; without, it merges over them (`Rules.read_over`, `Backend.use_rules`) |
+
+### Holding values
+
+A fit need not move everything. What is known -- a grip measured on a test
+track, a spread from the tyre's datasheet, a dry road nobody drove -- is
+held as written, and the rest is fitted given it.
+
+The rule file says what its author holds, on the part:
+
+```yaml
+quantities:
+  tire_friction:
+    parts:
+      water:
+        at: {water: [0, 50, 100]}
+        normal: {mean: [0.9, 0.7, 0.5], sd: 0.05, low: 0, high: 1.2}
+        fixed: [sd, "mean@water=0"]   # the spread, and the dry road's mean
+      ice:
+        at: {temperature: [-10, 0, 5]}
+        uniform: {low: [0.05, 0.1, 0.8], high: [0.15, 0.3, 1.0]}
+        fixed: true                   # all of it
+```
+
+| `fixed` entry | Holds |
+|---|---|
+| `true` | every value of the part |
+| `sd` | the parameter at every point |
+| `mean@water=0` | the parameter at one point: every input the part reads, each at one of its points (`mean@water=0,rain=50`) |
+| `"@water=0"` | every parameter at that point (quote it: YAML reads a bare `@` as reserved) |
+
+and a fit may hold more, without editing the file: `rules.fit(rows,
+fixed=[...])` or `openodd-rules-fit --fix SPEC` (repeatable) take the same
+entries prefixed by the quantity and the part -- `tire_friction`
+(a quantity whole: it is not fitted), `tire_friction.water` (a part),
+`tire_friction.water.sd`, `tire_friction.water.mean@water=0`,
+`tire_friction.water@water=0`. An entry that names nothing -- a parameter
+the family has not, a value not one of the points -- is an error.
+
+The fitted file writes only the distributions, so what the rule file holds
+stays held when the fitted file merges over it. Held values shape what is
+fitted: the free values are the best given the held ones, not the ones a
+free fit would find -- with the dry road's mean held too low, the wet road's
+rises to make up for it where the two are interpolated. A uniform's or a
+triangular's range held narrower than the data is an error (a row there is
+impossible). A triangular's `mode` held stays put while its range is fitted
+around it, and a range held leaves the `mode` alone to be fitted inside it.
 
 ## Checks
 
@@ -270,9 +317,9 @@ is refused.
 
 **How files merge.** A quantity, a part and an input the later file names
 merge over the earlier file's of that name, field by field: `combine` and
-`parts` of a quantity; `at`, the distribution and `text` of a part; `default`
-and `text` of an input. A part's `at` and its distribution are each replaced
-whole, and a distribution of another family replaces the one there (`normal:`
+`parts` of a quantity; `at`, the distribution, `text` and `fixed` of a part;
+`default` and `text` of an input. A part's `at`, its distribution and its
+`fixed` are each replaced whole, and a distribution of another family replaces the one there (`normal:`
 over `uniform:`). `null` removes a quantity, a part or an input. So
 `uniform:` alone keeps the points, and `at:` alone keeps the distribution
 (which must then have as many values as the new points).

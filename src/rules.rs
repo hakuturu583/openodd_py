@@ -430,9 +430,146 @@ pub struct Part {
     /// combination of the axes' points, the last axis fastest.
     pub values: Vec<Vec<f64>>,
     pub text: String,
+    /// What a fit to data holds as written (`fixed:`; [`crate::rules_fit`]).
+    pub fixed: Vec<Hold>,
+}
+
+/// Values of a part a fit to data holds as written: a parameter (`None`:
+/// every one) at a combination of points (`None`: every one).
+///
+/// Written `param`, `param@input=point,...` (the point named by every input's
+/// value, one of the points written) or `@input=point,...` (every parameter
+/// there); a part's `fixed: true` holds all of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hold {
+    /// An index into [`Family::params`].
+    pub param: Option<usize>,
+    /// An index into the part's combinations of points (see [`Part::values`]).
+    pub point: Option<usize>,
+}
+
+impl Hold {
+    /// Every value of a part.
+    pub const ALL: Hold = Hold {
+        param: None,
+        point: None,
+    };
+
+    /// The hold `spec` names in `part` (see [`Hold`]).
+    pub fn parse(spec: &str, part: &Part) -> std::result::Result<Hold, String> {
+        let spec = spec.trim();
+        let (param, point) = match spec.split_once('@') {
+            Some((p, at)) => (p.trim(), Some(at)),
+            None => (spec, None),
+        };
+        let param = if param.is_empty() && point.is_some() {
+            None
+        } else {
+            let names = part.family.params();
+            match names.iter().position(|n| *n == param) {
+                Some(k) => Some(k),
+                None => {
+                    return Err(format!(
+                        "'{spec}': {} has no parameter '{param}'; it has {}",
+                        part.family.name(),
+                        names.join(", ")
+                    ))
+                }
+            }
+        };
+        let point = match point {
+            None => None,
+            Some(at) => Some(part.point_of(at).map_err(|e| format!("'{spec}': {e}"))?),
+        };
+        Ok(Hold { param, point })
+    }
+
+    /// As a part's `fixed:` writes it (`mean`, `mean@water=50`,
+    /// `@water=50`); `None` for [`Hold::ALL`], which is `fixed: true`.
+    pub fn spec(&self, part: &Part) -> Option<String> {
+        if *self == Hold::ALL {
+            return None;
+        }
+        let param = self
+            .param
+            .map(|k| part.family.params()[k])
+            .unwrap_or_default();
+        Some(match self.point {
+            None => param.to_string(),
+            Some(n) => {
+                let strides = part.strides();
+                let at: Vec<String> = part
+                    .axes
+                    .iter()
+                    .enumerate()
+                    .map(|(d, a)| {
+                        let i = n / strides[d] % a.points.len();
+                        format!("{}={}", a.input, py_float_repr(a.points[i]))
+                    })
+                    .collect();
+                format!("{param}@{}", at.join(","))
+            }
+        })
+    }
+
+    /// Whether it holds parameter `k` at combination `n`.
+    pub fn holds(&self, k: usize, n: usize) -> bool {
+        self.param.is_none_or(|p| p == k) && self.point.is_none_or(|q| q == n)
+    }
 }
 
 impl Part {
+    /// The combination of points `at` names (`input=point,...`, every
+    /// input once, each value one of its points).
+    pub fn point_of(&self, at: &str) -> std::result::Result<usize, String> {
+        let mut given: IndexMap<String, f64> = IndexMap::new();
+        for pair in at.split(',') {
+            let Some((input, v)) = pair.split_once('=') else {
+                return Err(format!("'{}' is not input=point", pair.trim()));
+            };
+            let input = input.trim();
+            let v: f64 = v
+                .trim()
+                .parse()
+                .map_err(|_| format!("{input}={}: not a number", v.trim()))?;
+            if given.insert(input.to_string(), v).is_some() {
+                return Err(format!("{input} is named twice"));
+            }
+        }
+        let strides = self.strides();
+        let mut index = 0;
+        for (d, axis) in self.axes.iter().enumerate() {
+            let Some(v) = given.shift_remove(&axis.input) else {
+                return Err(format!(
+                    "a point names every input the part reads: {} is missing",
+                    axis.input
+                ));
+            };
+            let Some(i) = axis.points.iter().position(|p| *p == v) else {
+                return Err(format!(
+                    "{}={} is not one of its points ({})",
+                    axis.input,
+                    py_float_repr(v),
+                    axis.points
+                        .iter()
+                        .map(|p| py_float_repr(*p))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            };
+            index += i * strides[d];
+        }
+        if let Some(extra) = given.keys().next() {
+            return Err(format!("the part does not read {extra}"));
+        }
+        Ok(index)
+    }
+
+    /// Whether `fixed` holds parameter `k` at combination `n`.
+    pub fn held(&self, k: usize, n: usize) -> bool {
+        self.fixed.iter().any(|h| h.holds(k, n))
+    }
+
     /// How many combinations of points it writes.
     pub fn size(&self) -> usize {
         self.axes.iter().map(|a| a.points.len()).product()
@@ -1495,7 +1632,7 @@ fn read_quantity(name: &str, node: &Node, source: &str, at: &Where) -> Result<Qu
 }
 
 fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
-    let mut known = vec!["at", "text"];
+    let mut known = vec!["at", "text", "fixed"];
     known.extend(Family::ALL.iter().map(|f| f.name()));
     let map = mapping(node, at, &known)?;
     // Its axes: the inputs `at` names, in order, and their points.
@@ -1560,7 +1697,30 @@ fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
         family,
         values,
         text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
+        fixed: Vec::new(),
     };
+    let mut part = part;
+    if let Some(raw) = get(map, "fixed") {
+        let here = at.key("fixed");
+        part.fixed = match untag(raw) {
+            Node::Bool(true) => vec![Hold::ALL],
+            Node::Bool(false) | Node::Null => Vec::new(),
+            Node::Sequence(items) => items
+                .iter()
+                .map(|item| match untag(item) {
+                    Node::String(spec) => Hold::parse(spec, &part).map_err(|e| here.error(e)),
+                    _ => Err(here.error(
+                        "a parameter (mean), a parameter at a point (mean@water=50), or a point (@water=50)",
+                    )),
+                })
+                .collect::<Result<_>>()?,
+            _ => {
+                return Err(here.error(
+                    "true (every value), or a list of a parameter (mean), a parameter at a point (mean@water=50), or a point (@water=50)",
+                ))
+            }
+        };
+    }
     for k in 0..size {
         part.dist_at(k)
             .check()
@@ -1785,6 +1945,80 @@ quantities:
         assert_eq!(all["visibility"], 200.0);
         assert_eq!(all["sight_speed"], 20.0);
         set.check_inputs(&["fog".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn a_part_says_what_a_fit_holds() {
+        let text = r#"version: 2
+quantities:
+  q:
+    parts:
+      p:
+        at: {a: [0, 10], b: [0, 1]}
+        normal: {mean: 0, sd: 1, low: -9, high: 9}
+        fixed: [sd, "mean@a=10,b=1", "@b=0,a=0"]
+"#;
+        let set = RuleSet::parse(text, "f.yaml").unwrap();
+        let part = &set.quantities["q"].parts[0];
+        let holds = &part.fixed;
+        assert_eq!(
+            holds[0],
+            Hold {
+                param: Some(1),
+                point: None
+            }
+        );
+        assert_eq!(
+            holds[1],
+            Hold {
+                param: Some(0),
+                point: Some(3)
+            }
+        );
+        assert_eq!(
+            holds[2],
+            Hold {
+                param: None,
+                point: Some(0)
+            }
+        );
+        assert!(part.held(1, 2) && part.held(0, 3) && part.held(3, 0));
+        assert!(!part.held(0, 1));
+        let specs: Vec<_> = holds.iter().map(|h| h.spec(part).unwrap()).collect();
+        assert_eq!(specs, ["sd", "mean@a=10.0,b=1.0", "@a=0.0,b=0.0"]);
+        for h in holds {
+            assert_eq!(&Hold::parse(&h.spec(part).unwrap(), part).unwrap(), h);
+        }
+        let all = text.replace(
+            "fixed: [sd, \"mean@a=10,b=1\", \"@b=0,a=0\"]",
+            "fixed: true",
+        );
+        let set = RuleSet::parse(&all, "f.yaml").unwrap();
+        assert_eq!(set.quantities["q"].parts[0].fixed, [Hold::ALL]);
+        for (bad, says) in [
+            (
+                "[median]",
+                "normal has no parameter 'median'; it has mean, sd, low, high",
+            ),
+            (
+                "[\"mean@a=5,b=0\"]",
+                "a=5.0 is not one of its points (0.0, 10.0)",
+            ),
+            (
+                "[\"mean@a=0\"]",
+                "a point names every input the part reads: b is missing",
+            ),
+            ("[\"mean@a=0,b=0,c=1\"]", "the part does not read c"),
+            ("[1]", "a parameter (mean)"),
+            ("yes please", "true (every value)"),
+        ] {
+            let t = text.replace("[sd, \"mean@a=10,b=1\", \"@b=0,a=0\"]", bad);
+            let err = RuleSet::parse(&t, "f.yaml").unwrap_err().to_string();
+            assert!(
+                err.contains("quantities.q.parts.p.fixed") && err.contains(says),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]

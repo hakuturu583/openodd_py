@@ -372,6 +372,7 @@ class Rules:
         max_iterations: int = 1000,
         tolerance: float = 1e-10,
         min_spread: float = 1e-3,
+        fixed: Sequence[str] = (),
     ) -> "RulesFit":
         """The maximum-likelihood fit of these rules to *rows*: data
         measured in the real world -- each row the values seen together, by
@@ -386,6 +387,9 @@ class Rules:
         ``sd`` (its ``low``..``high``, the physical range, is held) -- from
         the rules' own values; a point no row reads keeps its value. The
         families and the points stay as written.
+
+        What must not move is held as written: by the rule file (a part's
+        ``fixed:``, docs/rules.md) or by *fixed* here.
 
         Args:
             rows: The data.
@@ -402,11 +406,19 @@ class Rules:
                 size, when they do not vary): a
                 likelihood grows without bound as a distribution narrows
                 onto one value.
+            fixed: Values held as written, besides those the rules' own
+                ``fixed`` holds: ``"grip"`` (a quantity), ``"grip.water"``
+                (a part), ``"grip.water.sd"`` (a parameter at every point),
+                ``"grip.water.mean@water=0"`` (a parameter at a point: every
+                input the part reads at one of its points) or
+                ``"grip.water@water=0"`` (every parameter there). A quantity
+                held whole is not fitted.
 
         Raises:
             RulesError: On data that is not numbers, a row outside a normal
                 distribution's ``low``..``high``, a quantity named that no
-                row gives, or options out of range.
+                row gives, a ``fixed`` entry naming nothing, a row outside a
+                range held, or options out of range.
         """
         if max_iterations < 0:
             raise RulesError(f"max_iterations must not be negative, not {max_iterations}")
@@ -419,6 +431,7 @@ class Rules:
             int(max_iterations),
             float(tolerance),
             float(min_spread),
+            [str(f) for f in fixed],
         )
         fitted = {
             name: QuantityFit(
@@ -429,7 +442,7 @@ class Rules:
                 log_likelihood=after,
                 iterations=iterations,
                 converged=converged,
-                parts=tuple(PartFit(p, points, used) for p, points, used in parts),
+                parts=tuple(PartFit(*part) for part in parts),
             )
             for name, n, skipped, before, after, iterations, converged, parts in report
         }
@@ -478,8 +491,11 @@ class PartFit:
     name: str
     #: The points the part writes.
     points: int
-    #: The points some row reads: the ones estimated.
+    #: The points some row reads.
     points_with_data: int
+    #: The values estimated: each parameter fitted at each point with data,
+    #: less those held (``fixed``).
+    estimated: int
 
 
 @dataclass(frozen=True)
@@ -604,6 +620,11 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
     parser.add_argument("-q", "--quantity", action="append", dest="quantities", metavar="NAME",
                         help="fit only this quantity (repeatable; default: every one the data gives)")
     parser.add_argument("--weight", metavar="COLUMN", help="a column weighing each row")
+    parser.add_argument("--fix", action="append", default=[], metavar="SPEC",
+                        help="hold values as written, besides the rule file's own fixed: "
+                        "QUANTITY, QUANTITY.PART, QUANTITY.PART.PARAM, "
+                        "QUANTITY.PART.PARAM@INPUT=POINT[,...] or QUANTITY.PART@INPUT=POINT "
+                        "(repeatable)")
     parser.add_argument("--max-iterations", type=int, default=1000,
                         help="the most iterations of each stage of a fit (default: 1000)")
     parser.add_argument("--min-spread", type=float, default=1e-3,
@@ -633,6 +654,7 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
             quantities=args.quantities,
             max_iterations=args.max_iterations,
             min_spread=args.min_spread,
+            fixed=args.fix,
         )
         fit.write(args.output, None if args.overlay else args.rules)
     except RulesError as e:
@@ -649,7 +671,10 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
             f"{q.iterations} iterations, {state}"
         )
         for p in q.parts:
-            print(f"  {p.name}: {p.points_with_data} of {p.points} points estimated")
+            print(
+                f"  {p.name}: {p.points_with_data} of {p.points} points with data, "
+                f"{p.estimated} values estimated"
+            )
     print(f"wrote {args.output}")
     return 0
 
