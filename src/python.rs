@@ -2496,6 +2496,23 @@ impl RuleSet {
         Ok(RuleFit { inner })
     }
 
+    /// Per quantity some row gives with all it reads, how well these rules
+    /// match `rows` (`crate::rules_fit::Calibration`, as a dict).
+    #[pyo3(signature = (rows, weights=None))]
+    fn calibration(
+        &self,
+        py: Python<'_>,
+        rows: Vec<indexmap::IndexMap<String, f64>>,
+        weights: Option<Vec<f64>>,
+    ) -> PyResult<indexmap::IndexMap<String, PyObject>> {
+        let out = py
+            .allow_threads(|| self.inner.calibration(&rows, weights.as_deref()))
+            .map_err(err)?;
+        out.iter()
+            .map(|(k, c)| Ok((k.clone(), calibration_dict(py, c)?)))
+            .collect()
+    }
+
     /// `rows` (name -> value as read) as a fit reads them, keeping the
     /// values these rules read (`crate::rules_fit::observations`): the rows
     /// as numbers, and each row's weight from the column `weight` names.
@@ -2515,6 +2532,18 @@ impl RuleSet {
         let weights = obs.weights().map(<[f64]>::to_vec);
         Ok((obs.rows, weights))
     }
+}
+
+/// A `crate::rules_fit::Calibration` as a dict.
+fn calibration_dict(py: Python<'_>, c: &crate::rules_fit::Calibration) -> PyResult<PyObject> {
+    let d = PyDict::new(py);
+    d.set_item("rows", c.rows)?;
+    d.set_item("mean_log_likelihood", c.mean_log_likelihood)?;
+    d.set_item("in_band", c.in_band)?;
+    d.set_item("outside", c.outside)?;
+    d.set_item("ks", c.ks)?;
+    d.set_item("histogram", c.histogram.clone())?;
+    Ok(d.into_any().unbind())
 }
 
 /// A value of a row of data, as `crate::rules_fit` reads it.
@@ -2598,6 +2627,11 @@ impl RuleFit {
                     parts.append(pd)?;
                 }
                 d.set_item("parts", parts)?;
+                d.set_item(
+                    "calibration_before",
+                    calibration_dict(py, &q.calibration_before)?,
+                )?;
+                d.set_item("calibration", calibration_dict(py, &q.calibration)?)?;
                 Ok(d.into_any().unbind())
             })
             .collect()

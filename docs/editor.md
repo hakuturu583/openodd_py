@@ -218,7 +218,12 @@ maximum likelihood, in the browser -- the same code as Python's `Rules.fit`
 2. The card shows, per variable, how many rows give it, and per factor how
    many rows it **reads** (they give its quantity and everything it reads)
    and how many it **skips** (they give its quantity but miss something it
-   reads). A factor no row reads is greyed and left as it is.
+   reads). A factor no row reads is greyed and left as it is. Beside each,
+   how well the rules as they are match the rows it reads: the share in the
+   distribution's central 90% (green near 90%, amber within 10 points, red
+   beyond, or when a row is impossible) and where the rows fall in it, by
+   tenths of its quantiles -- flat when it matches, a U when too narrow, a
+   hump when too wide ([rules.md](rules.md#how-well-the-rules-match)).
 3. **Fit** runs the fit in a Web Worker, so the page stays free while it
    runs: a bar shows how far it has come -- the quantity being fitted, the
    share done and about how long is left, from the pace so far -- and
@@ -226,9 +231,10 @@ maximum likelihood, in the browser -- the same code as Python's `Rules.fit`
    its rows, parts and the stages of its fit, and an iteration count is not
    known ahead. When it ends, the fitted parameters are written into the
    document, every point of every part fitted; the YAML, the charts and the
-   graph follow. The table
-   below gives each quantity's rows, its log-likelihood before and after,
-   the values estimated and whether the fit converged. **Undo fit** puts the
+   graph follow. The table below gives each quantity's rows, its
+   log-likelihood per row and its share in the 90% band before and after,
+   where the rows fall under the fitted rules, the values estimated and
+   whether the fit converged. **Undo fit** puts the
    rules back as they were.
 
 A part's form has a **Fit holds** card: what a fit keeps as written -- all of

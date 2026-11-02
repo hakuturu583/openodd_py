@@ -202,6 +202,32 @@ own envelope, which is as wide as the data happened to be.
 | `quantities` | Per quantity fitted: a `QuantityFit` -- `rows`, `skipped`, `log_likelihood_before` (`-inf` when a row lay outside the rules' range), `log_likelihood`, `iterations`, `converged`, and per part `points`, `points_with_data` and `estimated` (the values fitted) |
 | `text(extends=None)`, `write(path, extends=None)` | The fitted parts as a rule file. With `extends`, the rules fitted (a path, written relative to `path`, or a URL), it extends them and reads as the whole fitted set; without, it merges over them (`Rules.read_over`, `Backend.use_rules`) |
 
+### How well the rules match
+
+A fit's log-likelihood says which of two rule sets is likelier on the same
+rows, not whether either matches them. `Rules.calibration(rows)` (and each
+`QuantityFit`'s `calibration_before` and `calibration`) says that, from where
+each row's value falls in the quantity's distribution at the row's inputs --
+its quantile `u = cdf(value)`, the probability integral transform. Under
+rules that match the data, `u` is spread evenly over 0..1, whatever the
+family:
+
+| `Calibration` | |
+|---|---|
+| `in_band` | The share of rows in the distribution's central 90%: 0.9 when it matches; less when too narrow or off-centre, more when too wide |
+| `histogram` | The share of rows in each tenth of the quantiles: flat when it matches; a U when too narrow, a hump when too wide, a slope when off-centre |
+| `ks` | Kolmogorov-Smirnov's distance of `u` from even (about `1.36 / sqrt(rows)` is what chance alone gives 5% of the time) |
+| `outside` | The share of rows the rules hold impossible |
+| `mean_log_likelihood` | The log-likelihood per unit of weight: comparable across data sets of different sizes |
+
+`openodd-rules-fit` prints the band before and after; the editor shows it
+per factor as the data loads, and before and after a fit.
+
+A uniform's or triangular's fitted range closes on the data: its rows at
+the ends sit on it. The fitted file writes `low` and `high` rounded outwards
+to ten significant digits, so a reader that rounds (the editor writes ten)
+still holds every row.
+
 ### Holding values
 
 A fit need not move everything. What is known -- a grip measured on a test

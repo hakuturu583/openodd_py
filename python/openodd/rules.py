@@ -79,6 +79,7 @@ from typing import Any, Optional, Union
 from . import _core
 
 __all__ = [
+    "Calibration",
     "PartFit",
     "QuantityFit",
     "Rules",
@@ -366,6 +367,23 @@ class Rules:
         data, weights = self._rows(rows, weights, weight_column)
         return dict(self._call(self._core.log_likelihood, data, weights))
 
+    def calibration(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        weights: Optional[Sequence[float]] = None,
+        *,
+        weight_column: Optional[str] = None,
+    ) -> dict[str, "Calibration"]:
+        """How well these rules match *rows*, per quantity some row gives
+        with everything it reads (:class:`Calibration`): where each row's
+        value falls in the quantity's distribution at its inputs. Rows and
+        weights as for :meth:`log_likelihood`."""
+        data, weights = self._rows(rows, weights, weight_column)
+        return {
+            name: Calibration(**c)
+            for name, c in self._call(self._core.calibration, data, weights).items()
+        }
+
     def fit(
         self,
         rows: Iterable[Mapping[str, Any]],
@@ -439,7 +457,14 @@ class Rules:
             [str(f) for f in fixed],
         )
         fitted = {
-            q["name"]: QuantityFit(**{**q, "parts": tuple(PartFit(**p) for p in q["parts"])})
+            q["name"]: QuantityFit(
+                **{
+                    **q,
+                    "parts": tuple(PartFit(**p) for p in q["parts"]),
+                    "calibration_before": Calibration(**q["calibration_before"]),
+                    "calibration": Calibration(**q["calibration"]),
+                }
+            )
             for q in core.quantities
         }
         return RulesFit(rules=Rules(core.rules), quantities=fitted, _core=core)
@@ -468,6 +493,33 @@ class Rules:
 
     def __repr__(self) -> str:
         return f"Rules({', '.join(self.quantities)})"
+
+
+@dataclass(frozen=True)
+class Calibration:
+    """How well a quantity's distribution matches rows of data, from where
+    each row's value falls in it: its quantile ``u = cdf(value)`` at the
+    row's inputs. Under rules that match the data, ``u`` is spread evenly
+    over 0..1, whatever the family. Shares are of the rows' weight."""
+
+    #: The rows (giving the quantity and all it reads).
+    rows: int
+    #: The log-likelihood per unit of weight (``-inf``: a row is impossible).
+    mean_log_likelihood: float
+    #: The share of rows in the distribution's central 90%: 0.9 when it
+    #: matches, less when too narrow or off-centre, more when too wide.
+    in_band: float
+    #: The share of rows the rules hold impossible.
+    outside: float
+    #: Kolmogorov-Smirnov's distance of ``u`` from even (about
+    #: ``1.36 / sqrt(rows)`` is what chance alone gives 5% of the time).
+    ks: float
+    #: The share of rows in each tenth of the quantiles: flat when it
+    #: matches, a U when too narrow, a hump when too wide.
+    histogram: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "histogram", tuple(self.histogram))
 
 
 @dataclass(frozen=True)
@@ -502,6 +554,10 @@ class QuantityFit:
     #: Whether the fit converged, not stopped at ``max_iterations``.
     converged: bool
     parts: tuple[PartFit, ...]
+    #: How well the rules as they were match the rows ...
+    calibration_before: Calibration
+    #: ... and the fitted rules.
+    calibration: Calibration
 
 
 @dataclass(frozen=True)
@@ -649,6 +705,11 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
             f"{q.name}: {q.rows} rows ({q.skipped} skipped), log-likelihood "
             f"{q.log_likelihood_before:.6g} -> {q.log_likelihood:.6g}, "
             f"{q.iterations} iterations, {state}"
+        )
+        b, a = q.calibration_before, q.calibration
+        print(
+            f"  in the central 90%: {b.in_band:.1%} -> {a.in_band:.1%} of rows "
+            f"(KS {b.ks:.3f} -> {a.ks:.3f}; 90% and 0 when the rules match)"
         )
         for p in q.parts:
             print(

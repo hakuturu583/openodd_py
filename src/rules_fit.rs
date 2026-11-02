@@ -115,6 +115,40 @@ pub struct QuantityFit {
     /// Whether the fit stopped by converging, not at `max_iterations`.
     pub converged: bool,
     pub parts: Vec<PartFit>,
+    /// How well the rules as they were match the rows ...
+    pub calibration_before: Calibration,
+    /// ... and how well the fitted rules do.
+    pub calibration: Calibration,
+}
+
+/// How well a quantity's distribution matches rows of data, from where
+/// each row's value falls in the distribution at that row's inputs: its
+/// quantile `u = cdf(value)` (the probability integral transform). Under
+/// rules that match the data, `u` is spread evenly over 0..1 -- whatever
+/// the distribution's family. Shares are of the rows' weight.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Calibration {
+    /// The rows (giving the quantity and all it reads).
+    pub rows: usize,
+    /// The log-likelihood per unit of weight: comparable across data sets
+    /// of different sizes (`-inf` when a row is impossible).
+    #[serde(with = "or_minus_infinity")]
+    pub mean_log_likelihood: f64,
+    /// The share of rows within the distribution's central 90% (`u` from
+    /// 0.05 to 0.95): 0.9 when it matches, less when the rules are too
+    /// narrow or off-centre, more when too wide.
+    pub in_band: f64,
+    /// The share of rows the rules hold impossible (outside its range).
+    pub outside: f64,
+    /// Kolmogorov-Smirnov's distance of `u` from even: the greatest gap
+    /// between the share of rows at or below a quantile and the quantile
+    /// (0: even; about `1.36 / sqrt(rows)` is what chance alone gives 5% of
+    /// the time).
+    pub ks: f64,
+    /// The share of rows in each tenth of the quantiles (0-0.1, ...,
+    /// 0.9-1): flat when it matches; a U when too narrow, a hump when too
+    /// wide, a slope when off-centre.
+    pub histogram: Vec<f64>,
 }
 
 /// A log-likelihood in JSON: a number, or `null` for `-inf`, which JSON
@@ -495,6 +529,25 @@ impl RuleSet {
                 name.clone(),
                 (log_likelihood_of(q, &start_params(q), &data), data.y.len()),
             );
+        }
+        Ok(out)
+    }
+
+    /// Per quantity some row gives with everything it reads, how well these
+    /// rules match `rows` ([`Calibration`]); `weights` weighs each row.
+    pub fn calibration(
+        &self,
+        rows: &[IndexMap<String, f64>],
+        weights: Option<&[f64]>,
+    ) -> Result<IndexMap<String, Calibration>> {
+        check_weights(rows, weights)?;
+        let mut out = IndexMap::new();
+        for name in self.order() {
+            let q = self.quantity(name)?;
+            let data = self.data_of(q, rows, weights);
+            if !data.y.is_empty() {
+                out.insert(name.clone(), calibration_of(q, &start_params(q), &data));
+            }
         }
         Ok(out)
     }
@@ -888,6 +941,46 @@ fn row_term(
     (j, lp, g)
 }
 
+/// How well `q` with `params` matches `data` ([`Calibration`]).
+fn calibration_of(q: &Quantity, params: &[Vec<Vec<f64>>], data: &Data) -> Calibration {
+    let total: f64 = data.weight.iter().sum();
+    let mut dists = Vec::with_capacity(q.parts.len());
+    let mut us: Vec<(f64, f64)> = Vec::with_capacity(data.y.len());
+    let (mut ll, mut in_band, mut outside) = (0.0, 0.0, 0.0);
+    let mut histogram = vec![0.0; 10];
+    for (r, &y) in data.y.iter().enumerate() {
+        let w = data.weight[r];
+        let (_, lp, _) = row_term(q, params, &data.corners[r], y, &mut dists);
+        let (_, u) = q.combine.deciding(dists.iter().map(|d| d.cdf(y)));
+        ll += w * lp;
+        if !lp.is_finite() {
+            outside += w;
+        }
+        if (0.05..=0.95).contains(&u) {
+            in_band += w;
+        }
+        histogram[((u * 10.0) as usize).min(9)] += w;
+        us.push((u, w));
+    }
+    us.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut ks = 0.0f64;
+    let mut below = 0.0;
+    for (u, w) in us {
+        ks = ks.max((below / total - u).abs());
+        below += w;
+        ks = ks.max((below / total - u).abs());
+    }
+    let share = |x: f64| if total > 0.0 { x / total } else { 0.0 };
+    Calibration {
+        rows: data.y.len(),
+        mean_log_likelihood: share(ll),
+        in_band: share(in_band),
+        outside: share(outside),
+        ks,
+        histogram: histogram.into_iter().map(share).collect(),
+    }
+}
+
 /// The weighted log-likelihood of `data` under `q` with `params`.
 fn log_likelihood_of(q: &Quantity, params: &[Vec<Vec<f64>>], data: &Data) -> f64 {
     let mut dists = Vec::with_capacity(q.parts.len());
@@ -1213,6 +1306,8 @@ fn fit_quantity(
         (params, after) = (start, at_start);
     }
     let report = QuantityFit {
+        calibration_before: calibration_of(q, &start_params(q), data),
+        calibration: calibration_of(q, &params, data),
         name: q.name.clone(),
         rows: data.y.len(),
         skipped: data.skipped,
@@ -1445,17 +1540,47 @@ fn quantities_text(fitted: &[(&Quantity, Vec<Vec<Vec<f64>>>)]) -> String {
                 part.family.name()
             ));
             let shape: Vec<usize> = part.axes.iter().map(|a| a.points.len()).collect();
-            for (k, column) in part.family.params().iter().zip(p) {
+            let range = part.family.fitted_range();
+            for (i, (k, column)) in part.family.params().iter().zip(p).enumerate() {
+                // A range closes on the data: the rows at its ends sit on
+                // it. Written rounded outwards, it keeps them inside however
+                // a reader rounds it (to ten digits, as the editor does).
+                let column: Vec<f64> = match range {
+                    Some((lo, _)) if i == lo => {
+                        column.iter().map(|v| outwards(*v, false)).collect()
+                    }
+                    Some((_, hi)) if i == hi => column.iter().map(|v| outwards(*v, true)).collect(),
+                    _ => column.clone(),
+                };
                 let written = if column.windows(2).all(|w| w[0] == w[1]) {
                     py_float_repr(column[0])
                 } else {
-                    nested_list(column, &shape, &py_float_repr)
+                    nested_list(&column, &shape, &py_float_repr)
                 };
                 out.push_str(&format!("          {k}: {written}\n"));
             }
         }
     }
     out
+}
+
+/// `v` rounded to ten significant digits, up or down.
+fn outwards(v: f64, up: bool) -> f64 {
+    if v == 0.0 || !v.is_finite() {
+        return v;
+    }
+    let scale = 10f64.powi(9 - v.abs().log10().floor() as i32);
+    let r = if up {
+        (v * scale).ceil()
+    } else {
+        (v * scale).floor()
+    } / scale;
+    // Still past `v` once the division rounds.
+    if up {
+        r.max(v)
+    } else {
+        r.min(v)
+    }
 }
 
 /// `values` (the last axis fastest) as nested YAML flow lists of `shape`,
@@ -2042,6 +2167,71 @@ quantities:
     }
 
     #[test]
+    fn a_fitted_range_is_written_outwards_and_keeps_every_row() {
+        assert_eq!(outwards(0.123456789012, false), 0.1234567890);
+        assert_eq!(outwards(0.123456789012, true), 0.1234567891);
+        assert_eq!(outwards(-2.5, true), -2.5);
+        let text = r#"version: 2
+quantities:
+  grip:
+    parts:
+      water:
+        at: {water: [0, 100]}
+        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}
+"#;
+        let truth = RuleSet::parse(text, "t.yaml").unwrap();
+        let rows = draw(&truth, "grip", "water", (0.0, 100.0), 500, 13);
+        let fit = truth.fit(&rows, None, &FitOptions::default()).unwrap();
+        // Rounded to ten digits, as the editor writes numbers, it still
+        // holds every row.
+        let ten = |v: f64| format!("{:.9e}", v).parse::<f64>().unwrap();
+        let mut part = fit.rules.quantities["grip"].parts[0].clone();
+        for column in &mut part.values {
+            for v in column.iter_mut() {
+                *v = ten(*v);
+            }
+        }
+        for r in &rows {
+            let (lo, hi) = part.dist(&[r["water"]]).support();
+            assert!(
+                lo <= r["grip"] && r["grip"] <= hi,
+                "{lo} {} {hi}",
+                r["grip"]
+            );
+        }
+    }
+
+    #[test]
+    fn calibration_says_how_well_rules_match() {
+        let truth = RuleSet::parse(NORMAL, "truth.yaml").unwrap();
+        let rows = draw(&truth, "grip", "water", (0.0, 100.0), 4000, 12);
+        let good = &truth.calibration(&rows, None).unwrap()["grip"];
+        assert_eq!(good.rows, 4000);
+        assert!((good.in_band - 0.9).abs() < 0.02, "{good:?}");
+        assert!(good.ks < 1.36 / (4000f64).sqrt() * 1.5, "{good:?}");
+        assert!(
+            good.histogram.iter().all(|h| (h - 0.1).abs() < 0.02),
+            "{good:?}"
+        );
+        assert_eq!(good.outside, 0.0);
+        // Too narrow: rows pile up in the tails, few in the band.
+        let narrow = RuleSet::parse(
+            &NORMAL.replace("sd: [0.05, 0.1]", "sd: [0.01, 0.02]"),
+            "n.yaml",
+        )
+        .unwrap();
+        let bad = &narrow.calibration(&rows, None).unwrap()["grip"];
+        assert!(bad.in_band < 0.5 && bad.ks > 0.2, "{bad:?}");
+        assert!(bad.histogram[0] + bad.histogram[9] > 0.5, "{bad:?}");
+        assert!(bad.mean_log_likelihood < good.mean_log_likelihood);
+        // A fit mends it, and says so.
+        let fit = narrow.fit(&rows, None, &FitOptions::default()).unwrap();
+        let q = &fit.quantities[0];
+        assert_eq!(&q.calibration_before, bad);
+        assert!((q.calibration.in_band - 0.9).abs() < 0.02, "{q:?}");
+    }
+
+    #[test]
     fn a_report_travels_as_json_minus_infinity_as_null() {
         let q = QuantityFit {
             name: "grip".into(),
@@ -2057,6 +2247,22 @@ quantities:
                 points_with_data: 1,
                 estimated: 2,
             }],
+            calibration_before: Calibration {
+                rows: 3,
+                mean_log_likelihood: f64::NEG_INFINITY,
+                in_band: 0.5,
+                outside: 0.25,
+                ks: 0.4,
+                histogram: vec![0.1; 10],
+            },
+            calibration: Calibration {
+                rows: 3,
+                mean_log_likelihood: 0.8,
+                in_band: 0.9,
+                outside: 0.0,
+                ks: 0.05,
+                histogram: vec![0.1; 10],
+            },
         };
         let text = serde_json::to_string(&q).unwrap();
         assert!(text.contains(r#""log_likelihood_before":null"#), "{text}");

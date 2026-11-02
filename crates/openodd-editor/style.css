@@ -644,3 +644,11 @@ ul.plain { list-style: none; padding: 0; margin: 4px 0 10px; display: grid; gap:
 @keyframes fit-indeterminate { from { left: -30%; } to { left: 100%; } }
 @media (prefers-reduced-motion: reduce) { .fit-progress-bar.indeterminate > div { animation: none; left: 35%; } }
 .fit-progress-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; }
+/* How well the rules match the data (fit_app.rs). */
+.fit-good { color: var(--inside); }
+.fit-meh { color: var(--depends); }
+.fit-bad { color: var(--outside); }
+.fit-hist-cell { width: 64px; }
+.fit-hist { display: block; fill: currentColor; }
+.fit-hist line { stroke: var(--muted); stroke-dasharray: 2 2; stroke-width: 0.6; }
+.fit-legend { margin-top: 4px; }

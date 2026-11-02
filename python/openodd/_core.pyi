@@ -188,6 +188,9 @@ class RuleSet:
         min_spread: float = 1e-3,
         fixed: list[str] = ...,
     ) -> RuleFit: ...
+    def calibration(
+        self, rows: list[dict[str, float]], weights: Optional[list[float]] = None
+    ) -> dict[str, dict[str, Any]]: ...
     def observations(
         self, rows: list[dict[str, Any]], weight: Optional[str] = None
     ) -> tuple[list[dict[str, float]], Optional[list[float]]]: ...

@@ -87,6 +87,22 @@ class TestFit:
             assert q.log_likelihood >= truth[name][0] - 1e-6
             assert fit.rules.log_likelihood(rows)[name][0] == pytest.approx(q.log_likelihood)
 
+    def test_calibration_says_how_well_the_rules_match(self, rows) -> None:
+        start = Rules.from_text(START)
+        before = start.calibration(rows)
+        fit = start.fit(rows)
+        for name, q in fit.quantities.items():
+            assert q.calibration_before == before[name]
+            assert q.calibration.rows == q.rows
+            assert len(q.calibration.histogram) == 10
+            assert sum(q.calibration.histogram) == pytest.approx(1.0)
+            # The fitted rules match: 90% in the band, u spread evenly.
+            assert q.calibration.in_band == pytest.approx(0.9, abs=0.03), name
+            assert q.calibration.ks < 0.05, name
+        # The start's grip was too wide: more than 90% in its band.
+        assert before["grip"].in_band > 0.95
+        assert fit.rules.calibration(rows)["grip"] == fit.quantities["grip"].calibration
+
     def test_missing_values_drop_a_row_from_the_factors_that_need_them(self, rows) -> None:
         holed = [dict(r) for r in rows[:900]]
         for r in holed[::3]:
@@ -286,6 +302,7 @@ class TestCommand:
         assert "3000 rows" in printed
         assert "grip: 3000 rows (0 skipped)" in printed
         assert "water: 2 of 2 points with data, 2 values estimated" in printed
+        assert "in the central 90%:" in printed
         fitted = Rules.read(out)
         assert dict(fitted.distributions("grip", {"water": 100})[0][2])["sd"] == 0.3
 

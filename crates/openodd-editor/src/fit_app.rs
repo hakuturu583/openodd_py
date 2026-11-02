@@ -15,7 +15,9 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use openodd::rules_fit::{observations_from_json, Observations, Progress, QuantityFit};
+use openodd::rules_fit::{
+    observations_from_json, Calibration, Observations, Progress, QuantityFit,
+};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{ErrorEvent, HtmlInputElement, MessageEvent, Worker};
@@ -41,8 +43,9 @@ pub struct FCtx {
     pub data: RwSignal<Option<(String, String)>>,
     /// The rows of the data, as the rules read them, or why they do not read.
     pub observations: Memo<Option<Result<Observations, String>>>,
-    /// Per quantity, the rows its factor reads and those it skips.
-    usable: Memo<Option<IndexMap<String, (usize, usize)>>>,
+    /// Per quantity, the rows its factor reads and those it skips, and how
+    /// well the rules as they are match those it reads.
+    factors: Memo<Option<IndexMap<String, Factor>>>,
     /// The last fit's report.
     pub report: RwSignal<Option<Vec<QuantityFit>>>,
     /// The document before the last fit: what undo restores.
@@ -53,6 +56,16 @@ pub struct FCtx {
     worker: StoredValue<Option<Running>, LocalStorage>,
     /// The job a worker gets once it says it is ready.
     job: StoredValue<Option<Job>, LocalStorage>,
+}
+
+/// What a quantity's factor makes of the data, before a fit.
+#[derive(Clone, Debug, PartialEq)]
+struct Factor {
+    /// The rows it reads, and those it skips (missing something it reads).
+    read: usize,
+    skipped: usize,
+    /// How well the rules as they are match the rows it reads.
+    matches: Option<Calibration>,
 }
 
 /// A fit running.
@@ -94,10 +107,29 @@ pub fn fit_context() -> FCtx {
                 .map(|(_, text)| observations_from_json(text, &names).map_err(|e| e.to_string()))
         })
     });
-    let usable = Memo::new(move |_| {
-        observations.with(|o| match o {
-            Some(Ok(o)) => r.good.with(|g| g.as_ref().map(|s| s.usable(&o.rows))),
-            _ => None,
+    let factors = Memo::new(move |_| {
+        observations.with(|o| {
+            let Some(Ok(o)) = o else { return None };
+            r.good.with(|g| {
+                let set = g.as_ref()?;
+                let mut matches = set.calibration(&o.rows, o.weights()).unwrap_or_default();
+                Some(
+                    set.usable(&o.rows)
+                        .into_iter()
+                        .map(|(q, (read, skipped))| {
+                            let matches = matches.shift_remove(&q);
+                            (
+                                q,
+                                Factor {
+                                    read,
+                                    skipped,
+                                    matches,
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+            })
         })
     });
     // Keep the data between visits, as the rules are kept (not on the first
@@ -113,7 +145,7 @@ pub fn fit_context() -> FCtx {
     FCtx {
         data,
         observations,
-        usable,
+        factors,
         report: RwSignal::new(None),
         before: RwSignal::new(None),
         run: RwSignal::new(None),
@@ -527,17 +559,23 @@ fn DataSummary() -> impl IntoView {
                     }
                 })
                 .collect_view();
-            let factors = f.usable.with(|u| {
+            let factors = f.factors.with(|u| {
                 u.iter()
                     .flatten()
-                    .map(|(q, (rows, skipped))| {
+                    .map(|(q, Factor { read: rows, skipped, matches })| {
                         let class = if *rows == 0 { "fit-none" } else { "" };
                         let skips = *skipped > 0;
+                        let (band, hist) = match matches {
+                            Some(c) => (band_cell(c), histogram(c)),
+                            None => (view! { <td class="num">"–"</td> }.into_any(), view! { <td></td> }.into_any()),
+                        };
                         view! {
                             <tr class=class>
                                 <td>{q.clone()}</td>
                                 <td class="num">{format!("{rows}")}</td>
                                 <td class="num" class:fit-skipped=skips>{format!("{skipped}")}</td>
+                                {band}
+                                {hist}
                             </tr>
                         }
                     })
@@ -560,14 +598,78 @@ fn DataSummary() -> impl IntoView {
                             <th>"Factor of"</th>
                             <th class="num" title="Rows giving the quantity and everything it reads">"rows read"</th>
                             <th class="num" title="Rows giving the quantity but missing something it reads">"skipped"</th>
+                            <th class="num" title=BAND_HELP>"in 90% band"</th>
+                            <th title=HIST_HELP>"where rows fall"</th>
                         </tr></thead>
                         <tbody>{factors}</tbody>
                     </table>
+                    <p class="hint fit-legend">
+                        "How well the rules as they are match: rules that match put 90% of the rows in "
+                        "their central 90% and spread the rows evenly over their quantiles (a flat bar). "
+                        "A U says too narrow, a hump too wide, a slope off-centre."
+                    </p>
                 }
                 .into_any(),
             )
         })
     }
+}
+
+const BAND_HELP: &str = "The share of rows within the distribution's central 90% at their inputs: 90% when the rules match; less when too narrow or off-centre, more when too wide";
+const HIST_HELP: &str = "Where each row's value falls in the distribution at its inputs, its quantile, by tenths: flat when the rules match";
+
+/// How a share of rows in the 90% band reads: close to 90% matches.
+fn band_class(c: &Calibration) -> &'static str {
+    let off = (c.in_band - 0.9).abs();
+    if c.outside > 0.0 || off > 0.1 {
+        "fit-bad"
+    } else if off > 0.03 {
+        "fit-meh"
+    } else {
+        "fit-good"
+    }
+}
+
+fn band_cell(c: &Calibration) -> AnyView {
+    let title = format!(
+        "{:.1}% in the central 90%, {:.1}% impossible under the rules; KS distance {:.3} (about {:.3} is chance); log-likelihood per row {}",
+        100.0 * c.in_band,
+        100.0 * c.outside,
+        c.ks,
+        1.36 / (c.rows.max(1) as f64).sqrt(),
+        if c.mean_log_likelihood.is_finite() { short(c.mean_log_likelihood) } else { "−∞".into() },
+    );
+    view! {
+        <td class=format!("num {}", band_class(c)) title=title>{format!("{:.0}%", 100.0 * c.in_band)}</td>
+    }
+    .into_any()
+}
+
+/// A row's quantiles by tenths, as ten bars: flat when the rules match.
+fn histogram(c: &Calibration) -> AnyView {
+    let top = c.histogram.iter().cloned().fold(0.1f64, f64::max);
+    let bars = c
+        .histogram
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let height = 16.0 * h / top;
+            view! {
+                <rect x=format!("{}", i * 6) y=format!("{:.2}", 16.0 - height)
+                    width="5" height=format!("{height:.2}")/>
+            }
+        })
+        .collect_view();
+    view! {
+        <td class="fit-hist-cell" title=HIST_HELP>
+            <svg class=format!("fit-hist {}", band_class(c)) viewBox="0 0 60 17" width="60" height="17" aria-hidden="true">
+                // Where each bar stands when the rules match.
+                <line x1="0" x2="60" y1=format!("{:.2}", 16.0 - 16.0 * 0.1 / top) y2=format!("{:.2}", 16.0 - 16.0 * 0.1 / top)/>
+                {bars}
+            </svg>
+        </td>
+    }
+    .into_any()
 }
 
 /// The last fit, per quantity.
@@ -600,9 +702,17 @@ fn FitReport() -> impl IntoView {
                     <tr title=title>
                         <td>{q.name.clone()}</td>
                         <td class="num">{format!("{}", q.rows)}</td>
-                        <td class="num">{format!("{} → {}", ll(q.log_likelihood_before), ll(q.log_likelihood))}</td>
+                        <td class="num" title=format!("log-likelihood {} → {}", ll(q.log_likelihood_before), ll(q.log_likelihood))>
+                            {format!("{} → {}", ll(q.calibration_before.mean_log_likelihood), ll(q.calibration.mean_log_likelihood))}
+                        </td>
+                        <td class="num">
+                            <span class=band_class(&q.calibration_before)>{format!("{:.0}%", 100.0 * q.calibration_before.in_band)}</span>
+                            " → "
+                            <span class=band_class(&q.calibration)>{format!("{:.0}%", 100.0 * q.calibration.in_band)}</span>
+                        </td>
+                        {histogram(&q.calibration)}
                         <td class="num">{format!("{estimated}")}</td>
-                        <td class:fit-warn=!q.converged>{state}</td>
+                        <td class:fit-warn=!q.converged title=state>{if q.converged { "✓" } else { "!" }}</td>
                     </tr>
                 }
             })
@@ -612,7 +722,10 @@ fn FitReport() -> impl IntoView {
             <table class="rules-table fit-table">
                 <thead><tr>
                     <th>"Quantity"</th><th class="num">"rows"</th>
-                    <th class="num">"log-likelihood"</th><th class="num">"estimated"</th><th></th>
+                    <th class="num" title="Log-likelihood per row, before → after: higher is likelier">"log-lik / row"</th>
+                    <th class="num" title=BAND_HELP>"in 90% band"</th>
+                    <th title=HIST_HELP>"after"</th>
+                    <th class="num">"estimated"</th><th></th>
                 </tr></thead>
                 <tbody>{rows}</tbody>
             </table>
