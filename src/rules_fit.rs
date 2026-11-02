@@ -1161,7 +1161,9 @@ fn fit_quantity(
     let before = log_likelihood_of(q, &start_params(q), data);
     let scale = scale_of(data);
     let floor = options.min_spread * scale;
-    let base = feasible_start(&prepared, floor)?;
+    // Rules under which every row is possible start as they are; others
+    // are widened until it is.
+    let base = feasible_start(&prepared, floor, before.is_finite())?;
     let grad = base
         .iter()
         .map(|p| p.iter().map(|c| vec![0.0; c.len()]).collect())
@@ -1177,6 +1179,7 @@ fn fit_quantity(
     };
     let stages = prepared.stages();
     let x0 = problem.start();
+    let x0_kept = x0.clone();
     let Some(first) = problem.eval(&x0, stages[0]) else {
         return Err(Error::value(format!(
             "{}: {}: cannot start the fit: a row lies outside the range of a \
@@ -1199,8 +1202,16 @@ fn fit_quantity(
         iterations += its;
         converged &= done;
     }
-    let params = problem.params(&x);
-    let after = log_likelihood_of(q, &params, data);
+    let mut params = problem.params(&x);
+    let mut after = log_likelihood_of(q, &params, data);
+    // An ascent ends no lower than it starts; with several parts or a
+    // barrier it may reach a lesser maximum than the start's own -- then the
+    // start stands.
+    let start = problem.params(&x0_kept);
+    let at_start = log_likelihood_of(q, &start, data);
+    if at_start > after {
+        (params, after) = (start, at_start);
+    }
     let report = QuantityFit {
         name: q.name.clone(),
         rows: data.y.len(),
@@ -1225,18 +1236,20 @@ fn fit_quantity(
 }
 
 /// The rules' parameters, moved where needed so every row is possible and
-/// every distribution at a point with data at least `floor` wide: a
-/// uniform's or a triangular's range widened past the values of the rows
-/// near each point (each point's `low` below the least of them, `high` above
-/// the greatest -- so the range interpolated at a row, a weighted mean of
-/// the points', holds the row's value), a normal's `sd` raised to `floor`.
-fn feasible_start(prepared: &Prepared, floor: f64) -> Result<Vec<Vec<Vec<f64>>>> {
+/// every distribution at a point with data at least `floor` wide: unless
+/// every row is possible already (`possible`), a uniform's or a
+/// triangular's range widened past the values of the rows near each point
+/// (each point's `low` below the least of them, `high` above the greatest --
+/// so the range interpolated at a row, a weighted mean of the points', holds
+/// the row's value); a normal's `sd` raised to `floor`.
+fn feasible_start(prepared: &Prepared, floor: f64, possible: bool) -> Result<Vec<Vec<Vec<f64>>>> {
     let (q, data) = (prepared.q, &prepared.data);
     let mut params = start_params(q);
     for (i, part) in q.parts.iter().enumerate() {
         let (free, touched) = (&prepared.free[i], &prepared.touched[i]);
         let p = &mut params[i];
         match part.family.fitted_range() {
+            Some(_) if possible => {}
             Some((lo, hi)) => {
                 let size = part.size();
                 let mut least = vec![f64::INFINITY; size];
@@ -1710,6 +1723,46 @@ quantities:
         let ice = &fit.rules.quantities["grip"].parts[1];
         assert!((ice.values[0][1] - 0.1).abs() < 0.01, "{:?}", ice.values);
         assert!((ice.values[1][1] - 0.2).abs() < 0.01, "{:?}", ice.values);
+    }
+
+    #[test]
+    fn a_fit_never_ends_below_where_it_starts() {
+        // Three uniform parts joined by min, the rules as written already
+        // possible for every row: the fit starts from them, not from ranges
+        // widened, and ends no lower.
+        let text = r#"version: 2
+quantities:
+  visibility:
+    combine: min
+    parts:
+      fog:
+        at: {fog: [0, 30, 70, 100]}
+        uniform: {low: [250, 120, 40, 15], high: [400, 250, 100, 40]}
+      rain:
+        at: {rain: [0, 30, 70, 100]}
+        uniform: {low: [250, 180, 100, 60], high: [400, 320, 220, 150]}
+      light:
+        at: {sun: [-6, 0]}
+        uniform: {low: [50, 250], high: [150, 400]}
+"#;
+        let truth = RuleSet::parse(text, "v.yaml").unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let rows: Vec<_> = (0..600)
+            .map(|_| {
+                let mut r = row(&[
+                    ("fog", rng.gen_range(0.0..100.0)),
+                    ("rain", rng.gen_range(0.0..100.0)),
+                    ("sun", rng.gen_range(-6.0..0.0)),
+                ]);
+                let y = truth.quantile("visibility", &r, rng.gen()).unwrap();
+                r.insert("visibility".into(), y);
+                r
+            })
+            .collect();
+        let fit = truth.fit(&rows, None, &FitOptions::default()).unwrap();
+        let q = &fit.quantities[0];
+        assert!(q.log_likelihood_before.is_finite());
+        assert!(q.log_likelihood >= q.log_likelihood_before, "{q:?}");
     }
 
     #[test]
