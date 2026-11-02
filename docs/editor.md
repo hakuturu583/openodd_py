@@ -191,6 +191,48 @@ The interface is `graph_app.rs`; the layout (`auto_layout`) puts the inputs in
 the first column, and for each depth of the chain a column of factors and one
 of quantities.
 
+### Fitting the graph to data
+
+With nothing selected, the graph's side panel has a **Fit to data** card: it
+fits every factor's distribution to rows measured in the real world, by
+maximum likelihood, in the browser -- the same code as Python's `Rules.fit`
+([rules.md](rules.md#fitting-to-data)).
+
+1. **Load data (JSON)**: each row the values seen together. A row may leave
+   any value out (or give it `null`); keys the rules do not read are ignored.
+
+   ```json
+   {
+     "rows": [
+       {"water": 70, "fog": 10, "tire_friction": 0.62, "visibility": 310},
+       {"water": 20, "tire_friction": 0.85},
+       {"fog": 80, "visibility": null, "dt": 0.5}
+     ],
+     "weight": "dt"
+   }
+   ```
+
+   A bare list of rows reads too, and so do columns (`{"water": [...], ...}`).
+   `weight` (optional) names the column weighing each row, 1 where a row has
+   none.
+2. The card shows, per variable, how many rows give it, and per factor how
+   many rows it **reads** (they give its quantity and everything it reads)
+   and how many it **skips** (they give its quantity but miss something it
+   reads). A factor no row reads is greyed and left as it is.
+3. **Fit** writes the fitted parameters into the document, every point of
+   every part fitted; the YAML, the charts and the graph follow. The table
+   below gives each quantity's rows, its log-likelihood before and after,
+   the values estimated and whether the fit converged. **Undo fit** puts the
+   rules back as they were.
+
+A part's form has a **Fit holds** card: what a fit keeps as written -- all of
+the part, a parameter at every point (a normal's `low` and `high` always
+are), or values at points (`mean@water=0`, `@water=100`). It is the part's
+`fixed:` ([rules.md](rules.md#holding-values)); a factor holding something
+says so on the canvas (`· fixed`, `· part fixed`). The data is kept in the
+browser with the draft. The fit runs on the page's thread: the editor waits
+for it, which for thousands of rows is a second or so.
+
 ## Embedding the studio
 
 A page that has an element `id="openodd-studio"` gets the studio mounted in

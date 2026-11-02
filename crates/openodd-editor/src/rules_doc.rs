@@ -405,6 +405,74 @@ pub struct RulesDoc {
 }
 
 impl RulesDoc {
+    /// Write the fitted distributions of `quantities` from `fitted` (the
+    /// rules a fit gave) into the document: each part's parameters, every
+    /// point. A quantity or a part only an extended file names is written
+    /// here, its distribution alone, to merge over that file's.
+    pub fn apply_fitted(&mut self, fitted: &RuleSet, quantities: &[String]) {
+        for name in quantities {
+            let Some(fq) = fitted.quantities.get(name) else {
+                continue;
+            };
+            if !self.quantities.iter().any(|q| q.name == *name) {
+                self.quantities.push(QuantityDoc {
+                    id: fresh_id(),
+                    name: name.clone(),
+                    combine: None,
+                    parts: vec![],
+                    text: String::new(),
+                });
+            }
+            let q = self
+                .quantities
+                .iter_mut()
+                .find(|q| q.name == *name)
+                .expect("added above");
+            for fp in &fq.parts {
+                if !q.parts.iter().any(|p| p.name == fp.name) {
+                    q.parts.push(PartDoc {
+                        id: fresh_id(),
+                        name: fp.name.clone(),
+                        axes: None,
+                        dist: None,
+                        text: String::new(),
+                        fixed: FixedDoc::None,
+                    });
+                }
+                let part = q
+                    .parts
+                    .iter_mut()
+                    .find(|p| p.name == fp.name)
+                    .expect("added above");
+                let was = part.dist.take();
+                part.dist = Some(DistDoc {
+                    family: fp.family,
+                    params: fp
+                        .family
+                        .params()
+                        .iter()
+                        .zip(&fp.values)
+                        .map(|(n, values)| {
+                            let same = values.windows(2).all(|w| w[0] == w[1]);
+                            // One number stays one number while the fit
+                            // keeps it so (a parameter held, or a single point).
+                            let constant = same
+                                && was.as_ref().is_some_and(|d| {
+                                    d.family == fp.family
+                                        && d.params.iter().any(|p| p.name == *n && p.constant)
+                                });
+                            ParamDoc {
+                                name: n.to_string(),
+                                values: values.clone(),
+                                constant,
+                            }
+                        })
+                        .collect(),
+                });
+            }
+        }
+    }
+
     pub fn quantity(&self, id: u64) -> Option<&QuantityDoc> {
         self.quantities.iter().find(|q| q.id == id)
     }
@@ -987,6 +1055,41 @@ mod tests {
         assert!(yaml.contains("at: {fog: [0, 30, 70, 100]}"), "{yaml}");
         let set = check(&yaml, "a.yaml", &[]).unwrap();
         assert_eq!(set.upstream("sight_speed").unwrap(), ["sight"]);
+    }
+
+    #[test]
+    fn a_fit_is_written_into_the_document() {
+        let text = "version: 2\nquantities:\n  q:\n    parts:\n      p:\n        at: {a: [0, 10]}\n        normal: {mean: [0, 1], sd: 1, low: -9, high: 9}\n";
+        let mut doc = RulesDoc::from_yaml(text).unwrap();
+        let set = RuleSet::parse(text, "f.yaml").unwrap();
+        let rows: Vec<IndexMap<String, f64>> = (0..200)
+            .map(|i| {
+                let a = (i % 11) as f64;
+                IndexMap::from([
+                    ("a".to_string(), a),
+                    ("q".to_string(), 0.3 * a + 0.01 * (i % 7) as f64),
+                ])
+            })
+            .collect();
+        let options = openodd::rules_fit::FitOptions {
+            fixed: vec!["q.p.sd".into()],
+            ..Default::default()
+        };
+        let fit = set.fit(&rows, None, &options).unwrap();
+        doc.apply_fitted(&fit.rules, &["q".to_string()]);
+        let dist = doc.quantities[0].parts[0].dist.as_ref().unwrap();
+        assert!((dist.params[0].values[1] - 3.0).abs() < 0.2, "{dist:?}");
+        // sd was one number and held: it stays one number.
+        assert!(dist.params[1].constant);
+        let written = doc.to_yaml().unwrap();
+        assert!(written.contains("sd: 1"), "{written}");
+        let again = RuleSet::parse(&written, "w.yaml").unwrap();
+        // The editor writes ten significant digits.
+        let got = &again.quantities["q"].parts[0].values;
+        let want = &fit.rules.quantities["q"].parts[0].values;
+        for (g, w) in got.iter().flatten().zip(want.iter().flatten()) {
+            assert!((g - w).abs() <= 1e-9 * w.abs().max(1.0), "{g} vs {w}");
+        }
     }
 
     #[test]

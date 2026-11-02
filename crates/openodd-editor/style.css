@@ -617,3 +617,22 @@ ul.plain { list-style: none; padding: 0; margin: 4px 0 10px; display: grid; gap:
 .button.danger { color: var(--outside); }
 .button.danger:hover:not(:disabled) { border-color: var(--outside); }
 .button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Fitting the rules to data (fit_app.rs). */
+.fit-card .fit-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.fit-card .fit-file { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.fit-card .fit-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.fit-card .fit-error { color: var(--outside); display: flex; gap: 6px; align-items: flex-start; font-size: 13px; }
+.fit-card .fit-head { margin: 12px 0 4px; font-size: 13px; }
+.fit-table { font-size: 12.5px; margin-top: 6px; }
+.fit-table tr.fit-none td { color: var(--muted); }
+.fit-table td.fit-skipped { color: var(--outside); }
+.fit-table td.fit-warn { color: var(--outside); }
+.fit-table td.fit-bar-cell { width: 40%; }
+.fit-bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.fit-bar > div { height: 100%; background: var(--accent); }
+.fit-help { margin-top: 10px; }
+.fit-help summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.fit-example { font-size: 11.5px; background: var(--surface-2); padding: 8px; border-radius: 6px; overflow-x: auto; }
+.holds-card .check { display: inline-flex; align-items: center; gap: 6px; margin: 4px 14px 4px 0; font-size: 13px; }
+.holds-card .holds-params { margin: 4px 0 8px; }

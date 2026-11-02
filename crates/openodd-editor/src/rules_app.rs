@@ -930,6 +930,110 @@ pub fn PartView(q: u64, p: u64) -> impl IntoView {
             <h3>"Distribution"</h3>
             <DistCard q=q p=p part=part/>
         </Show>
+        <h3>"Fit holds"</h3>
+        <HoldsCard q=q p=p part=part/>
+    }
+}
+
+/// What a fit to data holds of the part as written (`fixed:`): all of it,
+/// a parameter at every point, or values at points.
+#[component]
+fn HoldsCard(q: u64, p: u64, part: Memo<Option<PartDoc>>) -> impl IntoView {
+    let ctx = rctx();
+    // The family: the document's, else the one an extended file gives.
+    let family = Memo::new(move |_| {
+        part.with(|x| x.as_ref().and_then(|x| x.dist.as_ref().map(|d| d.family)))
+            .or_else(|| ctx.read_part(q, p).map(|x| x.family))
+    });
+    let fixed =
+        Memo::new(move |_| part.with(|x| x.as_ref().map(|x| x.fixed.clone()).unwrap_or_default()));
+    let set_fixed = move |f: FixedDoc| ctx.part_update(q, p, |x| x.fixed = f);
+    let list = move || match fixed.get() {
+        FixedDoc::Some(l) => l,
+        _ => vec![],
+    };
+    let toggle_all = move |ev: leptos::ev::Event| {
+        let on = event_target_checked(&ev);
+        set_fixed(if on {
+            FixedDoc::All
+        } else if list().is_empty() {
+            FixedDoc::None
+        } else {
+            FixedDoc::Some(list())
+        });
+    };
+    let toggle = move |name: &'static str, on: bool| {
+        let mut l = list();
+        l.retain(|s| s != name);
+        if on {
+            l.push(name.to_string());
+        }
+        set_fixed(if l.is_empty() {
+            FixedDoc::None
+        } else {
+            FixedDoc::Some(l)
+        });
+    };
+    // The entries at points: those that are not a parameter alone.
+    let at_points = move || {
+        list()
+            .into_iter()
+            .filter(|s| s.contains('@'))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let set_points = move |ev: leptos::ev::Event| {
+        let mut l: Vec<String> = list().into_iter().filter(|s| !s.contains('@')).collect();
+        l.extend(
+            event_target_value(&ev)
+                .split_whitespace()
+                .map(str::to_string),
+        );
+        set_fixed(if l.is_empty() {
+            FixedDoc::None
+        } else {
+            FixedDoc::Some(l)
+        });
+    };
+    let params = move || {
+        let Some(family) = family.get() else {
+            return vec![];
+        };
+        let all = fixed.get() == FixedDoc::All;
+        family
+            .params()
+            .iter()
+            .map(|&name| {
+                let always = family == Family::Normal && (name == "low" || name == "high");
+                let checked = all || always || list().iter().any(|s| s == name);
+                view! {
+                    <label class="check" title=if always { "A normal's truncation is the physical range: a fit always holds it" } else { "Hold it at every point" }>
+                        <input type="checkbox" prop:checked=checked disabled=all || always
+                            on:change=move |ev| toggle(name, event_target_checked(&ev))/>
+                        {name}
+                    </label>
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    view! {
+        <div class="card holds-card">
+            <p class="hint">
+                "A fit to data estimates every parameter at every point; what is held here stays as written, "
+                "and the rest is fitted given it."
+            </p>
+            <label class="check">
+                <input type="checkbox" prop:checked=move || fixed.get() == FixedDoc::All on:change=toggle_all/>
+                <b>"Hold all of it"</b>
+            </label>
+            <div class="holds-params">{params}</div>
+            <label class="field">
+                <span>"At points (space-separated: mean@water=0, @water=100)"</span>
+                <input prop:value=at_points on:change=set_points
+                    disabled=move || fixed.get() == FixedDoc::All
+                    placeholder="mean@water=0"/>
+            </label>
+        </div>
     }
 }
 

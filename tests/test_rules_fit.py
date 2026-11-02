@@ -228,12 +228,35 @@ class TestReadRows:
             {"water": 1, "grip": 0.9},
             {"water": 2, "grip": None},
         ]
+        (tmp_path / "b.json").write_text(
+            json.dumps({"rows": [{"water": 1, "dt": 0.5}, {"grip": 0.5}], "weight": "dt"})
+        )
+        assert read_rows(tmp_path / "b.json") == [{"water": 1, "dt": 0.5}, {"grip": 0.5}]
+        from openodd.rules import read_data
+
+        assert read_data(tmp_path / "b.json")[1] == "dt"
+        (tmp_path / "c.json").write_text(json.dumps({"rows": [], "weights": "dt"}))
+        with pytest.raises(RulesError, match="unknown key 'weights'"):
+            read_rows(tmp_path / "c.json")
         (tmp_path / "a.txt").write_text("")
         with pytest.raises(RulesError, match="data is read from"):
             read_rows(tmp_path / "a.txt")
 
 
 class TestCommand:
+    def test_a_json_file_names_its_weight(self, rows, tmp_path: Path, capsys) -> None:
+        (tmp_path / "weather.yaml").write_text(START)
+        data = [{**r, "dt": 2.0} for r in rows[:300]] + [dict(r) for r in rows[300:600]]
+        (tmp_path / "d.json").write_text(json.dumps({"rows": data, "weight": "dt"}))
+        out = tmp_path / "o.yaml"
+        assert fit_main([str(tmp_path / "weather.yaml"), str(tmp_path / "d.json"), "-o", str(out), "-q", "grip"]) == 0
+        weights = [2.0] * 300 + [1.0] * 300
+        want = Rules.from_text(START).fit(rows[:600], weights, quantities=["grip"])
+        got = Rules.read(out)
+        assert got.evaluate("grip", {"water": 40}) == pytest.approx(
+            want.rules.evaluate("grip", {"water": 40}), rel=1e-6
+        )
+
     def test_fits_a_file_to_csv_logs(self, rows, tmp_path: Path, capsys) -> None:
         (tmp_path / "weather.yaml").write_text(START)
         for i, chunk in enumerate((rows[:1500], rows[1500:])):

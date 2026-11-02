@@ -138,6 +138,152 @@ impl Fit {
     }
 }
 
+/// Rows of data, read from JSON ([`observations_from_json`]).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Observations {
+    /// Per row, the values it gives of the names asked for.
+    pub rows: Vec<IndexMap<String, f64>>,
+    /// Per row, its weight, when the data names a weight column.
+    pub weights: Option<Vec<f64>>,
+    /// The weight column, if named.
+    pub weight_column: Option<String>,
+    /// Per name asked for, the rows that give it.
+    pub observed: IndexMap<String, usize>,
+}
+
+/// The rows of a JSON data file, keeping the values of `names` (the
+/// quantities and inputs the rules read; every other key -- a timestamp, an
+/// id -- is ignored). The file is one of:
+///
+/// - `{"rows": [{name: value, ...}, ...], "weight": "<column>"}` (`weight`
+///   optional: the column each row's weight is in, 1 where a row has none);
+/// - a list of rows, `[{name: value, ...}, ...]`;
+/// - columns, `{name: [value, ...], ...}`, each of one length.
+///
+/// A row need not give every name: one it leaves out, or gives as `null`,
+/// is not observed there. A value is a number, or a string of one.
+pub fn observations_from_json(text: &str, names: &[String]) -> Result<Observations> {
+    use serde_json::Value as J;
+    let doc: J = serde_json::from_str(text).map_err(|e| Error::value(format!("not JSON: {e}")))?;
+    let (rows, weight): (Vec<serde_json::Map<String, J>>, Option<String>) = match doc {
+        J::Array(items) => (rows_of(items)?, None),
+        J::Object(mut map) if map.contains_key("rows") => {
+            let weight = match map.remove("weight") {
+                None | Some(J::Null) => None,
+                Some(J::String(w)) => Some(w),
+                Some(_) => return Err(Error::value("\"weight\" names a column: a string")),
+            };
+            if let Some(extra) = map.keys().find(|k| *k != "rows") {
+                return Err(Error::value(format!(
+                    "unknown key \"{extra}\": the data is {{\"rows\": [...], \"weight\": \"<column>\"}}"
+                )));
+            }
+            match map.remove("rows") {
+                Some(J::Array(items)) => (rows_of(items)?, weight),
+                _ => return Err(Error::value("\"rows\" is a list of rows")),
+            }
+        }
+        J::Object(columns) => {
+            let mut n = None;
+            for (k, v) in &columns {
+                let J::Array(values) = v else {
+                    return Err(Error::value(format!(
+                        "\"{k}\" is not a column (a list): the data is a list of rows, \
+                         {{\"rows\": [...]}}, or columns"
+                    )));
+                };
+                match n {
+                    None => n = Some(values.len()),
+                    Some(m) if m != values.len() => {
+                        return Err(Error::value(format!(
+                            "the columns are not all of one length: \"{k}\" has {}, not {m}",
+                            values.len()
+                        )))
+                    }
+                    _ => {}
+                }
+            }
+            let rows = (0..n.unwrap_or(0))
+                .map(|i| {
+                    columns
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v[i].clone()))
+                        .collect()
+                })
+                .collect();
+            (rows, None)
+        }
+        _ => {
+            return Err(Error::value(
+                "the data is a list of rows, {\"rows\": [...]}, or columns",
+            ))
+        }
+    };
+    let number = |row: usize, key: &str, v: &J| -> Result<Option<f64>> {
+        let x = match v {
+            J::Null => return Ok(None),
+            J::Number(n) => n.as_f64(),
+            J::String(s) if s.trim().is_empty() => return Ok(None),
+            J::String(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        };
+        match x {
+            Some(x) if x.is_finite() => Ok(Some(x)),
+            Some(x) if x.is_nan() => Ok(None),
+            _ => Err(Error::value(format!(
+                "row {row}: {key} is {v}, not a number"
+            ))),
+        }
+    };
+    let mut out = Observations {
+        weight_column: weight.clone(),
+        observed: names.iter().map(|n| (n.clone(), 0)).collect(),
+        ..Observations::default()
+    };
+    let mut weights = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        let mut values = IndexMap::new();
+        for name in names {
+            if let Some(v) = row.get(name) {
+                if let Some(x) = number(r, name, v)? {
+                    values.insert(name.clone(), x);
+                    out.observed[name] += 1;
+                }
+            }
+        }
+        if let Some(w) = &weight {
+            let x = row.get(w).map(|v| number(r, w, v)).transpose()?.flatten();
+            match x {
+                Some(x) if x < 0.0 => {
+                    return Err(Error::value(format!("row {r}: its weight {w} is negative")))
+                }
+                Some(x) => weights.push(x),
+                None => weights.push(1.0),
+            }
+        }
+        out.rows.push(values);
+    }
+    if weight.is_some() {
+        out.weights = Some(weights);
+    }
+    Ok(out)
+}
+
+fn rows_of(
+    items: Vec<serde_json::Value>,
+) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, item)| match item {
+            serde_json::Value::Object(m) => Ok(m),
+            other => Err(Error::value(format!(
+                "row {i} is {other}: a row is an object, name: value"
+            ))),
+        })
+        .collect()
+}
+
 /// A row's value of `name`, if it has a finite one.
 fn observed(row: &IndexMap<String, f64>, name: &str) -> Option<f64> {
     row.get(name).copied().filter(|v| v.is_finite())
@@ -178,6 +324,29 @@ impl RuleSet {
             );
         }
         Ok(out)
+    }
+
+    /// Per quantity, the rows a fit would read -- those giving it and every
+    /// value it reads -- and those it would skip (giving it, but missing
+    /// something it reads).
+    pub fn usable(&self, rows: &[IndexMap<String, f64>]) -> IndexMap<String, (usize, usize)> {
+        self.order()
+            .iter()
+            .map(|name| {
+                let data = self.data_of(&self.quantities[name], rows, None);
+                (name.clone(), (data.y.len(), data.skipped))
+            })
+            .collect()
+    }
+
+    /// The names a row of data may give these rules: the quantities, and
+    /// the inputs their parts read.
+    pub fn data_names(&self) -> Vec<String> {
+        self.order()
+            .iter()
+            .cloned()
+            .chain(self.free_inputs())
+            .collect()
     }
 
     /// The maximum-likelihood fit of these rules' parameters to `rows`
@@ -1607,6 +1776,80 @@ quantities:
                 .to_string();
             assert!(err.contains(says), "{spec}: {err}");
         }
+    }
+
+    #[test]
+    fn json_data_comes_as_rows_or_columns_and_may_have_holes() {
+        let names: Vec<String> = ["water", "grip"].iter().map(|s| s.to_string()).collect();
+        let rows = r#"{"rows": [
+            {"time": "12:00", "water": 70, "grip": 0.62, "dt": 0.5},
+            {"water": "20"},
+            {"grip": null, "water": 5},
+            {}
+        ], "weight": "dt"}"#;
+        let o = observations_from_json(rows, &names).unwrap();
+        assert_eq!(o.rows.len(), 4);
+        assert_eq!(o.rows[0], row(&[("water", 70.0), ("grip", 0.62)]));
+        assert_eq!(o.rows[1], row(&[("water", 20.0)]));
+        assert_eq!(o.rows[2], row(&[("water", 5.0)]));
+        assert_eq!(o.weights, Some(vec![0.5, 1.0, 1.0, 1.0]));
+        assert_eq!(
+            o.observed,
+            IndexMap::from([("water".to_string(), 3), ("grip".to_string(), 1)])
+        );
+        let list = observations_from_json(r#"[{"water": 1, "grip": 0.9}]"#, &names).unwrap();
+        assert_eq!(list.rows, vec![row(&[("water", 1.0), ("grip", 0.9)])]);
+        assert_eq!(list.weights, None);
+        let columns =
+            observations_from_json(r#"{"water": [1, 2], "grip": [0.9, null]}"#, &names).unwrap();
+        assert_eq!(
+            columns.rows,
+            vec![
+                row(&[("water", 1.0), ("grip", 0.9)]),
+                row(&[("water", 2.0)])
+            ]
+        );
+        for (bad, says) in [
+            ("[1]", "row 0 is 1: a row is an object"),
+            (
+                r#"[{"grip": "wet"}]"#,
+                "row 0: grip is \"wet\", not a number",
+            ),
+            (r#"{"water": [1], "grip": [1, 2]}"#, "not all of one length"),
+            (r#"{"rows": [], "weights": "w"}"#, "unknown key \"weights\""),
+            (
+                r#"{"rows": [{"w": -1}], "weight": "w"}"#,
+                "its weight w is negative",
+            ),
+            ("{", "not JSON"),
+        ] {
+            let err = observations_from_json(bad, &names).unwrap_err().to_string();
+            assert!(err.contains(says), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn usable_counts_the_rows_each_factor_reads() {
+        let set = RuleSet::parse(
+            r#"version: 2
+quantities:
+  visibility:
+    parts: {fog: {at: {fog: [0, 100]}, uniform: {low: [250, 15], high: [400, 40]}}}
+  speed:
+    parts: {sight: {at: {visibility: [0, 400]}, uniform: {low: 0, high: 50}}}
+"#,
+            "u.yaml",
+        )
+        .unwrap();
+        assert_eq!(set.data_names(), ["visibility", "speed", "fog"]);
+        let rows = vec![
+            row(&[("fog", 10.0), ("visibility", 300.0), ("speed", 30.0)]),
+            row(&[("fog", 80.0), ("speed", 9.0)]),
+            row(&[("visibility", 100.0)]),
+        ];
+        let usable = set.usable(&rows);
+        assert_eq!(usable["visibility"], (1, 1));
+        assert_eq!(usable["speed"], (1, 1));
     }
 
     #[test]

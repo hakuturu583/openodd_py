@@ -167,8 +167,11 @@ its observed value, an input's name the input. Values may be numbers or
 numeric strings (a CSV's); `None`, `""` and NaN are not observed, and
 columns the rules do not read -- a timestamp -- are ignored. `weights` (or
 `--weight COLUMN`) weighs each row, as a time step's duration would.
-`read_rows` reads CSV and TSV with a header, JSON lines, and JSON (a list of
-objects, or an object of columns).
+`read_rows` reads CSV and TSV with a header, JSON lines, and JSON: a list of
+objects, `{"rows": [...], "weight": "<column>"}` (the weight column, 1 where
+a row has none; `openodd-rules-fit` uses it unless `--weight` is given), or
+an object of columns. The editor's graph fits the same JSON in the browser
+([editor.md](editor.md#fitting-the-graph-to-data)).
 
 **How.** The likelihood is maximized by L-BFGS from the rules' current
 values. A row must lie inside a uniform's or a triangular's range, so the

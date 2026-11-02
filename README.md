@@ -59,7 +59,8 @@
   each part's distribution drawn over its input with draggable points, its
   values as a table, and each quantity's distribution as the inputs move. Its
   **Graph** mode edits the same rules as a factor graph: drag a variable onto
-  a factor to make it read the variable, quantities chaining into others. Its **Binding** mode edits how each attribute is measured. With
+  a factor to make it read the variable, quantities chaining into others. Load measured rows as JSON and **Fit** the graph to
+  them by maximum likelihood, in the browser. Its **Binding** mode edits how each attribute is measured. With
   a backend's manifest (`Backend.manifest()`), it follows each attribute from
   the ODD through the binding and the backend's knobs to the rules that read
   it. It is written in Rust and Leptos, with no server

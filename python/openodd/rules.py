@@ -86,6 +86,7 @@ __all__ = [
     "RulesError",
     "RulesFit",
     "fetch_url",
+    "read_data",
     "read_rows",
 ]
 
@@ -565,14 +566,22 @@ def _is_url(location: Union[str, "os.PathLike[str]"]) -> bool:
 
 def read_rows(path: Union[str, "os.PathLike[str]"]) -> list[dict[str, Any]]:
     """The rows of a data file: CSV with a header (``.csv``, ``.tsv``),
-    JSON lines (``.jsonl``, ``.ndjson``: an object per line), or JSON (a
-    list of objects, or an object of columns, each a list). Values are left
+    JSON lines (``.jsonl``, ``.ndjson``: an object per line), or JSON -- a
+    list of objects, ``{"rows": [...], "weight": "<column>"}``, or an object
+    of columns, each a list (the editor reads the same JSON). Values are left
     as read; :meth:`Rules.fit` reads them as numbers.
 
     Raises:
         RulesError: When the file cannot be read or is none of these.
     """
+    return read_data(path)[0]
+
+
+def read_data(path: Union[str, "os.PathLike[str]"]) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """:func:`read_rows`, and the weight column a JSON file names
+    (``"weight"``; ``None`` when it names none)."""
     path = Path(path)
+    weight: Optional[str] = None
     suffix = path.suffix.lower()
     try:
         text = path.read_text(encoding="utf-8-sig")
@@ -581,12 +590,20 @@ def read_rows(path: Union[str, "os.PathLike[str]"]) -> list[dict[str, Any]]:
     try:
         if suffix in (".csv", ".tsv"):
             reader = csv.DictReader(text.splitlines(), delimiter="\t" if suffix == ".tsv" else ",")
-            return [dict(row) for row in reader]
+            return [dict(row) for row in reader], None
         if suffix in (".jsonl", ".ndjson"):
             rows = [json.loads(line) for line in text.splitlines() if line.strip()]
         elif suffix == ".json":
             data = json.loads(text)
-            if isinstance(data, dict):
+            if isinstance(data, dict) and "rows" in data:
+                extra = set(data) - {"rows", "weight"}
+                if extra:
+                    raise RulesError(f"{path}: unknown key {sorted(extra)[0]!r}")
+                weight = data.get("weight")
+                if weight is not None and not isinstance(weight, str):
+                    raise RulesError(f"{path}: \"weight\" names a column: a string")
+                rows = data["rows"]
+            elif isinstance(data, dict):
                 columns = {str(k): list(v) for k, v in data.items()}
                 n = {len(v) for v in columns.values()}
                 if len(n) > 1:
@@ -602,7 +619,7 @@ def read_rows(path: Union[str, "os.PathLike[str]"]) -> list[dict[str, Any]]:
         raise RulesError(f"{path}: {e}") from None
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise RulesError(f"{path}: rows are objects (name: value)")
-    return rows
+    return rows, weight
 
 
 def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules-fit") -> int:
@@ -636,18 +653,26 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
     try:
         rules = Rules.read(args.rules)
         rows: list[dict[str, Any]] = []
+        # Each row's weight column: --weight, else what its JSON file names.
+        columns: list[Optional[str]] = []
         for path in args.data:
-            rows.extend(read_rows(path))
+            part, named = read_data(path)
+            rows.extend(part)
+            columns.extend([args.weight or named] * len(part))
         weights: Optional[list[float]] = None
-        if args.weight:
+        if any(columns):
             weights = []
-            for i, row in enumerate(rows):
+            for i, (row, column) in enumerate(zip(rows, columns)):
+                value = row.get(column) if column else None
+                if value is None or value == "":
+                    if args.weight:
+                        raise RulesError(f"row {i}: no number in the weight column {column!r}")
+                    weights.append(1.0)  # as the editor reads it: 1 where a row has none
+                    continue
                 try:
-                    weights.append(float(row[args.weight]))
-                except (KeyError, TypeError, ValueError):
-                    raise RulesError(
-                        f"row {i}: no number in the weight column {args.weight!r}"
-                    ) from None
+                    weights.append(float(value))
+                except (TypeError, ValueError):
+                    raise RulesError(f"row {i}: {column} is {value!r}, not a number") from None
         fit = rules.fit(
             rows,
             weights,
