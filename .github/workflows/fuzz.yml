@@ -1,0 +1,54 @@
+name: Fuzz
+
+# The randomized tests at length. CI runs them on every push with few,
+# fixed cases (derandomized Hypothesis, a few hundred seeds); here they run
+# many random ones: the Python properties (tests/test_rules_fit_properties.py,
+# OPENODD_FUZZ_EXAMPLES) and the Rust ones (OPENODD_FUZZ_SEEDS) -- random
+# distributions (src/rules.rs) and random fits written into the editor's
+# document and read back (crates/openodd-editor/src/rules_doc.rs). A failure
+# names its case: add it as a unit test and an @example, then fix it.
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"   # Mondays, 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      examples:
+        description: Random examples per Python property
+        default: "3000"
+      seeds:
+        description: Random seeds per Rust randomized test
+        default: "20000"
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml
+      - run: uv run --no-project maturin develop --release
+      - name: Python properties, random examples
+        env:
+          OPENODD_FUZZ_EXAMPLES: ${{ github.event.inputs.examples || '3000' }}
+        run: uv run --no-project pytest -q tests/test_rules_fit_properties.py
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Rust randomized tests, many seeds
+        env:
+          OPENODD_FUZZ_SEEDS: ${{ github.event.inputs.seeds || '20000' }}
+        run: |
+          cargo test --release -p openodd --lib random_
+          cargo test --release -p openodd-editor --lib random_
