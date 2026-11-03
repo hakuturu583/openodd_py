@@ -30,9 +30,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib claude-agent-sdk
+      - run: uv venv && uv pip install maturin pytest hypothesis pyyaml html5lib claude-agent-sdk mypy
       - run: uv run --no-project maturin develop
       - run: uv run --no-project pytest -q
+      # The core's type stub: what every project type-checking against
+      # openodd reads (tests/test_core_stub.py checks it names the core).
+      - run: uv run --no-project mypy python/openodd/_core.pyi
 
   # The browser build: the core without its `native` feature and the
   # wasm-bindgen crate, for wasm32-unknown-unknown, and the viewer's tests run
