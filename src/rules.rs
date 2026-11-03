@@ -118,12 +118,17 @@ impl Family {
     }
 
     /// How wide the distribution of parameters `p` is: `high - low`, or a
-    /// normal's `sd`.
+    /// normal's spread as truncated -- its interquartile range over 1.349,
+    /// which is `sd` untruncated -- so a mean pushed far outside its range,
+    /// which squeezes the distribution against an end, narrows it too.
     pub fn spread(self, p: &[f64]) -> f64 {
         match self {
             Family::Uniform => p[1] - p[0],
             Family::Triangular => p[2] - p[0],
-            Family::Normal => p[1],
+            Family::Normal => {
+                let d = self.dist(p);
+                (d.quantile(0.75) - d.quantile(0.25)) / 1.348_979_500_392_163_4
+            }
         }
     }
 
@@ -242,27 +247,23 @@ impl Dist {
                 let c = (mode - low) / w;
                 if p < c {
                     low + (p * w * (mode - low)).sqrt()
+                } else if mode >= high {
+                    high
                 } else {
-                    high - ((1.0 - p) * w * (high - mode)).sqrt()
+                    // From the mode up, not `high - sqrt(...)`, which cancels
+                    // when the mode is tiny next to `high`:
+                    // 1 - sqrt(1 - d) = d / (1 + sqrt(1 - d)).
+                    let d = ((p - c) / (1.0 - c)).clamp(0.0, 1.0);
+                    mode + (high - mode) * (d / (1.0 + (1.0 - d).sqrt()))
                 }
+                .clamp(low, high)
             }
             Dist::Normal {
                 mean,
                 sd,
                 low,
                 high,
-            } => {
-                let (a, b) = ((low - mean) / sd, (high - mean) / sd);
-                // Work in the tail the interval sits in, for precision.
-                let z = if a > 0.0 {
-                    let (qa, qb) = (upper(a), upper(b));
-                    -inverse_phi(qa - p * (qa - qb))
-                } else {
-                    let (pa, pb) = (phi(a), phi(b));
-                    inverse_phi(pa + p * (pb - pa))
-                };
-                (mean + sd * z).clamp(low, high)
-            }
+            } => Truncated::new(mean, sd, low, high).quantile(p),
         }
     }
 
@@ -278,11 +279,17 @@ impl Dist {
         match *self {
             Dist::Uniform { low, high } => (x - low) / (high - low),
             Dist::Triangular { low, mode, high } => {
+                // Ratios, not a product's quotient: `w * (mode - low)`
+                // underflows where the two are tiny.
                 let w = high - low;
                 if mode > low && x <= mode {
-                    (x - low).powi(2) / (w * (mode - low))
+                    ((x - low) / w) * ((x - low) / (mode - low))
                 } else {
-                    1.0 - (high - x).powi(2) / (w * (high - mode))
+                    // From the mode up: c + (1 - c)(1 - r^2), with
+                    // 1 - r^2 = u (2 - u), rather than 1 - ..., which cancels.
+                    let c = (mode - low) / w;
+                    let u = (x - mode) / (high - mode);
+                    c + (1.0 - c) * u * (2.0 - u)
                 }
             }
             Dist::Normal {
@@ -290,14 +297,7 @@ impl Dist {
                 sd,
                 low,
                 high,
-            } => {
-                let (a, b, z) = ((low - mean) / sd, (high - mean) / sd, (x - mean) / sd);
-                if a > 0.0 {
-                    (upper(a) - upper(z)) / (upper(a) - upper(b))
-                } else {
-                    (phi(z) - phi(a)) / (phi(b) - phi(a))
-                }
-            }
+            } => Truncated::new(mean, sd, low, high).cdf(x),
         }
         .clamp(0.0, 1.0)
     }
@@ -316,9 +316,9 @@ impl Dist {
             Dist::Triangular { low, mode, high } => {
                 let w = high - low;
                 if x < mode {
-                    2.0 * (x - low) / (w * (mode - low))
+                    2.0 / w * ((x - low) / (mode - low))
                 } else if x > mode {
-                    2.0 * (high - x) / (w * (high - mode))
+                    2.0 / w * ((high - x) / (high - mode))
                 } else {
                     2.0 / w
                 }
@@ -329,9 +329,8 @@ impl Dist {
                 low,
                 high,
             } => {
-                let (a, b, z) = ((low - mean) / sd, (high - mean) / sd, (x - mean) / sd);
-                let mass = normal_mass(a, b);
-                density(z) / (sd * mass)
+                let s = Truncated::new(mean, sd, low, high);
+                (s.ln_pdf((x - mean) / sd) - sd.ln()).exp()
             }
         }
     }
@@ -346,9 +345,8 @@ impl Dist {
                 low,
                 high,
             } => {
-                let (a, b) = ((low - mean) / sd, (high - mean) / sd);
-                let mass = normal_mass(a, b);
-                (mean + sd * (density(a) - density(b)) / mass).clamp(low, high)
+                let s = Truncated::new(mean, sd, low, high);
+                (mean + sd * (s.density_share(s.a) - s.density_share(s.b))).clamp(low, high)
             }
         }
     }
@@ -356,14 +354,208 @@ impl Dist {
 
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
 
-/// The standard normal's mass between `a` and `b` (`a <= b`), worked out in
-/// the tail the interval sits in, for precision.
-pub(crate) fn normal_mass(a: f64, b: f64) -> f64 {
-    if a > 0.0 {
-        upper(a) - upper(b)
-    } else {
-        phi(b) - phi(a)
+/// A normal distribution truncated to `low..high`, worked in logarithms:
+/// a range far in a tail, where its mass underflows to 0 -- a mean many
+/// standard deviations outside it -- still reads. A range in the lower tail
+/// is worked as its mirror in the upper; in a tail, a value is placed by its
+/// offset from the range's near end, which keeps its digits where `mean + sd
+/// * z` would cancel.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Truncated {
+    mean: f64,
+    sd: f64,
+    low: f64,
+    high: f64,
+    /// The ends, standardized.
+    pub a: f64,
+    pub b: f64,
+    /// Whether the range is worked as its mirror, `-b..-a`.
+    flip: bool,
+    /// The near end worked from, standardized: above 0 in a tail.
+    lo: f64,
+    /// The range's width, standardized.
+    width: f64,
+    /// The log of the standard normal's mass between the ends.
+    pub ln_mass: f64,
+}
+
+impl Truncated {
+    pub fn new(mean: f64, sd: f64, low: f64, high: f64) -> Self {
+        let (a, b) = ((low - mean) / sd, (high - mean) / sd);
+        let flip = b < 0.0;
+        let lo = if flip { -b } else { a };
+        let width = (high - low) / sd;
+        let ln_mass = if lo > 0.0 {
+            ln_upper(lo) + (-ln_upper_from(lo, width).exp_m1()).ln()
+        } else {
+            (phi(b) - phi(a)).ln()
+        };
+        Truncated {
+            mean,
+            sd,
+            low,
+            high,
+            a,
+            b,
+            flip,
+            lo,
+            width,
+            ln_mass,
+        }
     }
+
+    fn in_tail(&self) -> bool {
+        self.lo > 0.0
+    }
+
+    /// The share of the mass at or below `x`.
+    pub fn cdf(&self, x: f64) -> f64 {
+        let c = if self.in_tail() {
+            let d = if self.flip {
+                self.high - x
+            } else {
+                x - self.low
+            } / self.sd;
+            let c = ln_upper_from(self.lo, d.clamp(0.0, self.width)).exp_m1()
+                / ln_upper_from(self.lo, self.width).exp_m1();
+            if self.flip {
+                1.0 - c
+            } else {
+                c
+            }
+        } else {
+            let z = ((x - self.mean) / self.sd).clamp(self.a, self.b);
+            (phi(z) - phi(self.a)) / (phi(self.b) - phi(self.a))
+        };
+        c.clamp(0.0, 1.0)
+    }
+
+    /// The value with a share `p` of the mass below it.
+    pub fn quantile(&self, p: f64) -> f64 {
+        let x = if self.in_tail() {
+            let q = if self.flip { 1.0 - p } else { p };
+            let t = (q * ln_upper_from(self.lo, self.width).exp_m1()).ln_1p();
+            let d = offset_for(self.lo, t).clamp(0.0, self.width);
+            if self.flip {
+                self.high - self.sd * d
+            } else {
+                self.low + self.sd * d
+            }
+        } else {
+            let (pa, pb) = (phi(self.a), phi(self.b));
+            self.mean + self.sd * inverse_phi(pa + p * (pb - pa))
+        };
+        x.clamp(self.low, self.high)
+    }
+
+    /// The log of the standard density at `z` over the mass.
+    pub fn ln_pdf(&self, z: f64) -> f64 {
+        ln_density(z) - self.ln_mass
+    }
+
+    /// The standard density at `z` over the mass: `density(z) / mass`, 0 at
+    /// an infinite `z`.
+    pub fn density_share(&self, z: f64) -> f64 {
+        (ln_density(z) - self.ln_mass).exp()
+    }
+}
+
+/// The log of the standard normal's density.
+fn ln_density(z: f64) -> f64 {
+    -0.5 * z * z - 0.5 * (2.0 * std::f64::consts::PI).ln()
+}
+
+/// The log of the standard normal's upper tail, `ln(1 - phi(z))`: from
+/// `erfc` while that has the precision, then its asymptotic series.
+fn ln_upper(z: f64) -> f64 {
+    if z < 35.0 {
+        return upper(z).ln();
+    }
+    if z == f64::INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    ln_density(z) - z.ln() + tail_series(z)
+}
+
+/// `ln_upper(lo + d) - ln_upper(lo)` (`d >= 0`): far in the tail, where
+/// each is a large number and their difference small, from the series of
+/// the difference, which keeps its digits.
+fn ln_upper_from(lo: f64, d: f64) -> f64 {
+    if d == f64::INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    if lo < 35.0 {
+        // A small step: its Taylor series, from the hazard h = density /
+        // upper (h' = h (h - z)), rather than a difference that cancels.
+        let h = (ln_density(lo) - ln_upper(lo)).exp();
+        if h * d < 1e-4 {
+            let k = h - lo;
+            return -h * d - h * k * d * d / 2.0 - h * (k * k + h * k - 1.0) * d * d * d / 6.0;
+        }
+        return ln_upper(lo + d) - ln_upper(lo);
+    }
+    -0.5 * d * (2.0 * lo + d) - (d / lo).ln_1p() + tail_series(lo + d) - tail_series(lo)
+}
+
+/// The log of the upper tail's asymptotic series beyond the density over
+/// `z`: `ln(1 - 1/z^2 + 3/z^4 - 15/z^6)`.
+fn tail_series(z: f64) -> f64 {
+    let r = 1.0 / (z * z);
+    (1.0 - r + 3.0 * r * r - 15.0 * r * r * r).ln()
+}
+
+/// The `d >= 0` with `ln_upper_from(lo, d) = t` (`t <= 0`; `lo > 0`).
+fn offset_for(lo: f64, t: f64) -> f64 {
+    if t == f64::NEG_INFINITY {
+        return f64::INFINITY;
+    }
+    if t >= 0.0 {
+        return 0.0;
+    }
+    let mut d = if lo >= 35.0 {
+        -t / lo
+    } else {
+        inverse_ln_upper(ln_upper(lo) + t) - lo
+    }
+    .max(0.0);
+    // Newton's method; the slope of ln_upper is -density / upper.
+    for _ in 0..60 {
+        let z = lo + d;
+        let slope = if z >= 35.0 {
+            -z / tail_series(z).exp()
+        } else {
+            -(ln_density(z) - ln_upper(z)).exp()
+        };
+        let step = (ln_upper_from(lo, d) - t) / slope;
+        if !step.is_finite() {
+            break;
+        }
+        d = (d - step).max(0.0);
+        if step.abs() <= 1e-15 * d.max(f64::MIN_POSITIVE) {
+            break;
+        }
+    }
+    d
+}
+
+/// The `z` whose upper tail's log is `l`.
+fn inverse_ln_upper(l: f64) -> f64 {
+    if l == f64::NEG_INFINITY {
+        return f64::INFINITY;
+    }
+    if l > -600.0 {
+        return -inverse_phi(l.exp());
+    }
+    // Newton's method on ln_upper, whose slope is -density / upper.
+    let mut z = (-2.0 * l).sqrt();
+    for _ in 0..60 {
+        let f = ln_upper(z) - l;
+        if f.abs() <= 1e-15 * l.abs() {
+            break;
+        }
+        z += f / (ln_density(z) - ln_upper(z)).exp();
+    }
+    z
 }
 
 /// The standard normal's distribution function.
@@ -374,10 +566,6 @@ pub(crate) fn phi(z: f64) -> f64 {
 /// Its upper tail, 1 - phi(z), without cancelling.
 pub(crate) fn upper(z: f64) -> f64 {
     0.5 * libm::erfc(z / SQRT_2)
-}
-
-pub(crate) fn density(z: f64) -> f64 {
-    (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt()
 }
 
 /// The standard normal's quantile function: Acklam's approximation, then a
@@ -433,10 +621,16 @@ fn inverse_phi(p: f64) -> f64 {
         -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
             / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     };
-    // One Halley step on phi(x) - p.
+    // One Halley step on phi(x) - p -- but not where exp(x^2 / 2)
+    // overflows (p subnormal, x below -37), which would make it NaN.
     let e = phi(x) - p;
     let u = e * (2.0 * std::f64::consts::PI).sqrt() * (x * x / 2.0).exp();
-    x - u / (1.0 + x * u / 2.0)
+    let refined = x - u / (1.0 + x * u / 2.0);
+    if refined.is_finite() {
+        refined
+    } else {
+        x
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2085,6 +2279,281 @@ quantities:
             assert!(
                 err.contains("quantities.q.parts.p.fixed") && err.contains(says),
                 "{bad}: {err}"
+            );
+        }
+    }
+
+    /// How many random cases a randomized test runs: `OPENODD_FUZZ_SEEDS`,
+    /// else `default` (the weekly fuzz workflow sets it high).
+    pub(crate) fn fuzz_seeds(default: u64) -> u64 {
+        std::env::var("OPENODD_FUZZ_SEEDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
+    }
+
+    #[test]
+    fn random_distributions_read_everywhere() {
+        use rand::{Rng, SeedableRng};
+        // Any family at any scale; a normal's mean up to 200 standard
+        // deviations outside its range: quantiles rise and stay in the
+        // range, cdf undoes them, and every summary is a number.
+        for seed in 0..fuzz_seeds(2000) {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            let scale = 10f64.powi(rng.gen_range(-8..=8));
+            let low = rng.gen_range(-100.0..100.0) * scale;
+            let width = 10f64.powf(rng.gen_range(-6.0..2.0)) * scale;
+            let high = low + width;
+            if !(high > low) {
+                continue;
+            }
+            let d = match rng.gen_range(0..3) {
+                0 => Dist::Uniform { low, high },
+                1 => Dist::Triangular {
+                    low,
+                    mode: low + rng.gen::<f64>() * width,
+                    high,
+                },
+                _ => {
+                    let sd = 10f64.powf(rng.gen_range(-6.0..2.0)) * scale;
+                    Dist::Normal {
+                        mean: low + rng.gen_range(-200.0..200.0) * sd,
+                        sd,
+                        low,
+                        high,
+                    }
+                }
+            };
+            let mut ps: Vec<f64> = (0..6).map(|_| rng.gen()).collect();
+            ps.extend([0.0, 1.0]);
+            ps.sort_by(f64::total_cmp);
+            let xs: Vec<f64> = ps.iter().map(|p| d.quantile(*p)).collect();
+            for (p, x) in ps.iter().zip(&xs) {
+                assert!(
+                    x.is_finite() && low <= *x && *x <= high,
+                    "seed {seed}: {d:?} at {p}: {x}"
+                );
+                let c = d.cdf(*x);
+                assert!(
+                    (0.0..=1.0).contains(&c),
+                    "seed {seed}: {d:?} cdf({x}) = {c}"
+                );
+                if width > 1e-9 * low.abs().max(high.abs()) && *p > 1e-6 && *p < 1.0 - 1e-6 {
+                    let again = d.quantile(c);
+                    assert!(
+                        (c - p).abs() < 1e-6 || (x - again).abs() <= 1e-9 * x.abs().max(width),
+                        "seed {seed}: {d:?} at {p}: x {x}, cdf {c}"
+                    );
+                }
+                assert!(
+                    d.pdf(*x).is_finite() || d.pdf(*x) == f64::INFINITY,
+                    "seed {seed}"
+                );
+            }
+            assert!(
+                xs.windows(2).all(|w| w[0] <= w[1]),
+                "seed {seed}: {d:?}: {xs:?}"
+            );
+            let m = d.mean();
+            assert!(
+                m.is_finite() && low <= m && m <= high,
+                "seed {seed}: {d:?}: mean {m}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_range_far_in_a_tail_reads_to_its_digits() {
+        // Found by fuzzing: 153 standard deviations below the mean, 1e-6
+        // wide. The tail's logarithms are near -11700 there, and their
+        // difference lost its digits: cdf(quantile(p)) was off by 1e-6.
+        let d = Dist::Normal {
+            mean: 2295.0,
+            sd: 15.0,
+            low: 0.0,
+            high: 1e-6,
+        };
+        for p in [1e-6, 0.1, 0.5, 0.9, 1.0 - 1e-6] {
+            let x = d.quantile(p);
+            assert!((0.0..=1e-6).contains(&x), "{p}: {x}");
+            assert!((d.cdf(x) - p).abs() < 1e-9, "{p}: {}", d.cdf(x));
+        }
+        // All but uniform that narrow: the density over the range all but 1e6.
+        assert!((d.pdf(5e-7) - 1e6).abs() < 1e6 * 1e-3, "{}", d.pdf(5e-7));
+    }
+
+    #[test]
+    fn a_triangular_with_a_subnormal_side_reads() {
+        // Found by fuzzing: w * (mode - low) underflowed to 0, and the
+        // distribution function read 0 / 0.
+        let d = Dist::Triangular {
+            low: 0.0,
+            mode: 2.22507384e-316,
+            high: 1e-8,
+        };
+        for x in [0.0, 1e-317, 1e-9, 1e-8] {
+            let c = d.cdf(x);
+            assert!((0.0..=1.0).contains(&c), "{x}: {c}");
+            assert!(d.pdf(x).is_finite(), "{x}: {}", d.pdf(x));
+        }
+    }
+
+    #[test]
+    fn a_quantile_rises_from_a_tails_end() {
+        // Found by fuzzing: the range four standard deviations above the
+        // mean. Near its low end the tail's logarithms were differenced and
+        // cancelled: quantile(0) read 1.35e-21 and quantile(2.2e-16) 0.
+        let d = Dist::Normal {
+            mean: -0.00027044812011718753,
+            sd: 6.83125e-05,
+            low: 0.0,
+            high: 2.9e-05,
+        };
+        let ps = [
+            0.0,
+            1e-300,
+            1e-16,
+            2.220446049250313e-16,
+            1e-12,
+            1e-8,
+            1e-4,
+            0.5,
+        ];
+        let xs: Vec<f64> = ps.iter().map(|p| d.quantile(*p)).collect();
+        assert_eq!(xs[0], 0.0);
+        assert!(xs.windows(2).all(|w| w[0] <= w[1]), "{xs:?}");
+        for (p, x) in ps.iter().zip(&xs).skip(2) {
+            assert!((d.cdf(*x) - p).abs() <= 1e-9 * p, "{p}: {}", d.cdf(*x));
+        }
+    }
+
+    #[test]
+    fn a_range_reaching_far_below_the_mean_reads_at_its_low_end() {
+        // Found by fuzzing: 38 standard deviations below the mean, phi(a) is
+        // subnormal, and the Halley step of inverse_phi overflowed to NaN.
+        let d = Dist::Normal {
+            mean: 4.75,
+            sd: 0.125,
+            low: 0.0,
+            high: 5.0,
+        };
+        assert_eq!(d.quantile(0.0), 0.0);
+        assert!(d.quantile(1e-300).is_finite());
+        assert!((d.quantile(0.5) - 4.746435384176135).abs() < 1e-12);
+        assert!(inverse_phi(1e-320).is_finite());
+    }
+
+    #[test]
+    fn a_triangular_quantile_stays_in_its_range() {
+        // Found by fuzzing: low and mode tiny next to high, high - sqrt(...)
+        // cancelled to 0, below low.
+        let d = Dist::Triangular {
+            low: 7.547092539411937e-281,
+            mode: 7.547092539411937e-281,
+            high: 1.0,
+        };
+        for p in [0.0, 1e-12, 0.5, 1.0] {
+            let x = d.quantile(p);
+            assert!((d.support().0..=d.support().1).contains(&x), "{p}: {x}");
+        }
+        assert_eq!(d.quantile(0.0), 7.547092539411937e-281);
+        // Found by fuzzing: a mode tiny next to high; just above it, high -
+        // sqrt(...) cancelled to 0, below the quantiles just under it.
+        let d = Dist::Triangular {
+            low: 0.0,
+            mode: 8.612787633870585e-107,
+            high: 2000.0,
+        };
+        let c = 8.612787633870585e-107 / 2000.0;
+        let below = d.quantile(c * 0.999);
+        let above = d.quantile(c * 1.001);
+        assert!(
+            below <= above && above >= 8.612787633870585e-107,
+            "{below} {above}"
+        );
+        for p in [c * 0.5, c, c * 2.0, 0.25, 0.75] {
+            assert!(
+                (d.cdf(d.quantile(p)) - p).abs() <= 1e-12 * p.max(1e-300) + 1e-15,
+                "{p}"
+            );
+        }
+        // The mode at an end.
+        for mode in [1.0, 0.0] {
+            let d = Dist::Triangular {
+                low: 0.0,
+                mode,
+                high: 1.0,
+            };
+            for p in [0.0, 0.5, 1.0] {
+                assert!(d.cdf(d.quantile(p)).is_finite(), "{mode} {p}");
+            }
+            assert_eq!((d.quantile(0.0), d.quantile(1.0)), (0.0, 1.0));
+        }
+    }
+
+    #[test]
+    fn a_normal_far_from_its_range_still_reads() {
+        // The range 0..1 some 38 standard deviations above the mean: its mass
+        // underflows, and the distribution is all but an exponential from
+        // the low end, at a rate of (low - mean) / sd^2.
+        let d = Dist::Normal {
+            mean: -0.605,
+            sd: 0.0157,
+            low: 0.0,
+            high: 1.0,
+        };
+        let rate = 0.605 / (0.0157 * 0.0157);
+        for p in [0.0, 1e-9, 0.1, 0.5, 0.9, 1.0 - 1e-9, 1.0] {
+            let x = d.quantile(p);
+            assert!(x.is_finite() && (0.0..=1.0).contains(&x), "{p}: {x}");
+            if p > 0.0 && p < 1.0 {
+                assert!((d.cdf(x) - p).abs() < 1e-9, "{p}: cdf {}", d.cdf(x));
+                // The exponential holds near the end (it leaves out a
+                // quadratic term that grows further in).
+                let exponential = -(1.0 - p).ln() / rate;
+                assert!(
+                    p > 0.9 || (x - exponential).abs() < 2e-3 * exponential.max(1e-12) + 1e-12,
+                    "{p}: {x} vs {exponential}"
+                );
+            }
+        }
+        assert_eq!(d.quantile(0.0), 0.0);
+        assert!(
+            d.pdf(0.0).is_finite() && (d.pdf(0.0) - rate).abs() < 1e-3 * rate,
+            "{}",
+            d.pdf(0.0)
+        );
+        assert!(
+            d.mean().is_finite() && (d.mean() - 1.0 / rate).abs() < 2e-3 / rate,
+            "{}",
+            d.mean()
+        );
+        // Mirrored: a range far below the mean.
+        let m = Dist::Normal {
+            mean: 0.605,
+            sd: 0.0157,
+            low: -1.0,
+            high: 0.0,
+        };
+        for p in [0.1, 0.5, 0.9] {
+            assert!((m.quantile(p) + d.quantile(1.0 - p)).abs() < 1e-12, "{p}");
+            assert!((m.cdf(m.quantile(p)) - p).abs() < 1e-9);
+        }
+        // Either side of where the tail's series takes over (z = 35), the
+        // same as the closed form gives.
+        for a in [34.0, 34.99, 35.01, 36.0] {
+            let d = Dist::Normal {
+                mean: -a,
+                sd: 1.0,
+                low: 0.0,
+                high: 1.0,
+            };
+            let x = d.quantile(0.5);
+            assert!((d.cdf(x) - 0.5).abs() < 1e-9, "{a}");
+            // Exponential at rate a, its quadratic corrected: within 1/a^2.
+            assert!(
+                (x - 2f64.ln() / a).abs() < 1.5 * 2f64.ln() / (a * a * a),
+                "{a}: {x}"
             );
         }
     }
