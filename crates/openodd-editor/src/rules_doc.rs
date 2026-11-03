@@ -38,6 +38,10 @@ pub struct DistDoc {
     pub family: Family,
     /// In [`Family::params`]' order.
     pub params: Vec<ParamDoc>,
+    /// The grid the values are laid over, where the file does not name the
+    /// points (an extended file gives them): how the values nest. `None`:
+    /// the part's points say.
+    pub shape: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,6 +96,7 @@ impl PartDoc {
             dist: Some(DistDoc {
                 family: Family::Uniform,
                 params: vec![param("low", vec![0.0; 3]), param("high", vec![1.0; 3])],
+                shape: None,
             }),
             text: String::new(),
             fixed: FixedDoc::None,
@@ -378,14 +383,13 @@ pub fn convert(d: &Dist, to: Family) -> Vec<f64> {
     }
 }
 
-/// A number without the float noise of arithmetic (`0.30000000000000004`).
+/// A number without the float noise of arithmetic (`0.30000000000000004`):
+/// eleven significant digits, whatever its size.
 pub fn tidy(v: f64) -> f64 {
     if !v.is_finite() || v == 0.0 {
         return v;
     }
-    let digits = 10 - v.abs().log10().floor() as i32;
-    let p = 10f64.powi(digits.clamp(0, 15));
-    (v * p).round() / p
+    format!("{v:.10e}").parse().unwrap_or(v)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -435,16 +439,19 @@ impl RulesDoc {
                 }
             };
             let parts = &mut self.quantities[i].parts;
-            for fp in fq.parts {
+            for mut fp in fq.parts {
+                // The values' grid, from the overlay's points; the points
+                // themselves stay where they are written (an extended file),
+                // as written: the editor's ten digits would move them.
+                let grid = fp
+                    .axes
+                    .take()
+                    .map(|a| a.iter().map(|x| x.points.len()).collect());
+                if let Some(d) = &mut fp.dist {
+                    d.shape = grid;
+                }
                 match parts.iter_mut().find(|p| p.name == fp.name) {
-                    Some(p) => {
-                        // Points an extended file gives come along: the
-                        // values are laid out over them.
-                        if p.axes.is_none() {
-                            p.axes = fp.axes;
-                        }
-                        p.dist = fp.dist;
-                    }
+                    Some(p) => p.dist = fp.dist,
                     None => parts.push(fp),
                 }
             }
@@ -618,6 +625,7 @@ impl RulesDoc {
                         .axes
                         .as_ref()
                         .map(|a| a.iter().map(|x| x.points.len()).collect())
+                        .or_else(|| d.shape.clone())
                         .unwrap_or_else(|| vec![d.params.first().map_or(0, |x| x.values.len())]);
                     for param in &d.params {
                         let all_same = param.values.windows(2).all(|w| w[0] == w[1]);
@@ -743,6 +751,8 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
         let fields = mapping(v, &here)?;
         let size = p.size();
         let mut params = vec![];
+        // Without points, the nesting of the values written says the grid.
+        let mut shape = None;
         for n in family.params() {
             let raw = fields
                 .iter()
@@ -754,10 +764,15 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
                     let x = number(raw.unwrap()).unwrap_or(0.0);
                     (vec![x; size.max(1)], true)
                 }
-                Some(v) => (
-                    flatten(v).ok_or_else(|| format!("{here}.{n}: numbers"))?,
-                    false,
-                ),
+                Some(v) => {
+                    if p.axes.is_none() && shape.is_none() {
+                        shape = Some(nesting(v));
+                    }
+                    (
+                        flatten(v).ok_or_else(|| format!("{here}.{n}: numbers"))?,
+                        false,
+                    )
+                }
             };
             params.push(ParamDoc {
                 name: n.to_string(),
@@ -765,9 +780,28 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
                 constant,
             });
         }
-        p.dist = Some(DistDoc { family, params });
+        p.dist = Some(DistDoc {
+            family,
+            params,
+            shape,
+        });
     }
     Ok(p)
+}
+
+/// How a value written as nested lists nests: `[[1, 2], [3, 4]]` is
+/// `[2, 2]`.
+fn nesting(v: &Value) -> Vec<usize> {
+    match v {
+        Value::Sequence(items) => {
+            let mut out = vec![items.len()];
+            if let Some(first) = items.first() {
+                out.extend(nesting(first));
+            }
+            out
+        }
+        _ => vec![],
+    }
 }
 
 fn flatten(v: &Value) -> Option<Vec<f64>> {
@@ -869,6 +903,10 @@ pub fn num(v: f64) -> String {
     let v = tidy(v);
     if v == v.trunc() && v.abs() < 1e15 {
         format!("{}", v as i64)
+    } else if v.abs() >= 1e15 || (v != 0.0 && v.abs() < 1e-9) {
+        // With an exponent: written out, 2.6e20 is an integer too large
+        // for the reader, and 1e-300 three hundred zeros.
+        format!("{v:e}")
     } else {
         format!("{v}")
     }
@@ -1058,6 +1096,238 @@ mod tests {
         let want = &fit.rules.quantities["q"].parts[0].values;
         for (g, w) in got.iter().flatten().zip(want.iter().flatten()) {
             assert!((g - w).abs() <= 1e-9 * w.abs().max(1.0), "{g} vs {w}");
+        }
+    }
+
+    /// A random rule file: a quantity or two (the second may read the
+    /// first), each one to three parts of any family over one or two
+    /// inputs, at random points; values scaled by a power of ten.
+    fn random_rules(rng: &mut rand_chacha::ChaCha8Rng) -> String {
+        use rand::Rng;
+        let scale = 10f64.powi(rng.gen_range(-6..=6));
+        let mut out = String::from("version: 2\nquantities:\n");
+        for q in 0..rng.gen_range(1..=2) {
+            out.push_str(&format!(
+                "  q{q}:\n    combine: {}\n    parts:\n",
+                if rng.gen() { "min" } else { "max" }
+            ));
+            for p in 0..rng.gen_range(1..=3) {
+                let mut inputs = vec!["a", "b"];
+                if q == 1 && rng.gen() {
+                    inputs.push("q0");
+                }
+                let n_axes = rng.gen_range(1..=2);
+                let mut axes: Vec<(&str, Vec<f64>)> = Vec::new();
+                for _ in 0..n_axes {
+                    let input = inputs.remove(rng.gen_range(0..inputs.len()));
+                    // Points as a file writes them: a few digits (the
+                    // editor keeps eleven).
+                    let mut pts: Vec<f64> = (0..rng.gen_range(1..=3))
+                        .map(|_| {
+                            let v = rng.gen_range(-100.0..100.0f64) * scale;
+                            format!("{v:.5e}").parse().unwrap()
+                        })
+                        .collect();
+                    pts.sort_by(|x, y| x.total_cmp(y));
+                    pts.dedup();
+                    axes.push((input, pts));
+                }
+                let size: usize = axes.iter().map(|a| a.1.len()).product();
+                let family = ["uniform", "triangular", "normal"][rng.gen_range(0..3)];
+                let mut cols: Vec<(&str, Vec<f64>)> = Vec::new();
+                for _ in 0..size {
+                    let low = rng.gen_range(-50.0..50.0f64);
+                    let w = rng.gen_range(0.1..50.0f64);
+                    let vals: Vec<(&str, f64)> = match family {
+                        "uniform" => vec![("low", low), ("high", low + w)],
+                        "triangular" => vec![
+                            ("low", low),
+                            ("mode", low + rng.gen::<f64>() * w),
+                            ("high", low + w),
+                        ],
+                        _ => vec![
+                            ("mean", low + rng.gen_range(-0.5..1.5) * w),
+                            ("sd", rng.gen_range(0.05..20.0)),
+                            ("low", low),
+                            ("high", low + w),
+                        ],
+                    };
+                    for (k, v) in vals {
+                        match cols.iter_mut().find(|c| c.0 == k) {
+                            Some(c) => c.1.push(v * scale),
+                            None => cols.push((k, vec![v * scale])),
+                        }
+                    }
+                }
+                let shape: Vec<usize> = axes.iter().map(|a| a.1.len()).collect();
+                let at: Vec<String> = axes
+                    .iter()
+                    .map(|(i, pts)| {
+                        format!(
+                            "{i}: {}",
+                            openodd::rules_fit::nested_list(pts, &[pts.len()], &|v| format!(
+                                "{v:?}"
+                            ))
+                        )
+                    })
+                    .collect();
+                out.push_str(&format!(
+                    "      p{p}:\n        at: {{{}}}\n        {family}:\n",
+                    at.join(", ")
+                ));
+                for (k, v) in cols {
+                    out.push_str(&format!(
+                        "          {k}: {}\n",
+                        openodd::rules_fit::nested_list(&v, &shape, &|v| format!("{v:?}"))
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn random_fits_round_trip_through_the_document() {
+        use rand::{Rng, SeedableRng};
+        // Each a fit of random rules to rows they give, some values
+        // missing, written into the document -- as the file, or over it
+        // when an extended file gives the parts -- and read back.
+        // OPENODD_FUZZ_SEEDS sets how many (the weekly fuzz workflow, high).
+        let seeds = std::env::var("OPENODD_FUZZ_SEEDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120u64);
+        for seed in 0..seeds {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            let base = random_rules(&mut rng);
+            let Ok(set) = RuleSet::parse(&base, "base.yaml") else {
+                continue;
+            };
+            let mut rows = Vec::new();
+            for _ in 0..rng.gen_range(0..40) {
+                let mut given: IndexMap<String, f64> = IndexMap::new();
+                for i in ["a", "b"] {
+                    if let Some(a) = set
+                        .quantities
+                        .values()
+                        .flat_map(|q| &q.parts)
+                        .flat_map(|p| &p.axes)
+                        .find(|a| a.input == i)
+                    {
+                        let (lo, hi) = (a.points[0], *a.points.last().unwrap());
+                        given.insert(i.into(), lo + (hi - lo) * rng.gen_range(-0.2..1.2));
+                    }
+                }
+                let quantiles: IndexMap<String, f64> = set
+                    .quantities
+                    .keys()
+                    .map(|q| (q.clone(), rng.gen()))
+                    .collect();
+                let Ok(sampled) = set.sample(&given, &quantiles) else {
+                    continue;
+                };
+                let mut row = given;
+                row.extend(sampled);
+                row.retain(|_, _| rng.gen_range(0..8) != 0);
+                rows.push(row);
+            }
+            let Ok(fit) = set.fit(&rows, None, &Default::default()) else {
+                continue;
+            };
+            let extended = rng.gen::<bool>();
+            let (doc_text, library) = if extended {
+                // A file over the base naming only the quantities.
+                let names: Vec<String> = set
+                    .quantities
+                    .keys()
+                    .map(|q| format!("  {q}: {{}}"))
+                    .collect();
+                (
+                    format!(
+                        "version: 2\nextends: base.yaml\nquantities:\n{}\n",
+                        names.join("\n")
+                    ),
+                    vec![("base.yaml".to_string(), base.clone())],
+                )
+            } else {
+                (base.clone(), vec![])
+            };
+            let mut doc = RulesDoc::from_yaml(&doc_text).unwrap();
+            doc.apply_overlay(&fit.text(None)).unwrap();
+            let written = doc.to_yaml().unwrap();
+            let again = check(&written, "doc.yaml", &library)
+                .unwrap_or_else(|e| panic!("seed {seed}: {e}\n{written}"));
+            for (name, q) in &fit.rules.quantities {
+                let got = &again.quantities[name];
+                for (gp, wp) in got.parts.iter().zip(&q.parts) {
+                    // The editor writes ten digits, points too.
+                    for (ga, wa) in gp.axes.iter().zip(&wp.axes) {
+                        assert_eq!(ga.input, wa.input, "seed {seed}");
+                        for (g, w) in ga.points.iter().zip(&wa.points) {
+                            assert!((g - w).abs() <= 1e-9 * w.abs(), "seed {seed}: {g} vs {w}");
+                        }
+                    }
+                    for (g, w) in gp.values.iter().flatten().zip(wp.values.iter().flatten()) {
+                        assert!(
+                            (g - w).abs() <= 1e-9 * w.abs().max(f64::MIN_POSITIVE),
+                            "seed {seed}: {name}.{}: {g} vs {w}",
+                            gp.name
+                        );
+                    }
+                }
+            }
+            // Every row the fit found possible stays possible as the
+            // editor writes the rules (ten digits).
+            let cal = again.calibration(&rows, None).unwrap();
+            for q in &fit.quantities {
+                if q.log_likelihood.is_finite() {
+                    assert_eq!(
+                        cal[&q.name].outside, 0.0,
+                        "seed {seed}: {}\n{written}",
+                        q.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_distribution_without_its_points_keeps_its_grid() {
+        // Found by fuzzing: a file changing only a distribution whose
+        // points an extended file gives was written flat, which the reader
+        // refuses for a grid of two axes.
+        let base = "version: 2\nquantities:\n  q:\n    parts:\n      p:\n        at: {a: [0, 10], b: [0, 1]}\n        uniform: {low: [[0, 1], [2, 3]], high: [[5, 6], [7, 8]]}\n";
+        let over = "version: 2\nextends: base.yaml\nquantities:\n  q:\n    parts:\n      p:\n        uniform: {low: [[0, 1], [2, 4]], high: [[5, 6], [7, 9]]}\n";
+        let library = vec![("base.yaml".to_string(), base.to_string())];
+        let doc = RulesDoc::from_yaml(over).unwrap();
+        let written = doc.to_yaml().unwrap();
+        assert!(written.contains("low: [[0, 1], [2, 4]]"), "{written}");
+        assert!(!written.contains("at:"), "{written}");
+        let set = check(&written, "over.yaml", &library).unwrap();
+        assert_eq!(
+            set.quantities["q"].parts[0].values[0],
+            vec![0.0, 1.0, 2.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn a_number_keeps_eleven_significant_digits_at_any_size() {
+        // Found by fuzzing: digits were counted after the point and capped
+        // at 15, so 2.0395795037761124e-7 kept nine and 1e-14 one.
+        assert_eq!(tidy(0.30000000000000004), 0.3);
+        assert_eq!(tidy(2.0395795037761124e-7), 2.0395795038e-7);
+        assert_eq!(tidy(1.2345678901234e-14), 1.2345678901e-14);
+        assert_eq!(tidy(9.8765432109876e21), 9.8765432110e21);
+        assert_eq!(tidy(1e-300), 1e-300);
+        assert_eq!(tidy(-4.25), -4.25);
+        assert_eq!(num(2.0395795037761124e-7), "0.00000020395795038");
+        // Found by fuzzing: 2.6378327268e20 was written as an integer the
+        // reader cannot hold, and the file no longer read.
+        assert_eq!(num(2.6378327268e20), "2.6378327268e20");
+        assert_eq!(num(-1e-300), "-1e-300");
+        for v in [2.6378327268e20, 1e300, -1e-300, 3.5e-12] {
+            let doc = format!("version: 2\nquantities:\n  q:\n    parts:\n      p: {{at: {{a: [0]}}, uniform: {{low: {}, high: {}}}}}\n", num(v), num(v * 2.0 + 1.0));
+            assert!(RuleSet::parse(&doc, "n.yaml").is_ok(), "{v}: {doc}");
         }
     }
 

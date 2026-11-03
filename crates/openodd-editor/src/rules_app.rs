@@ -223,6 +223,7 @@ fn part_doc(p: &openodd::rules::Part) -> PartDoc {
                     constant: false,
                 })
                 .collect(),
+            shape: None,
         }),
         text: p.text.clone(),
         fixed: if p.fixed.contains(&openodd::rules::Hold::ALL) {
