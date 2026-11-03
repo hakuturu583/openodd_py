@@ -186,8 +186,12 @@ an error: the range is the file's to say.
 **Degenerate data.** A likelihood grows without bound as a distribution
 narrows onto one value (every row the same grip, or one row near a point).
 `min_spread` (default 0.001) keeps the width at each point with data --
-`high - low`, or `sd` -- at least that share of the standard deviation of
-the quantity's values. Write points where there is data to estimate them
+`high - low`, or a normal's spread as truncated (its interquartile range
+over 1.349, `sd` when the range is wide) -- at least that share of the
+standard deviation of the quantity's values. The truncated spread, not
+`sd`, because rows piled on one end of a normal's range let its mean run
+far outside it, squeezing the distribution into a spike at that end with
+`sd` as it was. Write points where there is data to estimate them
 from: the maximum-likelihood estimate of a uniform's range is the data's
 own envelope, which is as wide as the data happened to be.
 

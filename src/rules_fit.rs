@@ -33,9 +33,11 @@
 //! part deciding it there ([`crate::rules::Joined::cdf`]).
 //!
 //! The width of a distribution at a point with data -- `high - low`, or a
-//! normal's `sd` -- is kept at least `min_spread` times the spread of the
-//! quantity's observed values: a likelihood grows without bound as a
-//! distribution narrows onto one value, which is no estimate.
+//! normal's spread as truncated ([`Family::spread`]) -- is kept at least
+//! `min_spread` times the spread of the quantity's observed values: a
+//! likelihood grows without bound as a distribution narrows onto one value
+//! (or, for a normal, as its mean runs off its range and squeezes it against
+//! an end), which is no estimate.
 
 use std::cell::RefCell;
 
@@ -43,9 +45,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::rules::{
-    density, normal_mass, Combine, Dist, Family, Given, Hold, Origin, Quantity, RuleSet,
-};
+use crate::rules::{Combine, Dist, Family, Given, Hold, Origin, Quantity, RuleSet, Truncated};
 use crate::value::py_float_repr;
 
 /// How [`RuleSet::fit`] fits.
@@ -903,16 +903,18 @@ fn log_pdf_grad(d: &Dist, y: f64) -> (f64, [f64; 4]) {
                 return (f64::NEG_INFINITY, [0.0; 4]);
             }
             let (a, b, z) = ((low - mean) / sd, (high - mean) / sd, (y - mean) / sd);
-            let mass = normal_mass(a, b);
-            if !(mass > 0.0) {
+            // In logarithms: the mass between the ends may be too small for
+            // a number, the mean being far outside them.
+            let s = Truncated::new(mean, sd, low, high);
+            if !s.ln_mass.is_finite() {
                 return (f64::NEG_INFINITY, [0.0; 4]);
             }
-            // density(±inf) is 0, and so must z * density(z) be there.
-            let (da, db) = (density(a), density(b));
+            // density(±inf) / mass is 0, and so must z times it be there.
+            let (da, db) = (s.density_share(a), s.density_share(b));
             let times = |z: f64, d: f64| if z.is_finite() { z * d } else { 0.0 };
-            let lp = -sd.ln() - 0.5 * z * z - 0.5 * (2.0 * std::f64::consts::PI).ln() - mass.ln();
-            let d_mean = z / sd - (da - db) / (sd * mass);
-            let d_sd = (z * z - 1.0) / sd - (times(a, da) - times(b, db)) / (sd * mass);
+            let lp = s.ln_pdf(z) - sd.ln();
+            let d_mean = z / sd - (da - db) / sd;
+            let d_sd = (z * z - 1.0) / sd - (times(a, da) - times(b, db)) / sd;
             (lp, [d_mean, d_sd, 0.0, 0.0])
         }
     }
@@ -1129,7 +1131,9 @@ impl Problem<'_> {
                 if p.iter().any(|v| !v.is_finite()) || part.family.dist(p).check().is_err() {
                     return false;
                 }
-                if width.iter().any(|&k| f[k][n]) && part.family.spread(p) < self.floor {
+                if width.iter().any(|&k| f[k][n])
+                    && part.family.spread(p) < least_spread(part.family, p, self.floor)
+                {
                     return false;
                 }
             }
@@ -1305,15 +1309,32 @@ fn fit_quantity(
         iterations += its;
         converged &= done;
     }
-    let mut params = problem.params(&x);
+    // The values as the fitted file writes them, and the report says: a
+    // range estimated rounded outwards ([`outwards`]).
+    let written = |mut p: Vec<Vec<Vec<f64>>>| {
+        for &(i, k, n) in &problem.vars {
+            if let Some((lo, hi)) = q.parts[i].family.fitted_range() {
+                if k == lo || k == hi {
+                    p[i][k][n] = outwards(p[i][k][n], k == hi);
+                }
+            }
+        }
+        p
+    };
+    let mut params = written(problem.params(&x));
     let mut after = log_likelihood_of(q, &params, data);
     // An ascent ends no lower than it starts; with several parts or a
     // barrier it may reach a lesser maximum than the start's own -- then the
     // start stands.
-    let start = problem.params(&x0_kept);
+    let start = written(problem.params(&x0_kept));
     let at_start = log_likelihood_of(q, &start, data);
     if at_start > after {
         (params, after) = (start, at_start);
+    }
+    // Nor below the rules as written, where the start was widened from
+    // them (a row on a range's end).
+    if before > after {
+        (params, after) = (start_params(q), before);
     }
     let report = QuantityFit {
         calibration_before: calibration_of(q, &start_params(q), data),
@@ -1338,6 +1359,17 @@ fn fit_quantity(
             .collect(),
     };
     Ok((params, report))
+}
+
+/// The least spread a distribution of parameters `p` may have at a point
+/// with data: `floor`, or for a normal at most what its range allows -- a
+/// normal truncated to a range is never wider than a uniform over it, whose
+/// interquartile range is half the range's.
+fn least_spread(family: Family, p: &[f64], floor: f64) -> f64 {
+    match family {
+        Family::Normal => floor.min(0.9 * (p[3] - p[2]) / 2.0 / 1.348_979_500_392_163_4),
+        _ => floor,
+    }
 }
 
 /// The rules' parameters, moved where needed so every row is possible and
@@ -1377,7 +1409,16 @@ fn feasible_start(prepared: &Prepared, floor: f64, possible: bool) -> Result<Vec
             None => {
                 for &n in touched {
                     if free[1][n] {
+                        // Wide enough as truncated, which an end makes
+                        // narrower than sd: sd raised until it is.
                         p[1][n] = p[1][n].max(floor);
+                        for _ in 0..200 {
+                            let at: Vec<f64> = p.iter().map(|c| c[n]).collect();
+                            if part.family.spread(&at) >= least_spread(part.family, &at, floor) {
+                                break;
+                            }
+                            p[1][n] *= 2.0;
+                        }
                     }
                 }
                 for (r, &y) in data.y.iter().enumerate() {
@@ -1565,22 +1606,11 @@ fn quantities_text(fitted: &[(&Quantity, Vec<Vec<Vec<f64>>>)]) -> String {
                 part.family.name()
             ));
             let shape: Vec<usize> = part.axes.iter().map(|a| a.points.len()).collect();
-            let range = part.family.fitted_range();
-            for (i, (k, column)) in part.family.params().iter().zip(p).enumerate() {
-                // A range closes on the data: the rows at its ends sit on
-                // it. Written rounded outwards, it keeps them inside however
-                // a reader rounds it (to ten digits, as the editor does).
-                let column: Vec<f64> = match range {
-                    Some((lo, _)) if i == lo => {
-                        column.iter().map(|v| outwards(*v, false)).collect()
-                    }
-                    Some((_, hi)) if i == hi => column.iter().map(|v| outwards(*v, true)).collect(),
-                    _ => column.clone(),
-                };
+            for (k, column) in part.family.params().iter().zip(p) {
                 let written = if column.windows(2).all(|w| w[0] == w[1]) {
                     py_float_repr(column[0])
                 } else {
-                    nested_list(&column, &shape, &py_float_repr)
+                    nested_list(column, &shape, &py_float_repr)
                 };
                 out.push_str(&format!("          {k}: {written}\n"));
             }
@@ -1594,7 +1624,10 @@ fn quoted(s: &str) -> String {
     serde_json::to_string(s).expect("a string serializes")
 }
 
-/// `v` rounded to ten significant digits, up or down.
+/// `v` rounded to ten significant digits, up or down. A range a fit
+/// estimates closes on the data: the rows at its ends sit on it. Rounded
+/// outwards, it keeps them inside however a reader rounds it (to ten digits,
+/// as the editor does).
 fn outwards(v: f64, up: bool) -> f64 {
     if v == 0.0 || !v.is_finite() {
         return v;
@@ -2194,6 +2227,98 @@ quantities:
             let err = observations_from_json(bad, &names).unwrap_err().to_string();
             assert!(err.contains(says), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn the_report_is_of_the_rules_as_written() {
+        // Found by fuzzing: two parts joined by max whose distribution
+        // functions tie at the row after the fit. Rounding the file's range
+        // flipped which part decides, and the fitted rules' log-likelihood
+        // was not the one reported.
+        let text = "version: 2\nquantities:\n  q0:\n    combine: max\n    parts:\n      p0:\n        at: {a: [0.0]}\n        uniform: {low: [0.0], high: [2.0]}\n      p1:\n        at: {a: [0.0]}\n        uniform: {low: [1.382390089321256e-194], high: [1.0]}\n";
+        let set = RuleSet::parse(text, "m.yaml").unwrap();
+        let rows = [row(&[("a", 0.0), ("q0", 1.382390089321256e-194)])];
+        let fit = set.fit(&rows, None, &FitOptions::default()).unwrap();
+        let reported = fit.quantities[0].log_likelihood;
+        assert_eq!(
+            fit.rules.log_likelihood(&rows, None).unwrap()["q0"].0,
+            reported
+        );
+        assert_eq!(
+            fit.rules.calibration(&rows, None).unwrap()["q0"],
+            fit.quantities[0].calibration
+        );
+        assert!(reported >= fit.quantities[0].log_likelihood_before);
+    }
+
+    #[test]
+    fn a_fit_ends_no_lower_than_the_rules_as_written() {
+        // Found by fuzzing: a row on a triangular's low end, its mode there
+        // too. The barrier's start widens the range, and the fit ended below
+        // the rules as written.
+        let text = "version: 2\nquantities:\n  q0:\n    parts:\n      p0:\n        at: {a: [0.0]}\n        triangular: {low: [0.0], mode: [0.0], high: [0.015625]}\n";
+        let set = RuleSet::parse(text, "t.yaml").unwrap();
+        let fit = set
+            .fit(
+                &[row(&[("a", 0.0), ("q0", 0.0)])],
+                None,
+                &FitOptions::default(),
+            )
+            .unwrap();
+        let q = &fit.quantities[0];
+        assert!(q.log_likelihood >= q.log_likelihood_before, "{q:?}");
+    }
+
+    #[test]
+    fn a_narrow_normal_at_its_end_starts_a_fit() {
+        // Found in review: the start raised sd to the floor, but at the
+        // range's end the truncated spread is 0.62 sd, below it, and the fit
+        // refused to start. And a range too narrow for the floor caps it.
+        for (text, y) in [
+            (
+                "normal: {mean: [0.0], sd: [1e-4], low: [0.0], high: [1.0]}",
+                0.0,
+            ),
+            (
+                "normal: {mean: [0.5], sd: [1e-4], low: [0.4999], high: [0.5001]}",
+                0.5,
+            ),
+        ] {
+            let text = format!("version: 2\nquantities:\n  q0:\n    parts:\n      p0:\n        at: {{a: [0.0]}}\n        {text}\n");
+            let set = RuleSet::parse(&text, "n.yaml").unwrap();
+            let fit = set
+                .fit(
+                    &[row(&[("a", 0.0), ("q0", y)])],
+                    None,
+                    &FitOptions::default(),
+                )
+                .unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert!(fit.quantities[0].log_likelihood.is_finite());
+        }
+    }
+
+    #[test]
+    fn a_normal_squeezed_against_its_range_is_held_wide_and_reads() {
+        // Found by fuzzing: one row on a normal's low end. Its likelihood
+        // grows without bound as the mean leaves the range (the distribution
+        // a spike at the end), which min_spread must stop; and the fitted
+        // distribution, its mean far outside, must still read.
+        let text = "version: 2\nquantities:\n  q0:\n    parts:\n      p0:\n        at: {a: [0.0]}\n        normal: {mean: [0.0], sd: [1.0], low: [0.0], high: [1.0]}\n";
+        let set = RuleSet::parse(text, "n.yaml").unwrap();
+        let fit = set
+            .fit(
+                &[row(&[("a", 0.0), ("q0", 0.0)])],
+                None,
+                &FitOptions::default(),
+            )
+            .unwrap();
+        let summary = fit.rules.evaluate("q0", &row(&[("a", 0.0)])).unwrap();
+        assert!(summary.values().all(|v| v.is_finite()), "{summary:?}");
+        let part = &fit.rules.quantities["q0"].parts[0];
+        let p: Vec<f64> = part.values.iter().map(|c| c[0]).collect();
+        // One value, all its own size: the scale is 1, the floor 1e-3.
+        assert!(Family::Normal.spread(&p) >= 1e-3 * (1.0 - 1e-6), "{p:?}");
+        assert!(fit.quantities[0].log_likelihood.is_finite());
     }
 
     #[test]

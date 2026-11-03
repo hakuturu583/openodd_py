@@ -425,7 +425,8 @@ class Rules:
             tolerance: Converged when an iteration raises the mean
                 log-likelihood per row by less.
             min_spread: The least width of a distribution at a point with
-                data (``high - low``, or a normal's ``sd``), as a share of
+                data (``high - low``, or a normal's spread as truncated --
+                its interquartile range over 1.349), as a share of
                 the standard deviation of the quantity's values (of their
                 size, when they are all one): a likelihood grows without
                 bound as a distribution narrows onto one value.
