@@ -311,6 +311,7 @@ def any_dist(draw) -> tuple[str, dict[str, float]]:
 @example(("triangular", {"low": 0.0, "mode": 2.22507384e-316, "high": 1e-08}), [0.0, 0.0])
 @example(("triangular", {"low": 0.0, "mode": 8.612787633870585e-107, "high": 2000.0}), [4.1072864424437134e-221, 4.306393816935293e-110])
 @example(("triangular", {"low": 0.0, "mode": 1.0, "high": 1.0}), [0.0, 1.0])
+@example(("triangular", {"low": -1.0, "mode": 0.0, "high": 1e-20}), [0.5, 1.0])
 @example(("normal", {"mean": -0.00027044812011718753, "sd": 6.83125e-05, "low": 0.0, "high": 2.9e-05}), [0.0, 2.220446049250313e-16])
 @given(any_dist(), st.lists(st.floats(0, 1), min_size=2, max_size=6))
 def test_a_distribution_reads_everywhere(dist, ps) -> None:

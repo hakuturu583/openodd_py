@@ -250,11 +250,20 @@ impl Dist {
                 } else if mode >= high {
                     high
                 } else {
-                    // From the mode up, not `high - sqrt(...)`, which cancels
-                    // when the mode is tiny next to `high`:
-                    // 1 - sqrt(1 - d) = d / (1 + sqrt(1 - d)).
-                    let d = ((p - c) / (1.0 - c)).clamp(0.0, 1.0);
-                    mode + (high - mode) * (d / (1.0 + (1.0 - d).sqrt()))
+                    // The share above the mode, 1 - c, as a ratio: c may round
+                    // to 1 with the mode below high.
+                    let rest = (high - mode) / w;
+                    let e = ((1.0 - p) / rest).clamp(0.0, 1.0);
+                    if e < 0.5 {
+                        // Near high: from it down.
+                        high - (high - mode) * e.sqrt()
+                    } else {
+                        // Near the mode: from it up, not `high - sqrt(...)`,
+                        // which cancels when the mode is tiny next to high:
+                        // 1 - sqrt(1 - d) = d / (1 + sqrt(1 - d)).
+                        let d = ((p - c) / rest).clamp(0.0, 1.0);
+                        mode + (high - mode) * (d / (1.0 + (1.0 - d).sqrt()))
+                    }
                 }
                 .clamp(low, high)
             }
@@ -2477,6 +2486,14 @@ quantities:
                 "{p}"
             );
         }
+        // Found in review: c rounds to 1 with the mode below high.
+        let d = Dist::Triangular {
+            low: -1.0,
+            mode: 0.0,
+            high: 1e-20,
+        };
+        assert_eq!(d.quantile(1.0), 1e-20);
+        assert!(d.quantile(0.5).is_finite() && d.quantile(1.0 - 1e-17).is_finite());
         // The mode at an end.
         for mode in [1.0, 0.0] {
             let d = Dist::Triangular {

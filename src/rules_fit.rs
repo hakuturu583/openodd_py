@@ -1131,7 +1131,9 @@ impl Problem<'_> {
                 if p.iter().any(|v| !v.is_finite()) || part.family.dist(p).check().is_err() {
                     return false;
                 }
-                if width.iter().any(|&k| f[k][n]) && part.family.spread(p) < self.floor {
+                if width.iter().any(|&k| f[k][n])
+                    && part.family.spread(p) < least_spread(part.family, p, self.floor)
+                {
                     return false;
                 }
             }
@@ -1359,6 +1361,17 @@ fn fit_quantity(
     Ok((params, report))
 }
 
+/// The least spread a distribution of parameters `p` may have at a point
+/// with data: `floor`, or for a normal at most what its range allows -- a
+/// normal truncated to a range is never wider than a uniform over it, whose
+/// interquartile range is half the range's.
+fn least_spread(family: Family, p: &[f64], floor: f64) -> f64 {
+    match family {
+        Family::Normal => floor.min(0.9 * (p[3] - p[2]) / 2.0 / 1.348_979_500_392_163_4),
+        _ => floor,
+    }
+}
+
 /// The rules' parameters, moved where needed so every row is possible and
 /// every distribution at a point with data at least `floor` wide: unless
 /// every row is possible already (`possible`), a uniform's or a
@@ -1396,7 +1409,16 @@ fn feasible_start(prepared: &Prepared, floor: f64, possible: bool) -> Result<Vec
             None => {
                 for &n in touched {
                     if free[1][n] {
+                        // Wide enough as truncated, which an end makes
+                        // narrower than sd: sd raised until it is.
                         p[1][n] = p[1][n].max(floor);
+                        for _ in 0..200 {
+                            let at: Vec<f64> = p.iter().map(|c| c[n]).collect();
+                            if part.family.spread(&at) >= least_spread(part.family, &at, floor) {
+                                break;
+                            }
+                            p[1][n] *= 2.0;
+                        }
                     }
                 }
                 for (r, &y) in data.y.iter().enumerate() {
@@ -2245,6 +2267,34 @@ quantities:
             .unwrap();
         let q = &fit.quantities[0];
         assert!(q.log_likelihood >= q.log_likelihood_before, "{q:?}");
+    }
+
+    #[test]
+    fn a_narrow_normal_at_its_end_starts_a_fit() {
+        // Found in review: the start raised sd to the floor, but at the
+        // range's end the truncated spread is 0.62 sd, below it, and the fit
+        // refused to start. And a range too narrow for the floor caps it.
+        for (text, y) in [
+            (
+                "normal: {mean: [0.0], sd: [1e-4], low: [0.0], high: [1.0]}",
+                0.0,
+            ),
+            (
+                "normal: {mean: [0.5], sd: [1e-4], low: [0.4999], high: [0.5001]}",
+                0.5,
+            ),
+        ] {
+            let text = format!("version: 2\nquantities:\n  q0:\n    parts:\n      p0:\n        at: {{a: [0.0]}}\n        {text}\n");
+            let set = RuleSet::parse(&text, "n.yaml").unwrap();
+            let fit = set
+                .fit(
+                    &[row(&[("a", 0.0), ("q0", y)])],
+                    None,
+                    &FitOptions::default(),
+                )
+                .unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert!(fit.quantities[0].log_likelihood.is_finite());
+        }
     }
 
     #[test]
