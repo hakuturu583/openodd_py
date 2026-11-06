@@ -296,14 +296,19 @@ sampler = openodd.OddSampler(
 )
 ```
 
-Each case draws every quantity at a quantile of its own (from the seed, the
-case and the quantity), at the values the case drew for the inputs that stand
+Each case draws every quantity at a quantile of its own, at the values the case drew for the inputs that stand
 for the ODD's attributes (`concept:`, converted to the input's `unit`; an
 input of an attribute's name in version 2 rules). An input that stands for no
 attribute reads its `default`, and without one the sampler refuses. A quantity
 a quantity reads is drawn at its own quantile too. `limits` and `integer`
 apply to the value written, and the case keeps it (`OddSample.quantities`,
 recorded as `case.quantities`) for the [case plot](case_plot.md).
+
+Each effect's own quantile is a parameter of the case, `quantile(q)` in its
+`values` (`openodd.sampler.quantile_name`), drawn in `[0, 1]` with it. A
+[flaky search](flaky.md#the-parameters-normalized) moves it to where the
+outcome flips. A quantity an effect reads is drawn at a quantile of its own,
+from the seed, the case and the quantity.
 
 A scenario's control (`controls`, keyed by measure) with a `quantity` that no
 attribute of the ODD reads is such an effect too. The ODD stays discrete, the

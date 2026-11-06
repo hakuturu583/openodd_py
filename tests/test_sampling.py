@@ -517,7 +517,9 @@ def test_effects_alone_are_drawn(tmp_path: Path) -> None:
     cases = OddSampler(o, seed=1, backend=b, effects=effects).sample(5)
     assert [c.index for c in cases] == list(range(5))
     for case in cases:
-        assert case.values == {} and 2 <= _written(case, "scenario.npc_gap_m") <= 30
+        # No attribute drawn; the effect's quantile is the case's one parameter.
+        assert list(case.values) == ["quantile(vehicle_ahead_gap)"]
+        assert _written(case, "scenario.npc_gap_m") == pytest.approx(2 + 28 * case.values["quantile(vehicle_ahead_gap)"])
     with pytest.raises(ValueError, match="nothing of ODD .* can be drawn"):
         OddSampler(o, backend=b)
 
