@@ -304,3 +304,32 @@ def test_a_rule_valued_knob_reads_the_value_in_its_inputs_unit(tmp_path: Path) -
         (w,) = [x for x in c.overrides if x.startswith("k=")]
         # the rule gives its input back: km/h of the m/s drawn
         assert float(w.split("=")[1]) == pytest.approx(c.values["ego.speed"] * 3.6)
+
+
+def test_the_case_keeps_what_the_rules_wrote_and_a_plot_places_it(tmp_path: Path) -> None:
+    """#95: the quantities a knob wrote from the rules are recorded and plotted."""
+    (tmp_path / "taxonomy.yaml").write_text(RAIN_TAXONOMY)
+    (tmp_path / "rules.yaml").write_text(PRECIPITATION_RULES)
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    knob = OddKnob("env.precipitation", quantity="carla_precipitation", limits=(0, 100))
+    b = Backend(probes={"rain_mm_h": (lambda c: c.get("rain"), "mm/h")}, rules=rules)
+    o = openodd.load_openodd(
+        RAIN_TAXONOMY,
+        bindings={"weather.rainfall_rate": {"probe": "rain_mm_h", "buckets": [0, 2.5, 10]}},
+        backend=b,
+    )
+    cases = OddSampler(o, knobs={"weather.rainfall_rate": knob}, seed=5, backend=b).sample(6)
+    docs = []
+    for case in cases:
+        (written,) = [x for x in case.overrides if x.startswith("env.precipitation=")]
+        assert case.quantities == {"carla_precipitation": float(written.split("=", 1)[1])}
+        collector = openodd.CoverageCollector([], odd=o)
+        collector.record_case(case)
+        collector.record_outcome(True)
+        doc = json.loads(json.dumps(collector.to_dict("rain")))
+        assert doc["case"]["quantities"] == case.quantities
+        docs.append(doc)
+    plot = openodd.CasePlot(docs)
+    assert "carla_precipitation" in plot.attributes
+    data = plot.data(x="weather.rainfall_rate", y="carla_precipitation")
+    assert data["y"]["name"] == "carla_precipitation" and len(data["cases"]) == 6

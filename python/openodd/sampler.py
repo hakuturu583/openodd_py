@@ -183,6 +183,9 @@ class OddSample:
         flaky: Its flakiness, when :class:`~.flaky.FlakySearch` chose it for
             that (:class:`~.flaky.FlakyMetrics`); ``None`` for a case the
             sampler's own policy drew.
+        quantities: Rules quantity -> the value a knob wrote from the rules
+            (``OddKnob(quantity=...)``), after its limits: the effects the
+            case ran with, which are no attributes of the ODD.
     """
 
     index: int
@@ -191,6 +194,7 @@ class OddSample:
     values: dict[str, Any]
     situation: Optional[str] = None
     flaky: Optional[Any] = None
+    quantities: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def _from_core(cls, core: Any, flaky: Optional[Any] = None) -> "OddSample":
@@ -389,6 +393,7 @@ class OddSampler:
         if not self._from_rules or self._rules is None:
             return case
         overrides = list(case.overrides)
+        quantities = dict(case.quantities)
         for name, (knob, rule_input, unit, input_unit) in self._from_rules.items():
             x = case.values.get(name)
             if not isinstance(x, (int, float)) or isinstance(x, bool):
@@ -401,7 +406,8 @@ class OddSampler:
             y = self._rules.quantile(str(knob.quantity), {rule_input: float(x)}, p)
             if knob.limits is not None:
                 y = min(max(y, knob.limits[0]), knob.limits[1])
+            quantities[str(knob.quantity)] = float(y)
             written = str(int(round(y))) if knob.integer else repr(float(y))
             prefix = f"{knob.key}="
             overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
-        return dataclasses.replace(case, overrides=overrides)
+        return dataclasses.replace(case, overrides=overrides, quantities=quantities)

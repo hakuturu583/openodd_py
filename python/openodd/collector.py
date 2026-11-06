@@ -538,6 +538,7 @@ class CoverageCollector:
             "index": int(case.index),
             "situation": case.situation,
             "values": {str(k): _case_value(v) for k, v in case.values.items()},
+            "quantities": {str(k): float(v) for k, v in getattr(case, "quantities", {}).items()},
             "buckets": {str(k): str(v) for k, v in case.buckets.items()},
             "overrides": list(case.overrides),
             "chosen_for": "coverage" if flaky is None else "instability",
