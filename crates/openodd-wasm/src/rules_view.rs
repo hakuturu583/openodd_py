@@ -266,9 +266,11 @@ fn resolve<'a>(rules: &'a RuleSet, query: &Query) -> Result<Resolved<'a>, String
         if categorical(rules, &s.name) {
             // The nearest label a part is written at: nothing lies between.
             let points = written(quantity, &s.name);
-            if let Some(p) = points.iter().copied().min_by(|a, b| {
-                (a - s.value).abs().total_cmp(&(b - s.value).abs())
-            }) {
+            if let Some(p) = points
+                .iter()
+                .copied()
+                .min_by(|a, b| (a - s.value).abs().total_cmp(&(b - s.value).abs()))
+            {
                 s.value = p;
             }
         }

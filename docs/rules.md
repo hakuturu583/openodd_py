@@ -185,6 +185,12 @@ Reading a version 3 file refuses:
 
 The taxonomy is read from where the file that names it says, like
 `extends`; a file it extends may name it instead, and the nearest name wins.
+`taxonomy: {bundled: default}` names the taxonomy openodd ships, the default
+ODD's, read from the core's own copy (label `bundled:default`) with no file or
+network access, in Python and in the browser alike. It stands in for
+tier4/taxonomy as a subset of it (the same ids and definitions, for the
+concepts openodd uses) until that can be named: converging then is changing
+this reference to its git source.
 It is one OpenODD file, read on its own: one that `IMPORT`s others is refused, since its imports would be read from the working directory and its SHA-256 would not cover them.
 `Rules.version`, `Rules.taxonomy` (`(path or URL, sha256)`) and
 `Rules.input_concepts` (input → `(concept, unit)`) say what was read.

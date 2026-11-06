@@ -651,3 +651,16 @@ def test_a_fit_skips_what_a_categorical_cause_does_not_say() -> None:
     fit = rules.fit(day + night + dusk + blank, fixed=["sun_altitude"])
     low, _ = fit.rules.range("sight", {"time_of_day": "day", "water": 0})
     assert low > 290.0, low
+
+
+def test_rules_name_the_taxonomy_openodd_ships() -> None:
+    """``taxonomy: {bundled: default}``: the default ODD's taxonomy, built in."""
+    rules = Rules.from_text(
+        "version: 3\ntaxonomy: {bundled: default}\nbasis: {kind: expert}\n"
+        "inputs:\n  speed: {concept: dynamic.ego_speed, unit: km/h}\n"
+        "quantities:\n  gap:\n    parts:\n      p:\n        at: {speed: [0, 100]}\n"
+        "        uniform: {low: [2, 10], high: [10, 40]}\n"
+    )
+    assert rules.taxonomy is not None and rules.taxonomy[0] == "bundled:default"
+    assert rules.input_concepts == {"speed": ("dynamic.ego_speed", "km/h")}
+    assert rules.taxonomy_concepts["dynamic.ego_speed"]["kind"] == "number"
