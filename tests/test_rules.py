@@ -664,3 +664,9 @@ def test_rules_name_the_taxonomy_openodd_ships() -> None:
     assert rules.taxonomy is not None and rules.taxonomy[0] == "bundled:default"
     assert rules.input_concepts == {"speed": ("dynamic.ego_speed", "km/h")}
     assert rules.taxonomy_concepts["dynamic.ego_speed"]["kind"] == "number"
+
+
+def test_a_backend_reads_a_categorical_input_at_its_label() -> None:
+    backend = Backend(rules=Rules.from_text(SUN))
+    assert backend.derived_range("sun_altitude", {"time_of_day": "night"}) == (-30.0, -6.0)
+    assert backend.derived_at("sun_altitude", {"time_of_day": "dusk"}, 0.5) == pytest.approx(-3.0)
