@@ -553,3 +553,16 @@ def test_dropping_a_runs_rules_keeps_the_scenarios_nodes_joined() -> None:
         backend.use_rules(None)
     assert "vehicle_ahead_gap" in backend.active_rules.quantities
     assert "grip" in backend.active_rules.quantities
+
+
+def test_rules_name_the_taxonomy_openodd_ships() -> None:
+    """``taxonomy: {bundled: default}``: the default ODD's taxonomy, built in."""
+    rules = Rules.from_text(
+        "version: 3\ntaxonomy: {bundled: default}\nbasis: {kind: expert}\n"
+        "inputs:\n  speed: {concept: dynamic.ego_speed, unit: km/h}\n"
+        "quantities:\n  gap:\n    parts:\n      p:\n        at: {speed: [0, 100]}\n"
+        "        uniform: {low: [2, 10], high: [10, 40]}\n"
+    )
+    assert rules.taxonomy is not None and rules.taxonomy[0] == "bundled:default"
+    assert rules.input_concepts == {"speed": ("dynamic.ego_speed", "km/h")}
+    assert rules.taxonomy_concepts["dynamic.ego_speed"]["kind"] == "number"
