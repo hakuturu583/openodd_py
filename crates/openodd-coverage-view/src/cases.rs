@@ -480,11 +480,26 @@ impl CaseSet {
                 set.without_outcome += 1;
                 continue;
             };
-            let values: IndexMap<String, Json> = case
+            let mut values: IndexMap<String, Json> = case
                 .get("values")
                 .and_then(Json::as_object)
                 .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default();
+            // The rules quantities the case ran with (a knob wrote them from
+            // the rules): axes like the attributes, with no cover item. An
+            // attribute of the same name wins.
+            let mut quantities: Vec<String> = Vec::new();
+            for (k, v) in case
+                .get("quantities")
+                .and_then(Json::as_object)
+                .into_iter()
+                .flatten()
+            {
+                if v.is_number() && !values.contains_key(k) {
+                    values.insert(k.clone(), v.clone());
+                    quantities.push(k.clone());
+                }
+            }
             let buckets: IndexMap<String, String> = case
                 .get("buckets")
                 .and_then(Json::as_object)
@@ -554,6 +569,9 @@ impl CaseSet {
             }
             for name in values.keys() {
                 set.axis(name);
+            }
+            for name in &quantities {
+                declared.entry(name.clone()).or_insert(true);
             }
             set.read_items(doc);
             match index.get(&key) {
@@ -1107,6 +1125,34 @@ mod tests {
         assert_eq!(set.axes["mode"].kind, AxisKind::Categorical);
         let (lo, hi) = set.axes["speed"].domain();
         assert!(lo < 3.0 && hi > 3.0);
+    }
+
+    #[test]
+    fn rules_quantities_are_axes() {
+        let mut docs = Vec::new();
+        for (o, gap, rel) in [("a=1", 12.5, -4.0), ("a=2", 30.0, 6.0)] {
+            let mut d = doc(&[o], json!({"rain": "none"}), Some(true), "coverage");
+            d["case"]["quantities"] =
+                json!({"vehicle_ahead_gap": gap, "relative_speed": rel, "rain": 1.0});
+            docs.push(d);
+        }
+        let set = CaseSet::from_documents(&docs);
+        let gap = &set.axes["vehicle_ahead_gap"];
+        assert_eq!(gap.kind, AxisKind::Numeric);
+        assert!(gap.edges().is_empty());
+        let (lo, hi) = gap.domain();
+        assert!(lo <= 12.5 && hi >= 30.0);
+        // An attribute of the same name wins.
+        assert_eq!(set.axes["rain"].kind, AxisKind::Categorical);
+        assert_eq!(set.cases[0].label("rain").as_deref(), Some("none"));
+        let plot = set.plot(&CaseQuery {
+            x: Some("vehicle_ahead_gap".into()),
+            y: Some("relative_speed".into()),
+            ..Default::default()
+        });
+        assert_eq!(plot.x.as_ref().unwrap().name, "vehicle_ahead_gap");
+        assert_eq!(plot.y.as_ref().unwrap().name, "relative_speed");
+        assert_eq!(plot.counts()["pass"], 2);
     }
 
     #[test]

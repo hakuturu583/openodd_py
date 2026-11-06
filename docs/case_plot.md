@@ -15,6 +15,13 @@ The coverage documents (`*_coverage.json`) of runs that recorded their case
 and their outcome (`record_outcome`):
 
 - `case.values`: each attribute's drawn value, a number or a label.
+- `case.quantities`: each rules quantity a knob wrote from the rules
+  (`OddKnob(quantity=...)`, [rules.md](rules.md#knobs-from-the-rules)), and
+  its value. Each is a numeric axis like an attribute, so a scenario's
+  logical parameter space -- values the Bayesian network makes, not
+  attributes of the ODD -- can be plotted. It has no cover item: no bucket
+  grid lines, and its range is the values drawn. An attribute of the same
+  name wins.
 - `case.buckets`: the ODD bucket of each value.
 - `case.overrides`: the settings that made the case.
 - `case.chosen_for`: why the case was drawn (`coverage`, `instability`, ...).

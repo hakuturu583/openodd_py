@@ -236,7 +236,9 @@ an input of the attribute's name in version 2 rules), from the backend's
 active rules, at a quantile of its own per case and knob -- the same for the
 same seed. `limits` and `integer` apply to the value written; `values`,
 `scale` and `offset` are not used. A knob in config takes `quantity:` too
-(`knobs_from_mapping`), and `Backend.manifest()` writes it.
+(`knobs_from_mapping`), and `Backend.manifest()` writes it. The case keeps
+the value written (`OddSample.quantities`, recorded as `case.quantities`), so
+a [case plot](case_plot.md) can place the runs by it.
 
 **Fitting a knob's quantity.** A setting's quantity is fitted like any
 other ([Fitting to data](#fitting-to-data)), from rows that pair the real
