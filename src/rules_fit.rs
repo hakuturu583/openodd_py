@@ -314,7 +314,10 @@ pub fn observations_labelled(
                     return c.number(r, name);
                 };
                 match c {
+                    // Not observed, as for a number: empty, or NaN.
                     Cell::Missing => Ok(None),
+                    Cell::Text(t) if t.trim().is_empty() => Ok(None),
+                    Cell::Number(x) if x.is_nan() => Ok(None),
                     Cell::Text(t) | Cell::Other(t) => l
                         .iter()
                         .position(|x| x == t.trim())
@@ -858,6 +861,13 @@ impl RuleSet {
                     let v = observed(row, &a.input)
                         .or_else(|| self.inputs.get(&a.input).and_then(|i| i.default));
                     match v {
+                        // A label the part is not written at: the quantity
+                        // has no distribution there, so the row says nothing
+                        // of it (as one missing an input).
+                        Some(v) if a.categorical() && !a.points.contains(&v) => {
+                            data.skipped += 1;
+                            continue 'rows;
+                        }
                         Some(v) => values.push(v),
                         None => {
                             data.skipped += 1;

@@ -636,3 +636,18 @@ class TestCategoricalInputs:
         assert 19.0 < low < 21.0 and 38.0 < high < 40.0
         with pytest.raises(RulesError, match="not one of its labels"):
             rules.fit([{"time_of_day": "noon", "sun_altitude": 1.0}])
+
+
+def test_a_fit_skips_what_a_categorical_cause_does_not_say() -> None:
+    """An empty or NaN label is not observed (the default is read); a label a
+    part is not written at says nothing of it, and is not put in a
+    neighbour's distribution."""
+    rules = Rules.from_text(SUN)
+    day = [{"time_of_day": "day", "sight": 300.0 + i, "water": 0.0} for i in range(20)]
+    night = [{"time_of_day": "night", "sight": 80.0 + i, "water": 0.0} for i in range(20)]
+    # Dusk: sight has no distribution there; far off, it would drag day's.
+    dusk = [{"time_of_day": "dusk", "sight": 5.0, "water": 0.0} for _ in range(20)]
+    blank = [{"time_of_day": "", "sight": 310.0, "water": 0.0}, {"time_of_day": float("nan"), "sight": 305.0, "water": 0.0}]
+    fit = rules.fit(day + night + dusk + blank, fixed=["sun_altitude"])
+    low, _ = fit.rules.range("sight", {"time_of_day": "day", "water": 0})
+    assert low > 290.0, low

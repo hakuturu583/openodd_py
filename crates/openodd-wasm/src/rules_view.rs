@@ -216,6 +216,17 @@ pub fn sliders(rules: &RuleSet, quantity: &Quantity) -> Vec<Slider> {
         }
     }
     for s in &mut out {
+        if categorical(rules, &s.name) {
+            // A label a part is written at: the default when one is, else
+            // the first.
+            let points = written(quantity, &s.name);
+            s.value = s
+                .default
+                .filter(|d| points.contains(d))
+                .or_else(|| points.first().copied())
+                .unwrap_or(s.low);
+            continue;
+        }
         if s.high <= s.low {
             // One point: a range around it (the value holds either side).
             let pad = (s.low.abs() * 0.1).max(1.0);
@@ -253,8 +264,13 @@ fn resolve<'a>(rules: &'a RuleSet, query: &Query) -> Result<Resolved<'a>, String
         // Beyond the outermost points every value holds: nothing changes.
         s.value = v.clamp(s.low, s.high);
         if categorical(rules, &s.name) {
-            // A label's index: nothing lies between two.
-            s.value = s.value.round();
+            // The nearest label a part is written at: nothing lies between.
+            let points = written(quantity, &s.name);
+            if let Some(p) = points.iter().copied().min_by(|a, b| {
+                (a - s.value).abs().total_cmp(&(b - s.value).abs())
+            }) {
+                s.value = p;
+            }
         }
         inputs.insert(s.name.clone(), s.value);
     }
@@ -377,6 +393,20 @@ struct View<'a> {
     xs: Vec<f64>,
     response: Curves,
     part_responses: Vec<Curves>,
+}
+
+/// The points `quantity`'s parts are written at for `input`, increasing.
+fn written(quantity: &Quantity, input: &str) -> Vec<f64> {
+    let mut out: Vec<f64> = quantity
+        .parts
+        .iter()
+        .flat_map(|p| &p.axes)
+        .filter(|a| a.input == input)
+        .flat_map(|a| a.points.iter().copied())
+        .collect();
+    out.sort_by(f64::total_cmp);
+    out.dedup();
+    out
 }
 
 /// Whether `input` is a categorical input of `rules` (read at its labels).

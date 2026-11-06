@@ -369,3 +369,17 @@ fn a_categorical_input_is_drawn_at_its_labels() {
     assert_eq!(sight["response"]["xs"], serde_json::json!([0.0, 2.0]));
     assert!(v.rules_html_str(r#"{"quantity": "sun"}"#, "{}").is_ok());
 }
+
+#[wasm_bindgen_test]
+#[test]
+fn a_categorical_slider_starts_at_a_written_label() {
+    // No default, and the part skips dusk: it starts at day, and a query
+    // at dusk reads the nearest written label.
+    let text = "version: 2\ninputs:\n  time_of_day: {labels: [day, dusk, night]}\nquantities:\n  sight:\n    parts:\n      light:\n        at: {time_of_day: [day, night]}\n        uniform: {low: [250, 50], high: [400, 150]}\n";
+    let v = RulesView::from_text(text, "sight.yaml").expect("reads");
+    let data: Json =
+        serde_json::from_str(&v.rules_json_str(r#"{"quantity": "sight"}"#, "{}").unwrap()).unwrap();
+    assert!(close(data["inputs"][0]["value"].as_f64().unwrap(), 0.0));
+    assert!(close(data["outputs"]["low"].as_f64().unwrap(), 250.0));
+    assert!(v.rules_html_str(r#"{"quantity": "sight"}"#, "{}").is_ok());
+}
