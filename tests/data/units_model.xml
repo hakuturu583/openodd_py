@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A model in the shape of tier4/taxonomy's EA export, written here: only
+     what openodd.taxonomy_units reads. The SI unit of each type goes unnamed;
+     each unit is `si * factor + offset`. -->
+<TAXONOMY class="models.taxonomy.concept.taxonomy_concept.Taxonomy">
+  <roots type="list">
+    <item type="object" class="models.taxonomy.concept.taxonomy_concept.Expression_UpperBound">
+      <unit type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnit">
+        <id type="str">precipitation_rate_in_mm_per_h</id>
+        <name type="str">mm/h</name>
+        <factor type="float">3600000.0</factor>
+        <offset type="float">0.0</offset>
+        <reference_unit_types type="list">
+          <item type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnitType"><id type="str">precipitation_rate</id></item>
+        </reference_unit_types>
+      </unit>
+    </item>
+    <item type="object" class="models.taxonomy.concept.taxonomy_concept.Expression_UpperBound">
+      <unit type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnit">
+        <id type="str">precipitation_rate_in_in_per_h</id>
+        <name type="str">in/h</name>
+        <factor type="float">141732.28346456692</factor>
+        <offset type="float">0.0</offset>
+        <reference_unit_types type="list">
+          <item type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnitType"><id type="str">precipitation_rate</id></item>
+        </reference_unit_types>
+      </unit>
+    </item>
+    <item type="object" class="models.taxonomy.concept.taxonomy_concept.Expression_UpperBound">
+      <unit type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnit">
+        <id type="str">precipitation_rate_in_mm_per_h</id>
+        <name type="str">mm/h</name>
+        <factor type="float">3600000.0</factor>
+        <offset type="float">0.0</offset>
+      </unit>
+    </item>
+    <item type="object" class="models.taxonomy.concept.taxonomy_concept.Expression_UpperBound">
+      <unit type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnit">
+        <id type="str">length</id>
+        <name type="str">m</name>
+        <factor type="float">1.0</factor>
+        <offset type="float">0.0</offset>
+        <reference_unit_types type="list">
+          <item type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnitType"><id type="str">length</id></item>
+          <item type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnitType"><id type="str">distance</id></item>
+        </reference_unit_types>
+      </unit>
+    </item>
+    <item type="object" class="models.taxonomy.concept.taxonomy_concept.Expression_UpperBound">
+      <unit type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnit">
+        <id type="str">luminance_in_nit</id>
+        <name type="str">nt</name>
+        <factor type="float">1.0</factor>
+        <offset type="float">0.0</offset>
+        <reference_unit_types type="list">
+          <item type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnitType"><id type="str">luminance</id></item>
+        </reference_unit_types>
+      </unit>
+    </item>
+    <item type="object" class="models.taxonomy.concept.taxonomy_concept.Expression_UpperBound">
+      <unit type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnit">
+        <id type="str">luminance_in_knit</id>
+        <name type="str">knt</name>
+        <factor type="float">0.001</factor>
+        <offset type="float">0.0</offset>
+        <reference_unit_types type="list">
+          <item type="object" class="models.taxonomy.concept.taxonomy_concept.TaxonomyUnitType"><id type="str">luminance</id></item>
+        </reference_unit_types>
+      </unit>
+    </item>
+  </roots>
+</TAXONOMY>
