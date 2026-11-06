@@ -176,13 +176,22 @@ def check_taxonomy(
                 "unclassified", name, f"{path} (input)",
                 "a rule input that stands for no taxonomy concept (version 2 rules)",
             ))
+        # What the rules' own taxonomy declares each concept to be: the
+        # declaration the rules were checked against when read, kept by the
+        # core (its label may be a git source, not a readable path).
+        own = rule_set.taxonomy_concepts
         for name, (concept, _unit) in rule_set.input_concepts.items():
+            ours = own.get(concept, {"kind": "number"})
+            where = f"{path} (input {name})"
             if concept not in theirs:
                 findings.append(Finding(
-                    "missing", concept, f"{path} (input {name})",
-                    "a rule input's concept the reference does not declare",
-                    {"kind": "number"},
+                    "missing", concept, where,
+                    "a rule input's concept the reference does not declare", ours,
                 ))
+                continue
+            differs = _compare(concept, ours, theirs[concept])
+            if differs:
+                findings.append(Finding("differs", concept, where, differs, ours))
     return TaxonomyCheck(reference=label, findings=findings)
 
 

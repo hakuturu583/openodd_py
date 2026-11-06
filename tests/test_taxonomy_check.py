@@ -83,3 +83,42 @@ def test_the_command(files: Path, tmp_path: Path, capsys: pytest.CaptureFixture[
     assert (drafts / "road.location.md").exists()
     assert main([str(files / "reference.yaml"), "--odd", str(files / "reference.yaml")]) == 0
     assert main([str(files / "nope.yaml")]) == 2
+
+
+def test_a_rule_inputs_concept_declared_otherwise_differs(files: Path) -> None:
+    """#80: a rules-only check compares the rules' declarations too."""
+    result = check_taxonomy(files / "reference.yaml", rules=[files / "v3.yaml"])
+    found = {(f.kind, f.concept) for f in result.findings}
+    # v3.yaml's taxonomy (ours.yaml) declares the rainfall rate as the reference does,
+    # and the speed limit as a velocity (one dimension with speed_km_per_h): no finding.
+    assert found == set()
+    (files / "v3_flow.yaml").write_text(
+        (files / "v3.yaml").read_text().replace("weather.rainfall_rate", "traffic.flow_rate")
+    )
+    result = check_taxonomy(files / "reference.yaml", rules=[files / "v3_flow.yaml"])
+    assert [(f.kind, f.concept) for f in result.findings] == [("differs", "traffic.flow_rate")]
+
+
+def test_the_rules_taxonomy_is_not_read_again(files: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rules taxonomy's label (a URL, or ``url@rev:path`` for a git source)
+    need not be readable as a path: the declarations kept when the rules were
+    read are compared, and the taxonomy is fetched once."""
+    import openodd.rules
+
+    fetched: list[str] = []
+
+    def fetch(url: str) -> str:
+        fetched.append(url)
+        return OURS.replace("integer count", "float traffic_rate")
+
+    monkeypatch.setattr(openodd.rules, "fetch_url", fetch)
+    (files / "v3_url.yaml").write_text(
+        (files / "v3.yaml")
+        .read_text()
+        .replace("taxonomy: ours.yaml", "taxonomy: https://example.com/taxonomy.yaml")
+        .replace("weather.rainfall_rate", "traffic.flow_rate")
+    )
+    result = check_taxonomy(files / "reference.yaml", rules=[files / "v3_url.yaml"])
+    # The fetched taxonomy declares the flow rate as the reference does.
+    assert result.findings == []
+    assert fetched == ["https://example.com/taxonomy.yaml"]
