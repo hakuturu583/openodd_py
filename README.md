@@ -5,7 +5,9 @@
 - Read an ODD from OpenODD YAML (taxonomy, modules, `IMPORT`, unit conversions) and a
   *binding* file saying how each concept is measured. `openodd-taxonomy-units model.xml`
   writes the units an EA taxonomy model defines (tier4/taxonomy's `taxonomy_master.xml`)
-  as the `conversion:` block an ODD imports.
+  as the `conversion:` block an ODD imports. `openodd-taxonomy-check reference.yaml --odd
+  my.binding.yaml --rules rules.yaml` lists the concepts they use that a shared taxonomy lacks
+  or declares otherwise -- and drafts the issue proposing each missing one.
 - Judge values against it with OpenODD's three-valued, missing-value semantics, and work
   out which buckets of each attribute lie outside it.
 - **Version** it: an ODD's revision is the digest of the transmission it was read from

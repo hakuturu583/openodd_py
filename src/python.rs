@@ -399,6 +399,12 @@ impl Condition {
     }
 }
 
+/// The dimension a unit type names (`speed_km_per_h` -> `velocity`).
+#[pyfunction]
+fn unit_dimension(unit_type: &str) -> String {
+    crate::units::same_type(unit_type).to_string()
+}
+
 #[pyfunction]
 fn is_in(attribute: String, values: Vec<Bound<'_, PyAny>>) -> PyResult<Condition> {
     if values.is_empty() {
@@ -585,6 +591,28 @@ impl Attribute {
     fn item(&self) -> Option<Bucketing> {
         self.inner.item.clone().map(|inner| Bucketing { inner })
     }
+    /// What the taxonomy declares it to be, as JSON: `kind` (`number`,
+    /// `boolean`, `categorical`, `derived`, or `other` when no taxonomy
+    /// declares it), a number's `primitive` and `unit_type`, and a
+    /// categorical's `literals`.
+    fn concept_json(&self) -> String {
+        use crate::model::ConceptKind as K;
+        let mut out = match &self.inner.concept {
+            K::Number {
+                primitive,
+                unit_type,
+            } => {
+                serde_json::json!({"kind": "number", "primitive": primitive, "unit_type": unit_type})
+            }
+            K::Boolean => serde_json::json!({"kind": "boolean"}),
+            K::Categorical => serde_json::json!({"kind": "categorical"}),
+            K::Derived => serde_json::json!({"kind": "derived"}),
+            K::Other => serde_json::json!({"kind": "other"}),
+        };
+        out["literals"] = self.inner.literals.clone().into();
+        out.to_string()
+    }
+
     /// The attributes a derived attribute is worked out from (empty otherwise).
     #[getter]
     fn derived_from(&self) -> Vec<String> {
@@ -2761,6 +2789,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(archive_manifest, m)?,
         wrap_pyfunction!(convert, m)?,
         wrap_pyfunction!(normalize_unit, m)?,
+        wrap_pyfunction!(unit_dimension, m)?,
         wrap_pyfunction!(value_label, m)?,
         wrap_pyfunction!(merge_coverage, m)?,
         wrap_pyfunction!(wilson_interval, m)?,
