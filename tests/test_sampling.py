@@ -431,3 +431,51 @@ def test_effects_need_rules_that_give_them(tmp_path: Path) -> None:
     other = openodd.load_openodd("TAXONOMY:\n  speed: float velocity\n", backend=b)
     with pytest.raises(ValueError, match="read rainfall_rate, which stands for no attribute"):
         OddSampler(other, backend=b, effects=[OddKnob("k", quantity="pedestrian_seen_m")])
+
+
+def test_an_effect_reads_a_quantity_at_the_value_written(tmp_path: Path) -> None:
+    """A quantity a knob already wrote, from an attribute or an effect before,
+    is read at that value -- after its limits and rounding."""
+    (tmp_path / "taxonomy.yaml").write_text(RAIN_TAXONOMY)
+    (tmp_path / "rules.yaml").write_text(
+        PRECIPITATION_RULES
+        + "  wet_copy:\n    parts:\n      same:\n        at: {carla_precipitation: [0, 100]}\n"
+        "        uniform: {low: [0, 100], high: [0, 100]}\n"
+        "  staged:\n    parts:\n      base:\n        uniform: {low: 0, high: 10}\n"
+        "  staged_copy:\n    parts:\n      same:\n        at: {staged: [0, 10]}\n"
+        "        uniform: {low: [0, 10], high: [0, 10]}\n"
+    )
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    b = Backend(probes={"rain_mm_h": (lambda c: c.get("rain"), "mm/h")}, rules=rules)
+    o = openodd.load_openodd(
+        RAIN_TAXONOMY,
+        bindings={"weather.rainfall_rate": {"probe": "rain_mm_h", "buckets": [0, 2.5, 10]}},
+        backend=b,
+    )
+    knobs = {"weather.rainfall_rate": OddKnob("env.precipitation", quantity="carla_precipitation", integer=True)}
+    effects = [
+        OddKnob("scenario.wet", quantity="wet_copy"),
+        OddKnob("scenario.staged", quantity="staged", integer=True),
+        OddKnob("scenario.staged_copy", quantity="staged_copy"),
+    ]
+    for case in OddSampler(o, knobs, seed=6, backend=b, effects=effects).sample(20):
+        assert _written(case, "scenario.wet") == pytest.approx(_written(case, "env.precipitation"))
+        assert _written(case, "scenario.staged_copy") == pytest.approx(_written(case, "scenario.staged"))
+
+
+def test_an_effect_input_the_sampler_does_not_draw_is_refused(tmp_path: Path) -> None:
+    _, b, _ = _effects_setup(tmp_path)
+    o = openodd.load_openodd(
+        RAIN_TAXONOMY + "  ego:\n    speed: float velocity\n",
+        bindings={
+            "weather.rainfall_rate": {"probe": "rain_mm_h", "buckets": [0, 2.5, 10]},
+            "ego.speed": {"probe": "rain_mm_h", "buckets": [0, 10]},
+        },
+        backend=b,
+    )
+    speed = {"ego.speed": OddKnob("ego.speed", range=(0, 10))}
+    # The rainfall rate is an attribute, but no knob draws it.
+    with pytest.raises(ValueError, match="read rainfall_rate, which stands for no attribute"):
+        OddSampler(o, speed, backend=b, effects=[OddKnob("k", quantity="pedestrian_seen_m")])
+    # A root reads nothing: it is drawn.
+    OddSampler(o, speed, backend=b, effects=[OddKnob("k", quantity="vehicle_ahead_gap")]).sample(2)

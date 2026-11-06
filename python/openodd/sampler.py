@@ -152,12 +152,12 @@ def quantile_name(quantity: str) -> str:
 
 
 def _effect_inputs(
-    backend: Backend, odd: OddDefinition, effects: Sequence[OddKnob]
+    backend: Backend, odd: OddDefinition, effects: Sequence[OddKnob], drawn: Iterable[str] = ()
 ) -> dict[str, tuple[str, str, str]]:
     """Rule input -> (the ODD attribute it stands for, the attribute's unit,
     the input's unit): the inputs *effects*' quantities read, through the
-    quantities they read, that a case draws. Every other input they read
-    must have a default."""
+    quantities they read, that a case draws (*drawn*: the attributes given a
+    knob). Every other input they read must have a default."""
     if not effects:
         return {}
     rules = backend.active_rules
@@ -183,7 +183,8 @@ def _effect_inputs(
                 stack.append(name)
             else:
                 reads.add(name)
-    attributes = {a.name: a for a in odd.attributes}
+    drawn = set(drawn)
+    attributes = {a.name: a for a in odd.attributes if a.name in drawn}
     concepts = rules.input_concepts
     defaults = rules.input_defaults
     out: dict[str, tuple[str, str, str]] = {}
@@ -195,7 +196,7 @@ def _effect_inputs(
         elif defaults.get(name) is None:
             raise ValueError(
                 f"effects: the rules read {name}, which stands for no attribute of ODD {odd.name} "
-                "and has no default"
+                "the sampler draws (one given a knob) and has no default"
             )
     return out
 
@@ -392,7 +393,7 @@ class OddSampler:
         self._effects = list(effects) + [
             k for k in controls.values() if k.quantity is not None and id(k) not in used
         ]
-        self._effect_inputs = _effect_inputs(backend, odd, self._effects)
+        self._effect_inputs = _effect_inputs(backend, odd, self._effects, (n for n, _ in chosen))
         self._rules = backend.active_rules if self._from_rules or self._effects else None
         self._seed = str(seed)
         if strategy is None:
@@ -515,13 +516,19 @@ class OddSampler:
                 p = case.values.get(quantile_name(q))
                 if isinstance(p, (int, float)) and not isinstance(p, bool):
                     quantiles[q] = min(max(float(p), 0.0), 1.0)
-            for knob in self._effects:
-                q = str(knob.quantity)
+            # A quantity already written (by an attribute's knob, or an
+            # effect before it) is read at the value written, after its
+            # limits and rounding: what the run is set to.
+            inputs.update(quantities)
+            for q in self.effects:
                 y = self._rules.quantile(q, inputs, quantiles[q], quantiles)
-                if knob.limits is not None:
-                    y = min(max(y, knob.limits[0]), knob.limits[1])
-                written = str(int(round(y))) if knob.integer else repr(float(y))
-                quantities[q] = float(written)
-                prefix = f"{knob.key}="
-                overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
+                for knob in self._effects:
+                    if knob.quantity != q:
+                        continue
+                    v = y if knob.limits is None else min(max(y, knob.limits[0]), knob.limits[1])
+                    written = str(int(round(v))) if knob.integer else repr(float(v))
+                    quantities.setdefault(q, float(written))
+                    prefix = f"{knob.key}="
+                    overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
+                inputs[q] = quantities[q]
         return dataclasses.replace(case, overrides=overrides, quantities=quantities)
