@@ -290,11 +290,9 @@ class Rules:
         out: dict[str, float] = {}
         for k, v in inputs.items():
             name = str(k)
-            if name in labels and not (isinstance(v, (int, float)) and not isinstance(v, bool)):
-                from .items import value_label  # noqa: PLC0415 - items imports this module's peers
-
-                # A label as the core writes it: a bool in lowercase, an enum by name.
-                label = value_label(v)
+            value = rule_value(v)
+            if name in labels and isinstance(value, str):
+                label = value
                 try:
                     out[name] = float(labels[name].index(label))
                 except ValueError:
@@ -302,7 +300,7 @@ class Rules:
                         f"{name} is {label!r}, not one of its labels {', '.join(labels[name])}"
                     ) from None
             else:
-                out[name] = float(v)
+                out[name] = float(value)
         return out
 
     @property
@@ -653,8 +651,16 @@ class Rules:
         numbers -- and their weights, given or from *weight_column*."""
         if weights is not None and weight_column is not None:
             raise RulesError("give weights or weight_column, not both")
+        # A label as evaluation reads it: an enum by name, a bool in lowercase
+        # (a number, a string and a missing value as given).
+        labelled = self._core.input_labels()
         data, from_column = self._call(
-            self._core.observations, [dict(r) for r in rows], weight_column
+            self._core.observations,
+            [
+                {k: rule_value(v) if k in labelled and v is not None else v for k, v in r.items()}
+                for r in rows
+            ],
+            weight_column,
         )
         return data, from_column if weights is None else [float(w) for w in weights]
 
@@ -907,6 +913,22 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
             )
     print(f"wrote {args.output}")
     return 0
+
+
+def rule_value(value: Any) -> Any:
+    """A value as the rules read it: a number as a float; anything else -- a
+    categorical input's label, given as a string, a bool or an enum member
+    (an ``IntEnum``'s too) -- as the label the core writes (a bool in
+    lowercase, an enum by name)."""
+    import enum  # noqa: PLC0415
+
+    if isinstance(value, (int, float)) and not isinstance(value, (bool, enum.Enum)):
+        return float(value)
+    if value is None or (isinstance(value, float) and value != value):
+        return value
+    from .items import value_label  # noqa: PLC0415 - items imports this module's peers
+
+    return value_label(value)
 
 
 def _values(inputs: Optional[Mapping[str, float]]) -> dict[str, float]:

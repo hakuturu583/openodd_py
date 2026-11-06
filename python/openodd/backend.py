@@ -45,7 +45,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from .rules import Rules, RulesError
+from .rules import Rules, RulesError, rule_value
 
 if TYPE_CHECKING:
     from .model import OddAttribute
@@ -312,10 +312,7 @@ class Backend:
         default those -- a number as a float, anything else (a categorical
         input's label: a string, a bool, an enum) as given. A backend whose rules read something derived from them (the
         larger of two, say) overrides it."""
-        return {
-            str(k): float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
-            for k, v in values.items()
-        }
+        return {str(k): rule_value(v) for k, v in values.items()}
 
     def derived(self, quantity: str, values: Mapping[str, Any]) -> dict[str, float]:
         """``low``, ``high``, ``median`` and ``mean`` of *quantity* at

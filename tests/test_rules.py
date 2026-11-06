@@ -696,3 +696,30 @@ def test_a_backend_reads_a_boolean_label_as_a_label() -> None:
     )
     assert backend.derived_range("grip", {"wet": True}) == (0.5, 0.7)
     assert backend.derived_range("grip", {"wet": False}) == (0.9, 1.1)
+
+
+def test_an_enum_is_a_categorical_label_by_name() -> None:
+    """An enum member is its name, an IntEnum's too (not its value as an
+    index), in evaluation, in a backend and in a fit's rows."""
+    import enum
+
+    class Wet(enum.IntEnum):
+        dry = 0
+        wet = 1  # its value is the index of `dry` below
+
+    class Rain(enum.Enum):
+        none = "none"
+        some = "some"
+
+    rules = Rules.from_text(
+        "version: 2\ninputs:\n  wet: {labels: [wet, dry]}\n  rain: {labels: [none, some]}\n"
+        "quantities:\n  grip:\n    parts:\n      p:\n        at: {wet: [wet, dry]}\n"
+        "        uniform: {low: [0.5, 0.9], high: [0.7, 1.1]}\n"
+        "  sight:\n    parts:\n      r:\n        at: {rain: [none, some]}\n        uniform: {low: [300, 100], high: [400, 200]}\n"
+    )
+    assert rules.range("grip", {"wet": Wet.wet}) == (0.5, 0.7)
+    assert Backend(rules=rules).derived_range("grip", {"wet": Wet.wet}) == (0.5, 0.7)
+    rows = [{"rain": Rain.none, "sight": 350.0 + i} for i in range(10)]
+    rows += [{"rain": Rain.some, "sight": 150.0 + i} for i in range(10)]
+    fit = rules.fit(rows, fixed=["grip"])
+    assert fit.rules.range("sight", {"rain": Rain.some})[1] < 170.0
