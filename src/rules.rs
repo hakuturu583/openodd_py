@@ -1007,6 +1007,8 @@ pub struct Taxonomy {
     pub sha256: String,
     /// Each concept the taxonomy declares, and what it is.
     pub concepts: IndexMap<String, crate::model::ConceptKind>,
+    /// The literals each concept declares (empty for a number).
+    pub literals: IndexMap<String, Vec<String>>,
 }
 
 impl Taxonomy {
@@ -1033,6 +1035,12 @@ impl Taxonomy {
                 .attributes
                 .iter()
                 .map(|a| (a.name.clone(), a.concept.clone()))
+                .collect(),
+            literals: loaded
+                .odd
+                .attributes
+                .iter()
+                .map(|a| (a.name.clone(), a.literals.clone()))
                 .collect(),
         })
     }
