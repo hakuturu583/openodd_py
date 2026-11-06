@@ -339,8 +339,10 @@ impl Curves {
 
 /// A part over one of its inputs, the others held at the values chosen.
 struct PartChart {
-    /// Which of its axes it is drawn over.
-    axis: usize,
+    /// The input it is drawn over: the one moved, if it reads it, else its
+    /// first; a part that reads no input is drawn flat over the input moved.
+    /// `None` when the quantity reads no input.
+    x: Option<String>,
     xs: Vec<f64>,
     curves: Curves,
     /// The points written on that axis: `(x, low, high, median)`.
@@ -388,28 +390,37 @@ fn build<'a>(rules: &'a RuleSet, query: &Query, samples: usize) -> Result<View<'
         .map_err(|e| e.to_string())?;
     let summary = Summary::of_joined(&joined, p);
     let deciding = joined.deciding(p).to_string();
-    let x_name = &r.sliders[r.x].name;
+    let x_slider = r.sliders.get(r.x);
     let mut parts = Vec::new();
     for (part, (_, dist)) in q.parts.iter().zip(&joined.parts) {
         let values = q
             .values_of(part, &r.inputs, &rules.inputs)
             .map_err(|e| e.to_string())?;
-        // Over the input moved, if it reads it, else its first.
-        let axis = part
-            .axes
-            .iter()
-            .position(|a| &a.input == x_name)
-            .unwrap_or(0);
-        let s = r
-            .sliders
-            .iter()
-            .find(|s| s.name == part.axes[axis].input)
-            .expect("every input a part reads has a slider");
-        let xs = grid(s.low, s.high, samples);
-        let at = |v: f64| {
-            let mut vs = values.clone();
-            vs[axis] = v;
-            part.dist(&vs)
+        // Over the input moved, if it reads it, else its first; a part that
+        // reads no input, flat over the input moved.
+        let axis = (!part.axes.is_empty()).then(|| {
+            part.axes
+                .iter()
+                .position(|a| x_slider.is_some_and(|s| a.input == s.name))
+                .unwrap_or(0)
+        });
+        let s = match axis {
+            Some(axis) => Some(
+                r.sliders
+                    .iter()
+                    .find(|s| s.name == part.axes[axis].input)
+                    .expect("every input a part reads has a slider"),
+            ),
+            None => x_slider,
+        };
+        let xs = s.map(|s| grid(s.low, s.high, samples)).unwrap_or_default();
+        let at = |v: f64| match axis {
+            Some(axis) => {
+                let mut vs = values.clone();
+                vs[axis] = v;
+                part.dist(&vs)
+            }
+            None => part.dist(&values),
         };
         let mut curves = Curves::default();
         for x in &xs {
@@ -417,15 +428,19 @@ fn build<'a>(rules: &'a RuleSet, query: &Query, samples: usize) -> Result<View<'
             let (lo, hi) = d.support();
             curves.push(lo, hi, d.quantile(0.5), d.quantile(p));
         }
-        let points = part.axes[axis]
-            .points
-            .iter()
-            .map(|x| {
-                let d = at(*x);
-                let (lo, hi) = d.support();
-                [*x, lo, hi, d.quantile(0.5)]
+        let points = axis
+            .map(|axis| {
+                part.axes[axis]
+                    .points
+                    .iter()
+                    .map(|x| {
+                        let d = at(*x);
+                        let (lo, hi) = d.support();
+                        [*x, lo, hi, d.quantile(0.5)]
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
         parts.push(PartView {
             part,
             dist: *dist,
@@ -433,7 +448,7 @@ fn build<'a>(rules: &'a RuleSet, query: &Query, samples: usize) -> Result<View<'
             deciding: q.parts.len() > 1 && part.name == deciding,
             values,
             chart: PartChart {
-                axis,
+                x: s.map(|s| s.name.clone()),
                 xs,
                 curves,
                 points,
@@ -450,14 +465,16 @@ fn build<'a>(rules: &'a RuleSet, query: &Query, samples: usize) -> Result<View<'
         .iter()
         .map(|(_, d)| cdf_xs.iter().map(|x| d.cdf(*x)).collect())
         .collect();
-    // The response.
-    let s = &r.sliders[r.x];
-    let xs = grid(s.low, s.high, samples);
+    // The response (none for a quantity that reads no input).
     let mut response = Curves::default();
     let mut part_responses = vec![Curves::default(); q.parts.len()];
     let mut inputs = r.inputs.clone();
+    let (xs, x_name) = match r.sliders.get(r.x) {
+        Some(s) => (grid(s.low, s.high, samples), s.name.clone()),
+        None => (Vec::new(), String::new()),
+    };
     for x in &xs {
-        inputs.insert(s.name.clone(), *x);
+        inputs.insert(x_name.clone(), *x);
         let j = q
             .joined(&inputs, &rules.inputs)
             .map_err(|e| e.to_string())?;
@@ -500,7 +517,6 @@ pub fn data(rules: &RuleSet, query: &Query, samples: usize) -> Result<Json, Stri
                 .zip(pv.dist.params())
                 .map(|(k, x)| (k.to_string(), json!(x)))
                 .collect();
-            let axis = &pv.part.axes[pv.chart.axis];
             json!({
                 "name": pv.part.name,
                 "text": pv.part.text,
@@ -512,7 +528,7 @@ pub fn data(rules: &RuleSet, query: &Query, samples: usize) -> Result<Json, Stri
                 "outputs": pv.summary.json(),
                 "deciding": pv.part.name == v.deciding,
                 "chart": {
-                    "x": axis.input,
+                    "x": pv.chart.x,
                     "xs": pv.chart.xs,
                     "curves": pv.chart.curves.json(),
                     "points": pv.chart.points.iter().map(|[x, lo, hi, m]| json!({
@@ -543,7 +559,7 @@ pub fn data(rules: &RuleSet, query: &Query, samples: usize) -> Result<Json, Stri
             })).collect::<Vec<_>>(),
         },
         "response": {
-            "x": v.r.sliders[v.r.x].name,
+            "x": v.r.sliders.get(v.r.x).map(|s| &s.name),
             "xs": v.xs,
             "curves": v.response.json(),
             "parts": v.parts.iter().zip(&v.part_responses).map(|(pv, c)| json!({
@@ -869,7 +885,10 @@ fn distribution_chart(out: &mut String, v: &View, labels: &Labels) {
 
 fn response_chart(out: &mut String, v: &View, labels: &Labels) {
     let q = v.r.quantity;
-    let x = &v.r.sliders[v.r.x];
+    // A quantity that reads no input has no response to show.
+    let Some(x) = v.r.sliders.get(v.r.x) else {
+        return;
+    };
     out.push_str("<section class=\"oo-rules-response\"><div class=\"oo-rules-row\">");
     out.push_str(&format!("<h4>{}</h4>", escape(&labels.response)));
     let names: Vec<String> = v.r.sliders.iter().map(|s| s.name.clone()).collect();
@@ -946,13 +965,11 @@ fn response_chart(out: &mut String, v: &View, labels: &Labels) {
 
 fn part_chart(out: &mut String, pv: &PartView, k: usize, v: &View, labels: &Labels) {
     let part = pv.part;
-    let axis = &part.axes[pv.chart.axis];
-    let s =
-        v.r.sliders
-            .iter()
-            .find(|s| s.name == axis.input)
-            .expect("every input a part reads has a slider");
-    let c = &pv.chart.curves;
+    let s = pv
+        .chart
+        .x
+        .as_ref()
+        .and_then(|x| v.r.sliders.iter().find(|s| &s.name == x));
     out.push_str(&format!(
         "<figure class=\"oo-rules-part{}\"><figcaption><span class=\"oo-rules-name\">{}</span> \
          <span class=\"oo-hint\">{} · {}</span>",
@@ -980,9 +997,42 @@ fn part_chart(out: &mut String, pv: &PartView, k: usize, v: &View, labels: &Labe
         out.push_str(&format!("<p class=\"oo-hint\">{}</p>", escape(&part.text)));
     }
     out.push_str("</figcaption>");
+    // Over an input; a part of a quantity that reads none has its legend only.
+    if let Some(s) = s {
+        part_svg(out, pv, k, v, labels, s);
+    }
+    out.push_str("<ul class=\"oo-rules-legend\">");
+    let params: Vec<String> = pv
+        .dist
+        .family()
+        .params()
+        .iter()
+        .zip(pv.dist.params())
+        .map(|(n, x)| format!("{n} <b>{}</b>", num(x)))
+        .collect();
+    out.push_str(&format!(
+        "<li class=\"oo-rules-swatch\"><i class=\"oo-rules-part-key oo-rules-s{s}\"></i>{}</li>",
+        params.join(" "),
+        s = k % 8
+    ));
+    if !pv.chart.points.is_empty() {
+        out.push_str(&format!(
+            "<li class=\"oo-rules-dots\"><i class=\"oo-rules-s{}\"></i>{}</li>",
+            k % 8,
+            escape(&labels.points)
+        ));
+    }
+    out.push_str("</ul></figure>");
+}
+
+/// A part's chart over the input `s`: its band, median and the value at `p`,
+/// the points written, and a marker at the value chosen.
+fn part_svg(out: &mut String, pv: &PartView, k: usize, v: &View, labels: &Labels, s: &Slider) {
+    let part = pv.part;
+    let c = &pv.chart.curves;
     let (y0, y1) = y_range(c.values());
     let f = Frame::new(320.0, 170.0, (s.low, s.high), (y0, y1));
-    f.open(out, &format!("{} / {}", part.name, axis.input));
+    f.open(out, &format!("{} / {}", part.name, s.name));
     let xs = &pv.chart.xs;
     out.push_str(&format!(
         "<path class=\"oo-rules-area oo-rules-s{s}\" d=\"{}\"/>\
@@ -999,7 +1049,7 @@ fn part_chart(out: &mut String, pv: &PartView, k: usize, v: &View, labels: &Labe
     for [x, lo, hi, m] in &pv.chart.points {
         let title = format!(
             "{} = {}: {} – {}, {} {}",
-            axis.input,
+            s.name,
             num(*x),
             num(*lo),
             num(*hi),
@@ -1016,24 +1066,8 @@ fn part_chart(out: &mut String, pv: &PartView, k: usize, v: &View, labels: &Labe
             ));
         }
     }
-    f.marker(out, pv.values[pv.chart.axis]);
-    out.push_str("</svg><ul class=\"oo-rules-legend\">");
-    let params: Vec<String> = pv
-        .dist
-        .family()
-        .params()
-        .iter()
-        .zip(pv.dist.params())
-        .map(|(n, x)| format!("{n} <b>{}</b>", num(x)))
-        .collect();
-    out.push_str(&format!(
-        "<li class=\"oo-rules-swatch\"><i class=\"oo-rules-part-key oo-rules-s{s}\"></i>{}</li>\
-         <li class=\"oo-rules-dots\"><i class=\"oo-rules-s{s}\"></i>{}</li>",
-        params.join(" "),
-        escape(&labels.points),
-        s = k % 8
-    ));
-    out.push_str("</ul></figure>");
+    f.marker(out, s.value);
+    out.push_str("</svg>");
 }
 
 /// The component, rendered at `query`.
