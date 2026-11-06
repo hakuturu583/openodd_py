@@ -153,6 +153,31 @@ MODULES:
     assert not odd.evaluate(odd.sample({"flow": 4, "wind": 7.5, "grade": 5.0})).inside
 
 
+def test_half_open_ranges_keep_neighbouring_literals_apart() -> None:
+    # As tier4/taxonomy writes its rain intensity.
+    odd = openodd.load_openodd(
+        """
+TAXONOMY:
+  rainfall_rate: float precipitation_rate
+  rain_intensity:
+    no_rain: {rainfall_rate: "< 0.1 mm/h"}
+    light_rain: {rainfall_rate: "[0.1 .. 2.5) mm/h"}
+    moderate_rain: {rainfall_rate: "[2.5 .. 7.6] mm/h"}
+    heavy_rain: {rainfall_rate: "> 7.6 mm/h"}
+MODULES:
+  light:
+    INCLUDE_AND:
+      rainfall_rate: "[0 .. 2.5) mm/h"
+""",
+        bindings={"rainfall_rate": {"probe": "rain_mm_h"}},
+        backend=backend(),
+    )
+    intensity = {x: odd.sample({"rain_rate": x})["rain_intensity"] for x in (2.4, 2.5, 7.6)}
+    assert intensity == {2.4: "light_rain", 2.5: "moderate_rain", 7.6: "moderate_rain"}
+    assert odd.evaluate(odd.sample({"rain_rate": 2.4})).inside
+    assert not odd.evaluate(odd.sample({"rain_rate": 2.5})).inside
+
+
 def test_buckets_outside_the_odd(binding: Path) -> None:
     odd = openodd.load_odd_binding(binding, backend=backend())
     assert odd.outside_buckets("speed") == ["[50, 80]"]

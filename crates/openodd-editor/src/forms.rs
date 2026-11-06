@@ -964,7 +964,9 @@ fn interval_of(v: &CondValue, unit_ok: impl Fn(&str) -> bool) -> Option<(f64, f6
                 (n, f64::INFINITY)
             })
         }
-        CondValue::Range { low, high, unit } => {
+        CondValue::Range {
+            low, high, unit, ..
+        } => {
             if !unit_ok(unit) {
                 return None;
             }
@@ -1248,23 +1250,54 @@ fn CompareValue(at: CondsAt, id: u64, literals: Memo<Vec<String>>) -> impl IntoV
 #[component]
 fn RangeValue(at: CondsAt, id: u64) -> impl IntoView {
     let part = move |i: usize| match read_value(at, id) {
-        Some(CondValue::Range { low, high, unit }) => [low, high, unit][i].clone(),
+        Some(CondValue::Range {
+            low, high, unit, ..
+        }) => [low, high, unit][i].clone(),
         _ => String::new(),
     };
     let set = move |i: usize, v: String| {
         edit_cond(at, id, move |c| {
-            if let CondValue::Range { low, high, unit } = &mut c.value {
+            if let CondValue::Range {
+                low, high, unit, ..
+            } = &mut c.value
+            {
                 *[low, high, unit][i] = v;
+            }
+        })
+    };
+    // Whether the low (0) or the high (1) end is in the range.
+    let included = move |i: usize| match read_value(at, id) {
+        Some(CondValue::Range {
+            include_low,
+            include_high,
+            ..
+        }) => [include_low, include_high][i],
+        _ => true,
+    };
+    let toggle = move |i: usize| {
+        edit_cond(at, id, move |c| {
+            if let CondValue::Range {
+                include_low,
+                include_high,
+                ..
+            } = &mut c.value
+            {
+                let end = if i == 0 { include_low } else { include_high };
+                *end = !*end;
             }
         })
     };
     view! {
         <div class="inline">
-            "["
+            <button class="bracket" title="Include or leave out the low end" on:click=move |_| toggle(0)>
+                {move || if included(0) { "[" } else { "(" }}
+            </button>
             <input class="num" placeholder="low" prop:value=move || part(0) on:input=move |ev| set(0, event_target_value(&ev))/>
             ".."
             <input class="num" placeholder="high" prop:value=move || part(1) on:input=move |ev| set(1, event_target_value(&ev))/>
-            "]"
+            <button class="bracket" title="Include or leave out the high end" on:click=move |_| toggle(1)>
+                {move || if included(1) { "]" } else { ")" }}
+            </button>
             <input class="unit" placeholder="unit" prop:value=move || part(2) on:input=move |ev| set(2, event_target_value(&ev))/>
         </div>
     }
