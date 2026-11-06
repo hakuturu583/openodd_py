@@ -216,6 +216,17 @@ pub fn sliders(rules: &RuleSet, quantity: &Quantity) -> Vec<Slider> {
         }
     }
     for s in &mut out {
+        if categorical(rules, &s.name) {
+            // A label a part is written at: the default when one is, else
+            // the first.
+            let points = written(quantity, &s.name);
+            s.value = s
+                .default
+                .filter(|d| points.contains(d))
+                .or_else(|| points.first().copied())
+                .unwrap_or(s.low);
+            continue;
+        }
         if s.high <= s.low {
             // One point: a range around it (the value holds either side).
             let pad = (s.low.abs() * 0.1).max(1.0);
@@ -252,6 +263,17 @@ fn resolve<'a>(rules: &'a RuleSet, query: &Query) -> Result<Resolved<'a>, String
         let v = query.inputs.get(&s.name).copied().unwrap_or(s.value);
         // Beyond the outermost points every value holds: nothing changes.
         s.value = v.clamp(s.low, s.high);
+        if categorical(rules, &s.name) {
+            // The nearest label a part is written at: nothing lies between.
+            let points = written(quantity, &s.name);
+            if let Some(p) = points
+                .iter()
+                .copied()
+                .min_by(|a, b| (a - s.value).abs().total_cmp(&(b - s.value).abs()))
+            {
+                s.value = p;
+            }
+        }
         inputs.insert(s.name.clone(), s.value);
     }
     let x = match &query.x {
@@ -375,6 +397,53 @@ struct View<'a> {
     part_responses: Vec<Curves>,
 }
 
+/// The points of `input` `quantity` has a distribution at, increasing: those
+/// every part reading it is written at (the quantity is joined at one value
+/// of each input). When the parts share none, every part's, so the view
+/// still says where each is written.
+fn written(quantity: &Quantity, input: &str) -> Vec<f64> {
+    let per_part: Vec<&Vec<f64>> = quantity
+        .parts
+        .iter()
+        .flat_map(|p| &p.axes)
+        .filter(|a| a.input == input)
+        .map(|a| &a.points)
+        .collect();
+    let Some((first, rest)) = per_part.split_first() else {
+        return Vec::new();
+    };
+    let shared: Vec<f64> = first
+        .iter()
+        .copied()
+        .filter(|x| rest.iter().all(|p| p.contains(x)))
+        .collect();
+    if !shared.is_empty() {
+        return shared;
+    }
+    let mut all: Vec<f64> = per_part.iter().flat_map(|p| p.iter().copied()).collect();
+    all.sort_by(f64::total_cmp);
+    all.dedup();
+    all
+}
+
+/// Whether `input` is a categorical input of `rules` (read at its labels).
+fn categorical(rules: &RuleSet, input: &str) -> bool {
+    rules
+        .inputs
+        .get(input)
+        .is_some_and(|i| !i.labels.is_empty())
+}
+
+/// The values along slider `s`: a grid of `samples`, or a categorical
+/// input's labels' indices.
+fn grid_of(rules: &RuleSet, s: &Slider, samples: usize) -> Vec<f64> {
+    if categorical(rules, &s.name) {
+        let (lo, hi) = (s.low.ceil() as i64, s.high.floor() as i64);
+        return (lo..=hi).map(|i| i as f64).collect();
+    }
+    grid(s.low, s.high, samples)
+}
+
 fn grid(low: f64, high: f64, n: usize) -> Vec<f64> {
     (0..n)
         .map(|k| low + (high - low) * k as f64 / (n - 1) as f64)
@@ -413,7 +482,12 @@ fn build<'a>(rules: &'a RuleSet, query: &Query, samples: usize) -> Result<View<'
             ),
             None => x_slider,
         };
-        let xs = s.map(|s| grid(s.low, s.high, samples)).unwrap_or_default();
+        let xs = match (axis, s) {
+            // Over a categorical input: at its labels, nothing between.
+            (Some(axis), _) if part.axes[axis].categorical() => part.axes[axis].points.clone(),
+            (_, Some(s)) => grid_of(rules, s, samples),
+            _ => Vec::new(),
+        };
         let at = |v: f64| match axis {
             Some(axis) => {
                 let mut vs = values.clone();
@@ -469,15 +543,21 @@ fn build<'a>(rules: &'a RuleSet, query: &Query, samples: usize) -> Result<View<'
     let mut response = Curves::default();
     let mut part_responses = vec![Curves::default(); q.parts.len()];
     let mut inputs = r.inputs.clone();
-    let (xs, x_name) = match r.sliders.get(r.x) {
-        Some(s) => (grid(s.low, s.high, samples), s.name.clone()),
+    let (grid_xs, x_name) = match r.sliders.get(r.x) {
+        Some(s) => (grid_of(rules, s, samples), s.name.clone()),
         None => (Vec::new(), String::new()),
     };
-    for x in &xs {
+    let x_categorical = categorical(rules, &x_name);
+    let mut xs = Vec::with_capacity(grid_xs.len());
+    for x in &grid_xs {
         inputs.insert(x_name.clone(), *x);
-        let j = q
-            .joined(&inputs, &rules.inputs)
-            .map_err(|e| e.to_string())?;
+        let j = match q.joined(&inputs, &rules.inputs) {
+            Ok(j) => j,
+            // A label a part is not written at: no response there.
+            Err(_) if x_categorical => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        xs.push(*x);
         let (lo, hi) = j.support();
         response.push(lo, hi, j.quantile(0.5), j.quantile(p));
         for (c, (_, d)) in part_responses.iter_mut().zip(&j.parts) {

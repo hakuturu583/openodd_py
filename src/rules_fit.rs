@@ -290,6 +290,17 @@ impl Observations {
 /// column `weight` names (1 where a row has none; a negative one is an
 /// error).
 pub fn observations(rows: &[Row], names: &[String], weight: Option<&str>) -> Result<Observations> {
+    observations_labelled(rows, names, weight, &IndexMap::new())
+}
+
+/// [`observations`], a categorical input's value read as its label's index
+/// in `labels` (input -> its labels: [`RuleSet::input_labels`]).
+pub fn observations_labelled(
+    rows: &[Row],
+    names: &[String],
+    weight: Option<&str>,
+    labels: &IndexMap<String, Vec<String>>,
+) -> Result<Observations> {
     let mut out = Observations {
         observed: names.iter().map(|n| (n.clone(), 0)).collect(),
         ..Observations::default()
@@ -298,12 +309,33 @@ pub fn observations(rows: &[Row], names: &[String], weight: Option<&str>) -> Res
     for (r, row) in rows.iter().enumerate() {
         let mut values = IndexMap::new();
         for name in names {
-            if let Some(x) = row
-                .get(name)
-                .map(|c| c.number(r, name))
-                .transpose()?
-                .flatten()
-            {
+            let read = |c: &Cell| -> Result<Option<f64>> {
+                let Some(l) = labels.get(name) else {
+                    return c.number(r, name);
+                };
+                match c {
+                    // Not observed, as for a number: empty, or NaN.
+                    Cell::Missing => Ok(None),
+                    Cell::Text(t) if t.trim().is_empty() => Ok(None),
+                    Cell::Number(x) if x.is_nan() => Ok(None),
+                    Cell::Text(t) | Cell::Other(t) => l
+                        .iter()
+                        .position(|x| x == t.trim())
+                        .map(|i| Some(i as f64))
+                        .ok_or_else(|| {
+                            Error::value(format!(
+                                "row {r}: {name} is {t:?}, not one of its labels {}",
+                                l.join(", ")
+                            ))
+                        }),
+                    Cell::Number(x) => Err(Error::value(format!(
+                        "row {r}: {name} is {}, not one of its labels {}",
+                        py_float_repr(*x),
+                        l.join(", ")
+                    ))),
+                }
+            };
+            if let Some(x) = row.get(name).map(read).transpose()?.flatten() {
                 values.insert(name.clone(), x);
                 out.observed[name] += 1;
             }
@@ -410,10 +442,16 @@ pub fn json_rows(text: &str) -> Result<(Vec<Row>, Option<String>)> {
     }
 }
 
-/// [`json_rows`] read as a fit reads them ([`observations`]).
-pub fn observations_from_json(text: &str, names: &[String]) -> Result<Observations> {
+/// [`json_rows`] read as a fit of `set` reads them ([`observations_labelled`]):
+/// the values `set` reads, a categorical input's as its label's index.
+pub fn observations_from_json(text: &str, set: &RuleSet) -> Result<Observations> {
     let (rows, weight) = json_rows(text)?;
-    observations(&rows, names, weight.as_deref())
+    observations_labelled(
+        &rows,
+        &set.data_names(),
+        weight.as_deref(),
+        &set.input_labels(),
+    )
 }
 
 /// A row's value of `name`, if it has a finite one.
@@ -590,6 +628,15 @@ impl RuleSet {
 
     /// The names a row of data may give these rules: the quantities, and
     /// the inputs their parts read.
+    /// Each categorical input's labels: what a row gives it as.
+    pub fn input_labels(&self) -> IndexMap<String, Vec<String>> {
+        self.inputs
+            .iter()
+            .filter(|(_, i)| !i.labels.is_empty())
+            .map(|(n, i)| (n.clone(), i.labels.clone()))
+            .collect()
+    }
+
     pub fn data_names(&self) -> Vec<String> {
         self.order()
             .iter()
@@ -820,6 +867,13 @@ impl RuleSet {
                     let v = observed(row, &a.input)
                         .or_else(|| self.inputs.get(&a.input).and_then(|i| i.default));
                     match v {
+                        // A label the part is not written at: the quantity
+                        // has no distribution there, so the row says nothing
+                        // of it (as one missing an input).
+                        Some(v) if a.categorical() && !a.points.contains(&v) => {
+                            data.skipped += 1;
+                            continue 'rows;
+                        }
                         Some(v) => values.push(v),
                         None => {
                             data.skipped += 1;
@@ -1636,6 +1690,10 @@ fn quantities_text(
                 .axes
                 .iter()
                 .map(|a| {
+                    if a.categorical() {
+                        let labels: Vec<String> = a.labels.iter().map(|l| quoted(l)).collect();
+                        return format!("{}: [{}]", quoted(&a.input), labels.join(", "));
+                    }
                     format!(
                         "{}: {}",
                         quoted(&a.input),
@@ -2238,8 +2296,32 @@ quantities:
     }
 
     #[test]
+    fn json_data_reads_a_categorical_input_at_its_labels() {
+        let set = RuleSet::parse(
+            "version: 2\ninputs:\n  tod: {labels: [day, night]}\nquantities:\n  sun:\n    parts:\n      t:\n        at: {tod: [day, night]}\n        uniform: {low: [10, -30], high: [70, -6]}\n",
+            "s.yaml",
+        )
+        .unwrap();
+        let o = observations_from_json(
+            r#"[{"tod": "night", "sun": -10}, {"tod": "", "sun": 20}]"#,
+            &set,
+        )
+        .unwrap();
+        assert_eq!(o.rows[0]["tod"], 1.0);
+        assert!(!o.rows[1].contains_key("tod"));
+        let e = observations_from_json(r#"[{"tod": "noon", "sun": 1}]"#, &set)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not one of its labels day, night"), "{e}");
+    }
+
+    #[test]
     fn json_data_comes_as_rows_or_columns_and_may_have_holes() {
-        let names: Vec<String> = ["water", "grip"].iter().map(|s| s.to_string()).collect();
+        let names = RuleSet::parse(
+            "version: 2\nquantities:\n  grip:\n    parts:\n      w:\n        at: {water: [0, 100]}\n        uniform: {low: 0, high: 1}\n",
+            "g.yaml",
+        )
+        .unwrap();
         let rows = r#"{"rows": [
             {"time": "12:00", "water": 70, "grip": 0.62, "dt": 0.5},
             {"water": "20"},

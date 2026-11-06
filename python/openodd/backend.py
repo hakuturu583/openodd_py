@@ -45,7 +45,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from .rules import Rules, RulesError
+from .rules import Rules, RulesError, rule_value
 
 if TYPE_CHECKING:
     from .model import OddAttribute
@@ -307,13 +307,14 @@ class Backend:
         self._rules_in_use = followed
         return self._rules_in_use
 
-    def rule_values(self, values: Mapping[str, float]) -> dict[str, float]:
+    def rule_values(self, values: Mapping[str, Any]) -> dict[str, Any]:
         """What the rules read of *values*, the inputs a caller has: by
-        default those. A backend whose rules read something derived from them
-        (the larger of two, say) overrides it."""
-        return {str(k): float(v) for k, v in values.items()}
+        default those -- a number as a float, anything else (a categorical
+        input's label: a string, a bool, an enum) as given. A backend whose rules read something derived from them (the
+        larger of two, say) overrides it."""
+        return {str(k): rule_value(v) for k, v in values.items()}
 
-    def derived(self, quantity: str, values: Mapping[str, float]) -> dict[str, float]:
+    def derived(self, quantity: str, values: Mapping[str, Any]) -> dict[str, float]:
         """``low``, ``high``, ``median`` and ``mean`` of *quantity* at
         *values*, by :attr:`active_rules`.
 
@@ -327,7 +328,7 @@ class Backend:
         return rules.evaluate(quantity, self.rule_values(values))
 
     def derived_range(
-        self, quantity: str, values: Mapping[str, float]
+        self, quantity: str, values: Mapping[str, Any]
     ) -> tuple[float, float]:
         """``(low, high)``: the least and greatest value of *quantity* at
         *values* (:meth:`derived`)."""
@@ -339,7 +340,7 @@ class Backend:
     def derived_at(
         self,
         quantity: str,
-        values: Mapping[str, float],
+        values: Mapping[str, Any],
         quantile: float,
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> float:
@@ -356,7 +357,7 @@ class Backend:
 
     def derived_sample(
         self,
-        values: Mapping[str, float],
+        values: Mapping[str, Any],
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> dict[str, float]:
         """Every quantity of :attr:`active_rules` at *values*, each at its own

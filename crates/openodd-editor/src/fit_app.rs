@@ -99,12 +99,18 @@ pub fn fit_context() -> FCtx {
     );
     // The names the rules read: an edit that leaves them be leaves the data
     // unread again.
-    let names = Memo::new(move |_| r.good.with(|g| g.as_ref().map(|s| s.data_names())));
+    let names = Memo::new(move |_| {
+        r.good
+            .with(|g| g.as_ref().map(|s| (s.data_names(), s.input_labels())))
+    });
     let observations = Memo::new(move |_| {
-        let names = names.get()?;
-        data.with(|d| {
-            d.as_ref()
-                .map(|(_, text)| observations_from_json(text, &names).map_err(|e| e.to_string()))
+        names.get()?;
+        r.good.with(|g| {
+            let set = g.as_ref()?;
+            data.with(|d| {
+                d.as_ref()
+                    .map(|(_, text)| observations_from_json(text, set).map_err(|e| e.to_string()))
+            })
         })
     });
     let factors = Memo::new(move |_| {

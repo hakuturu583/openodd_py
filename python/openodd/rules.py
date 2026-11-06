@@ -276,6 +276,34 @@ class Rules:
         )
 
     @property
+    def input_labels(self) -> dict[str, list[str]]:
+        """Each categorical input's labels, in order: it is given as one (its
+        parts are written at labels, and nothing lies between two)."""
+        return dict(self._core.input_labels())
+
+    def _inputs(self, inputs: Optional[Mapping[str, Any]]) -> dict[str, float]:
+        """*inputs* as the core reads them: a categorical input's label as its
+        index."""
+        if not inputs:
+            return {}
+        labels = self._core.input_labels()
+        out: dict[str, float] = {}
+        for k, v in inputs.items():
+            name = str(k)
+            value = rule_value(v)
+            if name in labels and isinstance(value, str):
+                label = value
+                try:
+                    out[name] = float(labels[name].index(label))
+                except ValueError:
+                    raise RulesError(
+                        f"{name} is {label!r}, not one of its labels {', '.join(labels[name])}"
+                    ) from None
+            else:
+                out[name] = float(value)
+        return out
+
+    @property
     def version(self) -> int:
         """The format's version: the newest of the files read."""
         return self._core.version
@@ -366,7 +394,7 @@ class Rules:
     def evaluate(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> dict[str, float]:
         """``low``, ``high``, ``median`` and ``mean`` of *quantity* at
@@ -380,13 +408,13 @@ class Rules:
                 no default.
         """
         return self._call(
-            self._core.evaluate, quantity, _values(inputs), _values(quantiles)
+            self._core.evaluate, quantity, self._inputs(inputs), _values(quantiles)
         )
 
     def range(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> tuple[float, float]:
         """``(low, high)``: the least and greatest value *quantity* takes at
@@ -397,7 +425,7 @@ class Rules:
     def quantile(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         p: float,
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> float:
@@ -409,7 +437,7 @@ class Rules:
         return self._call(
             self._core.quantile,
             quantity,
-            _values(inputs),
+            self._inputs(inputs),
             float(p),
             _values(quantiles),
         )
@@ -417,19 +445,19 @@ class Rules:
     def cdf(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         x: float,
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> float:
         """The share of *quantity*'s mass at or below *x*, at *inputs*."""
         return self._call(
-            self._core.cdf, quantity, _values(inputs), float(x), _values(quantiles)
+            self._core.cdf, quantity, self._inputs(inputs), float(x), _values(quantiles)
         )
 
     def distributions(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> list[tuple[str, str, dict[str, float]]]:
         """Each part's distribution at *inputs*: ``(part, family, params)``."""
@@ -438,7 +466,7 @@ class Rules:
             for name, family, params in self._call(
                 self._core.distributions,
                 quantity,
-                _values(inputs),
+                self._inputs(inputs),
                 _values(quantiles),
             )
         ]
@@ -460,14 +488,14 @@ class Rules:
 
     def sample(
         self,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> dict[str, float]:
         """Every quantity's value at *inputs*, each at its own quantile in
         *quantiles* (0.5 when not named), in :attr:`order`: what one run
         sets. A quantity given in *inputs* keeps the value given."""
         return dict(
-            self._call(self._core.sample, _values(inputs), _values(quantiles))
+            self._call(self._core.sample, self._inputs(inputs), _values(quantiles))
         )
 
     def check_inputs(self, allowed: Sequence[str]) -> None:
@@ -623,8 +651,16 @@ class Rules:
         numbers -- and their weights, given or from *weight_column*."""
         if weights is not None and weight_column is not None:
             raise RulesError("give weights or weight_column, not both")
+        # A label as evaluation reads it: an enum by name, a bool in lowercase
+        # (a number, a string and a missing value as given).
+        labelled = self._core.input_labels()
         data, from_column = self._call(
-            self._core.observations, [dict(r) for r in rows], weight_column
+            self._core.observations,
+            [
+                {k: rule_value(v) if k in labelled and v is not None else v for k, v in r.items()}
+                for r in rows
+            ],
+            weight_column,
         )
         return data, from_column if weights is None else [float(w) for w in weights]
 
@@ -877,6 +913,22 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
             )
     print(f"wrote {args.output}")
     return 0
+
+
+def rule_value(value: Any) -> Any:
+    """A value as the rules read it: a number as a float; anything else -- a
+    categorical input's label, given as a string, a bool or an enum member
+    (an ``IntEnum``'s too) -- as the label the core writes (a bool in
+    lowercase, an enum by name)."""
+    import enum  # noqa: PLC0415
+
+    if isinstance(value, (int, float)) and not isinstance(value, (bool, enum.Enum)):
+        return float(value)
+    if value is None or (isinstance(value, float) and value != value):
+        return value
+    from .items import value_label  # noqa: PLC0415 - items imports this module's peers
+
+    return value_label(value)
 
 
 def _values(inputs: Optional[Mapping[str, float]]) -> dict[str, float]:

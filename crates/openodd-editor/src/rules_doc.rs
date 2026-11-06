@@ -128,6 +128,7 @@ impl PartDoc {
             .map(|a| Axis {
                 input: a.input.clone(),
                 points: a.points.clone(),
+                labels: Vec::new(),
             })
             .collect();
         let fixed = match &self.fixed {
@@ -787,7 +788,12 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
                         Value::Sequence(_) => numbers(points),
                         other => number(other).map(|x| vec![x]),
                     }
-                    .ok_or_else(|| format!("{at}.at.{input}: numbers"))?;
+                    .ok_or_else(|| {
+                        format!(
+                            "{at}.at.{input}: numbers (a categorical input's labels are read, \
+                             but not edited here yet: edit them in the YAML)"
+                        )
+                    })?;
                     axes.push(AxisDoc {
                         id: fresh_id(),
                         input,

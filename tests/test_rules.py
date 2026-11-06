@@ -363,8 +363,11 @@ class TestInputsAndTheTaxonomy:
 
     def test_version_3_refuses_an_input_that_is_no_concept(self, tmp_path: Path) -> None:
         (tmp_path / "taxonomy.yaml").write_text(TAXONOMY)
-        (tmp_path / "grip.yaml").write_text(GRIP_V3.replace("weather.rainfall_rate", "weather.rain"))
-        with pytest.raises(RulesError, match="is not a number"):
+        # A categorical concept is read at its labels, not at numbers.
+        (tmp_path / "grip.yaml").write_text(
+            GRIP_V3.replace("weather.rainfall_rate, unit: mm/h", "weather.rain")
+        )
+        with pytest.raises(RulesError, match="rainfall_rate is categorical: write its points as labels"):
             Rules.read(tmp_path / "grip.yaml")
 
     def test_version_2_inputs_are_unclassified(self) -> None:
@@ -555,6 +558,101 @@ def test_dropping_a_runs_rules_keeps_the_scenarios_nodes_joined() -> None:
     assert "grip" in backend.active_rules.quantities
 
 
+SUN = """version: 2
+inputs:
+  time_of_day: {labels: [day, dusk, night, dawn], default: day}
+quantities:
+  sun_altitude:
+    parts:
+      time:
+        at: {time_of_day: [day, dusk, night, dawn]}
+        uniform: {low: [10, -6, -30, -6], high: [70, 0, -6, 0]}
+  sight:
+    parts:
+      light:
+        at: {time_of_day: [day, night], water: [0, 100]}
+        uniform: {low: [[250, 150], [50, 40]], high: [[400, 250], [150, 100]]}
+"""
+
+
+class TestCategoricalInputs:
+    def test_a_part_is_written_at_a_categorical_inputs_labels(self) -> None:
+        rules = Rules.from_text(SUN)
+        assert rules.input_labels == {"time_of_day": ["day", "dusk", "night", "dawn"]}
+        assert rules.range("sun_altitude", {"time_of_day": "dusk"}) == (-6.0, 0.0)
+        assert rules.range("sun_altitude", {}) == (10.0, 70.0)  # the default, day
+        # Nothing between two labels; a number axis beside one still interpolates.
+        assert rules.range("sight", {"time_of_day": "night", "water": 50}) == pytest.approx((45.0, 125.0))
+        assert rules.part_axes("sight", "light")[0][0] == "time_of_day"
+
+    def test_a_label_the_part_is_not_written_at_is_refused(self) -> None:
+        rules = Rules.from_text(SUN)
+        with pytest.raises(RulesError, match="writes no distribution at time_of_day=dusk: it is written at day, night"):
+            rules.range("sight", {"time_of_day": "dusk", "water": 0})
+        with pytest.raises(RulesError, match="time_of_day is 'noon', not one of its labels"):
+            rules.range("sun_altitude", {"time_of_day": "noon"})
+
+    @pytest.mark.parametrize(
+        ("change", "message"),
+        [
+            (("[day, dusk, night, dawn]}\n        uniform", "[dusk, day, night, dawn]}\n        uniform"), "write the labels once each, in time_of_day's order"),
+            (("[day, dusk, night, dawn]}\n        uniform", "[day, noon, night, dawn]}\n        uniform"), "'noon' is not one of time_of_day's labels"),
+            (("inputs:\n  time_of_day: {labels: [day, dusk, night, dawn], default: day}\n", ""), "read at labels, and time_of_day has none"),
+            (("default: day", "default: noon"), "'noon' is not one of its labels"),
+            (("time_of_day: [day, night], water", "time_of_day: [0, 2], water"), "time_of_day is categorical: write its points as labels"),
+        ],
+    )
+    def test_labels_are_checked_against_the_input(self, change: tuple[str, str], message: str) -> None:
+        with pytest.raises(RulesError, match=message):
+            Rules.from_text(SUN.replace(*change))
+
+    def test_a_version_3_input_takes_a_categorical_concepts_literals(self, tmp_path: Path) -> None:
+        (tmp_path / "taxonomy.yaml").write_text(TAXONOMY)
+        (tmp_path / "r.yaml").write_text(
+            "version: 3\ntaxonomy: taxonomy.yaml\nbasis: {kind: expert}\n"
+            "inputs:\n  rain: {concept: weather.rain}\n"
+            "quantities:\n  carla_precipitation:\n    parts:\n      p:\n"
+            "        at: {rain: [none, some]}\n        uniform: {low: [0, 20], high: [0, 90]}\n"
+        )
+        rules = Rules.read(tmp_path / "r.yaml")
+        assert rules.input_labels == {"rain": ["none", "some"]}
+        assert rules.range("carla_precipitation", {"rain": "some"}) == (20.0, 90.0)
+        (tmp_path / "r.yaml").write_text(
+            (tmp_path / "r.yaml").read_text().replace("{concept: weather.rain}", "{concept: weather.rain, unit: mm/h}")
+        )
+        with pytest.raises(RulesError, match="'weather.rain' is categorical: it has no unit"):
+            Rules.read(tmp_path / "r.yaml")
+
+    def test_a_fit_reads_labels_and_writes_them(self, tmp_path: Path) -> None:
+        rules = Rules.from_text(SUN)
+        rows = [{"time_of_day": "day", "sun_altitude": 20.0 + i} for i in range(20)]
+        rows += [{"time_of_day": "night", "sun_altitude": -20.0 + i * 0.5} for i in range(20)]
+        fit = rules.fit(rows, fixed=["sight"])
+        fit.write(tmp_path / "fit.yaml")
+        text = (tmp_path / "fit.yaml").read_text()
+        assert '"time_of_day": ["day", "dusk", "night", "dawn"]' in text
+        again = rules.read_over(tmp_path / "fit.yaml")
+        low, high = again.range("sun_altitude", {"time_of_day": "day"})
+        assert 19.0 < low < 21.0 and 38.0 < high < 40.0
+        with pytest.raises(RulesError, match="not one of its labels"):
+            rules.fit([{"time_of_day": "noon", "sun_altitude": 1.0}])
+
+
+def test_a_fit_skips_what_a_categorical_cause_does_not_say() -> None:
+    """An empty or NaN label is not observed (the default is read); a label a
+    part is not written at says nothing of it, and is not put in a
+    neighbour's distribution."""
+    rules = Rules.from_text(SUN)
+    day = [{"time_of_day": "day", "sight": 300.0 + i, "water": 0.0} for i in range(20)]
+    night = [{"time_of_day": "night", "sight": 80.0 + i, "water": 0.0} for i in range(20)]
+    # Dusk: sight has no distribution there; far off, it would drag day's.
+    dusk = [{"time_of_day": "dusk", "sight": 5.0, "water": 0.0} for _ in range(20)]
+    blank = [{"time_of_day": "", "sight": 310.0, "water": 0.0}, {"time_of_day": float("nan"), "sight": 305.0, "water": 0.0}]
+    fit = rules.fit(day + night + dusk + blank, fixed=["sun_altitude"])
+    low, _ = fit.rules.range("sight", {"time_of_day": "day", "water": 0})
+    assert low > 290.0, low
+
+
 def test_rules_name_the_taxonomy_openodd_ships() -> None:
     """``taxonomy: {bundled: default}``: the default ODD's taxonomy, built in."""
     rules = Rules.from_text(
@@ -566,3 +664,62 @@ def test_rules_name_the_taxonomy_openodd_ships() -> None:
     assert rules.taxonomy is not None and rules.taxonomy[0] == "bundled:default"
     assert rules.input_concepts == {"speed": ("dynamic.ego_speed", "km/h")}
     assert rules.taxonomy_concepts["dynamic.ego_speed"]["kind"] == "number"
+
+
+def test_a_backend_reads_a_categorical_input_at_its_label() -> None:
+    backend = Backend(rules=Rules.from_text(SUN))
+    assert backend.derived_range("sun_altitude", {"time_of_day": "night"}) == (-30.0, -6.0)
+    assert backend.derived_at("sun_altitude", {"time_of_day": "dusk"}, 0.5) == pytest.approx(-3.0)
+
+
+def test_a_boolean_categorical_input_reads_python_booleans() -> None:
+    """Labels `[true, false]`: a Python bool is the literal the core writes."""
+    rules = Rules.from_text(
+        "version: 2\ninputs:\n  wet: {labels: [false, true]}\nquantities:\n  grip:\n    parts:\n"
+        "      p:\n        at: {wet: [false, true]}\n        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n"
+    )
+    assert rules.input_labels == {"wet": ["false", "true"]}
+    assert rules.range("grip", {"wet": True}) == (0.5, 0.7)
+    rows = [{"wet": False, "grip": 1.0 + 0.001 * i} for i in range(10)]
+    rows += [{"wet": True, "grip": 0.6 + 0.001 * i} for i in range(10)]
+    fit = rules.fit(rows)
+    assert fit.rules.range("grip", {"wet": False})[0] > 0.95
+
+
+def test_a_backend_reads_a_boolean_label_as_a_label() -> None:
+    backend = Backend(
+        rules=Rules.from_text(
+            # true first: a bool read as 1.0 would be the index of false.
+            "version: 2\ninputs:\n  wet: {labels: [true, false]}\nquantities:\n  grip:\n    parts:\n"
+            "      p:\n        at: {wet: [true, false]}\n        uniform: {low: [0.5, 0.9], high: [0.7, 1.1]}\n"
+        )
+    )
+    assert backend.derived_range("grip", {"wet": True}) == (0.5, 0.7)
+    assert backend.derived_range("grip", {"wet": False}) == (0.9, 1.1)
+
+
+def test_an_enum_is_a_categorical_label_by_name() -> None:
+    """An enum member is its name, an IntEnum's too (not its value as an
+    index), in evaluation, in a backend and in a fit's rows."""
+    import enum
+
+    class Wet(enum.IntEnum):
+        dry = 0
+        wet = 1  # its value is the index of `dry` below
+
+    class Rain(enum.Enum):
+        none = "none"
+        some = "some"
+
+    rules = Rules.from_text(
+        "version: 2\ninputs:\n  wet: {labels: [wet, dry]}\n  rain: {labels: [none, some]}\n"
+        "quantities:\n  grip:\n    parts:\n      p:\n        at: {wet: [wet, dry]}\n"
+        "        uniform: {low: [0.5, 0.9], high: [0.7, 1.1]}\n"
+        "  sight:\n    parts:\n      r:\n        at: {rain: [none, some]}\n        uniform: {low: [300, 100], high: [400, 200]}\n"
+    )
+    assert rules.range("grip", {"wet": Wet.wet}) == (0.5, 0.7)
+    assert Backend(rules=rules).derived_range("grip", {"wet": Wet.wet}) == (0.5, 0.7)
+    rows = [{"rain": Rain.none, "sight": 350.0 + i} for i in range(10)]
+    rows += [{"rain": Rain.some, "sight": 150.0 + i} for i in range(10)]
+    fit = rules.fit(rows, fixed=["grip"])
+    assert fit.rules.range("sight", {"rain": Rain.some})[1] < 170.0

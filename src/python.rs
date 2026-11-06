@@ -2429,6 +2429,11 @@ impl RuleSet {
         Ok(self.inner.quantity(quantity).map_err(err)?.inputs())
     }
 
+    /// Each categorical input's labels, in order: it is given as one.
+    fn input_labels(&self) -> indexmap::IndexMap<String, Vec<String>> {
+        self.inner.input_labels()
+    }
+
     /// The inputs the file describes: name -> its default (`None`: none).
     fn input_defaults(&self) -> indexmap::IndexMap<String, Option<f64>> {
         self.inner
@@ -2709,8 +2714,13 @@ impl RuleSet {
             .iter()
             .map(|row| row.iter().map(|(k, v)| (k.clone(), cell(v))).collect())
             .collect();
-        let obs = crate::rules_fit::observations(&cells, &self.inner.data_names(), weight)
-            .map_err(err)?;
+        let obs = crate::rules_fit::observations_labelled(
+            &cells,
+            &self.inner.data_names(),
+            weight,
+            &self.inner.input_labels(),
+        )
+        .map_err(err)?;
         let weights = obs.weights().map(<[f64]>::to_vec);
         Ok((obs.rows, weights))
     }
@@ -2733,8 +2743,9 @@ fn cell(v: &Bound<'_, PyAny>) -> crate::rules_fit::Cell {
     use crate::rules_fit::Cell;
     if v.is_none() {
         Cell::Missing
-    } else if v.is_instance_of::<pyo3::types::PyBool>() {
-        Cell::Other(v.to_string())
+    } else if let Ok(b) = v.downcast::<pyo3::types::PyBool>() {
+        // As the core writes a boolean literal (`true`), so it matches one.
+        Cell::Other(if b.is_true() { "true" } else { "false" }.into())
     } else if let Ok(s) = v.extract::<String>() {
         Cell::Text(s)
     } else if let Ok(x) = v.extract::<f64>() {

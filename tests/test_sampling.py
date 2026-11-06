@@ -540,3 +540,30 @@ def test_a_control_an_explicit_knob_replaces_is_no_effect(tmp_path: Path) -> Non
     assert sampler.effects == []
     for case in sampler.sample(5):
         assert not any(x.startswith("env.from_control=") for x in case.overrides)
+
+
+def test_an_effect_reads_a_categorical_cause_at_its_label(tmp_path: Path) -> None:
+    """A categorical attribute is a cause of the network: the effect is read
+    at the label the case drew."""
+    taxonomy = "TAXONOMY:\n  weather:\n    rain: [none, light, heavy]\n"
+    (tmp_path / "taxonomy.yaml").write_text(taxonomy)
+    (tmp_path / "rules.yaml").write_text(
+        "version: 3\ntaxonomy: taxonomy.yaml\nbasis: {kind: expert}\n"
+        "inputs:\n  rain: {concept: weather.rain}\n"
+        "quantities:\n  sight_m:\n    parts:\n      p:\n"
+        "        at: {rain: [none, light, heavy]}\n"
+        "        uniform: {low: [300, 150, 50], high: [400, 250, 100]}\n"
+    )
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    b = Backend(probes={"rain": (lambda c: c.get("rain"), "")}, rules=rules)
+    o = openodd.load_openodd(taxonomy, bindings={"weather.rain": {"probe": "rain"}}, backend=b)
+    rain = {"weather.rain": OddKnob("env.rain", values={"none": 0, "light": [1, 30], "heavy": [70, 100]})}
+    effects = [OddKnob("scenario.sight_m", quantity="sight_m")]
+    cases = OddSampler(o, rain, seed=2, backend=b, effects=effects).sample(30)
+    seen = set()
+    for case in cases:
+        label = case.values["weather.rain"]
+        seen.add(label)
+        low, high = rules.range("sight_m", {"rain": label})
+        assert low <= _written(case, "scenario.sight_m") <= high, (label, case.overrides)
+    assert seen == {"none", "light", "heavy"}
