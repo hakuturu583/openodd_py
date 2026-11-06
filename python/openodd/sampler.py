@@ -82,6 +82,10 @@ class OddKnob:
             rule input that stands for it (``concept:``, version 3), and is
             drawn at a quantile of its own per case. ``scale``, ``offset``
             and ``values`` are then not used; ``integer`` and ``limits`` are.
+            A knob with a quantity that sets no attribute -- one of the
+            sampler's ``effects``, or a control no attribute reads -- writes
+            the quantity at whatever of its inputs the case drew (docs/rules.md,
+            "Effects a scenario sets").
     """
 
     key: str
@@ -138,6 +142,56 @@ def _rule_input(backend: Backend, attribute: str, knob: OddKnob) -> str:
     raise ValueError(
         f"{where}: no input of the rules stands for {attribute} (give one concept: {attribute})"
     )
+
+
+def _effect_inputs(
+    backend: Backend, odd: OddDefinition, effects: Sequence[OddKnob], drawn: Iterable[str] = ()
+) -> dict[str, tuple[str, str, str]]:
+    """Rule input -> (the ODD attribute it stands for, the attribute's unit,
+    the input's unit): the inputs *effects*' quantities read, through the
+    quantities they read, that a case draws (*drawn*: the attributes given a
+    knob). Every other input they read must have a default."""
+    if not effects:
+        return {}
+    rules = backend.active_rules
+    for knob in effects:
+        if knob.quantity is None:
+            raise ValueError(f"effect {knob.key}: writes no quantity (give quantity:)")
+        if rules is None:
+            raise ValueError(f"effect {knob.key}: takes quantity {knob.quantity!r} from the rules, and the backend has none")
+        if knob.quantity not in rules.quantities:
+            raise ValueError(f"effect {knob.key}: the rules give no quantity {knob.quantity!r}")
+    assert rules is not None
+    # What the quantities read, through the quantities they read.
+    seen: set[str] = set()
+    stack = [str(k.quantity) for k in effects]
+    reads: set[str] = set()
+    while stack:
+        q = stack.pop()
+        if q in seen:
+            continue
+        seen.add(q)
+        for name in rules.inputs(q):
+            if name in rules.quantities:
+                stack.append(name)
+            else:
+                reads.add(name)
+    drawn = set(drawn)
+    attributes = {a.name: a for a in odd.attributes if a.name in drawn}
+    concepts = rules.input_concepts
+    defaults = rules.input_defaults
+    out: dict[str, tuple[str, str, str]] = {}
+    for name in sorted(reads):
+        concept, input_unit = concepts.get(name, (name, ""))
+        attribute = attributes.get(concept)
+        if attribute is not None:
+            out[name] = (attribute.name, attribute.unit, input_unit or attribute.unit)
+        elif defaults.get(name) is None:
+            raise ValueError(
+                f"effects: the rules read {name}, which stands for no attribute of ODD {odd.name} "
+                "the sampler draws (one given a knob) and has no default"
+            )
+    return out
 
 
 def knobs_from_mapping(raw: Optional[Mapping[str, Any]]) -> dict[str, OddKnob]:
@@ -274,6 +328,12 @@ class OddSampler:
         drawn: The cases earlier samplers of the batch drew from this ODD
             (:meth:`OddDraws.of`).
         backend: Whose knobs (the default backend if none).
+        effects: Knobs that write a quantity of the backend's rules and set no
+            attribute: effects of the network a scenario sets up (the gap to
+            a vehicle ahead). Each case draws every quantity at a quantile of
+            its own, at the values drawn for the inputs that stand for the
+            ODD's attributes, and writes it (:attr:`OddSample.quantities`). A
+            control with a ``quantity`` that no attribute reads is one too.
     """
 
     def __init__(
@@ -289,6 +349,7 @@ class OddSampler:
         drawn: Sequence[OddSample] = (),
         backend: Optional[Backend] = None,
         weights: Optional[Mapping[str, float]] = None,
+        effects: Sequence[OddKnob] = (),
     ) -> None:
         backend = backend or default_backend()
         knobs = dict(knobs or {})
@@ -301,8 +362,15 @@ class OddSampler:
         # Attribute -> (knob, the rule input reading it, the attribute's unit,
         # the input's unit): the value drawn is converted between them.
         self._from_rules: dict[str, tuple[OddKnob, str, str, str]] = {}
+        # The controls the ODD's attributes read, whichever knob is chosen
+        # (an explicit knob replaces one, and it is still the attribute's,
+        # not an effect).
+        used: set[int] = set()
         for attribute in odd.attributes:
-            knob = knobs.get(attribute.name) or backend.knob(attribute, controls)
+            control = backend.knob(attribute, controls)
+            if control is not None:
+                used.add(id(control))
+            knob = knobs.get(attribute.name) or control
             if knob is not None:
                 # A knob that writes a quantity of the rules sets the attribute
                 # only through them: the core draws the attribute over its
@@ -315,7 +383,17 @@ class OddSampler:
                     rules = backend.active_rules
                     input_unit = rules.input_concepts.get(rule_input, ("", ""))[1] if rules else ""
                     self._from_rules[attribute.name] = (knob, rule_input, attribute.unit, input_unit)
-        self._rules = backend.active_rules if self._from_rules else None
+        # Effects: knobs that write a quantity and set no attribute.
+        self._effects = list(effects) + [
+            k for k in controls.values() if k.quantity is not None and id(k) not in used
+        ]
+        self._effect_inputs = _effect_inputs(backend, odd, self._effects, (n for n, _ in chosen))
+        if not chosen and not self._effects:
+            raise ValueError(
+                f"OddSampler: nothing of ODD {odd.name} can be drawn: no attribute is given a knob, "
+                "and there are no effects"
+            )
+        self._rules = backend.active_rules if self._from_rules or self._effects else None
         self._seed = str(seed)
         if strategy is None:
             strategy = "weighted" if weights is not None else "uniform"
@@ -387,28 +465,64 @@ class OddSampler:
         self._log_warnings()
         return cases
 
+    @property
+    def effects(self) -> list[str]:
+        """The quantities the sampler's effects write, in the rules' order."""
+        wanted = {str(k.quantity) for k in self._effects}
+        return [q for q in self._rules.order if q in wanted] if self._rules is not None else []
+
     def _realize(self, case: OddSample) -> OddSample:
-        """*case* with each knob that takes its value from the rules writing
-        the quantity's value at the attribute's drawn value."""
-        if not self._from_rules or self._rules is None:
+        """*case* with every knob that takes its value from the rules writing
+        it: a knob on an attribute, the quantity at the attribute's drawn
+        value; an effect, its quantity at the case's inputs.
+
+        One pass over the quantities in the rules' order, so a quantity reads
+        whatever it depends on at the value written to the run (after that
+        knob's limits and rounding), whichever kind of knob wrote it. A
+        quantity no knob writes is read at its own quantile, the same in
+        every evaluation of the case."""
+        if (not self._from_rules and not self._effects) or self._rules is None:
             return case
         overrides = list(case.overrides)
         quantities = dict(case.quantities)
+        # The inputs that stand for the ODD's attributes, at the values drawn
+        # (in the attribute's unit; the rule's points are in the input's).
+        inputs: dict[str, float] = {}
+        for rule_input, (attribute, unit, input_unit) in self._effect_inputs.items():
+            x = case.values.get(attribute)
+            if isinstance(x, (int, float)) and not isinstance(x, bool):
+                inputs[rule_input] = _core.convert(float(x), unit, input_unit)
+        # Each quantity at a quantile of its own per case, reproducible from
+        # the seed; a knob on an attribute keeps one of its own (from the
+        # attribute's name).
+        quantiles = {
+            q: random.Random(f"{self._seed}:{case.index}:{q}").random() for q in self._rules.order
+        }
+        writers: dict[str, list[OddKnob]] = {}
         for name, (knob, rule_input, unit, input_unit) in self._from_rules.items():
             x = case.values.get(name)
             if not isinstance(x, (int, float)) or isinstance(x, bool):
                 continue
-            # The value drawn is in the attribute's unit; the rule's points
-            # are in its input's.
-            x = _core.convert(float(x), unit, input_unit)
-            # A quantile of its own per case and knob: reproducible from the seed.
-            p = random.Random(f"{self._seed}:{case.index}:{name}").random()
-            y = self._rules.quantile(str(knob.quantity), {rule_input: float(x)}, p)
-            if knob.limits is not None:
-                y = min(max(y, knob.limits[0]), knob.limits[1])
-            written = str(int(round(y))) if knob.integer else repr(float(y))
-            # What the case ran with: the value written, rounded if it was.
-            quantities[str(knob.quantity)] = float(written)
-            prefix = f"{knob.key}="
-            overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
+            inputs[rule_input] = _core.convert(float(x), unit, input_unit)
+            q = str(knob.quantity)
+            if q not in writers:
+                quantiles[q] = random.Random(f"{self._seed}:{case.index}:{name}").random()
+            writers.setdefault(q, []).append(knob)
+        for q in self.effects:
+            writers.setdefault(q, []).extend(k for k in self._effects if k.quantity == q)
+        # A quantity already in the case is read at that value.
+        inputs.update(quantities)
+        for q in self._rules.order:
+            if q not in writers:
+                continue
+            y = self._rules.quantile(q, inputs, quantiles[q], quantiles)
+            for knob in writers[q]:
+                v = y if knob.limits is None else min(max(y, knob.limits[0]), knob.limits[1])
+                written = str(int(round(v))) if knob.integer else repr(float(v))
+                # What the case ran with: the value written, rounded if it
+                # was (the first knob's, when several write it).
+                quantities.setdefault(q, float(written))
+                prefix = f"{knob.key}="
+                overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
+            inputs[q] = quantities[q]
         return dataclasses.replace(case, overrides=overrides, quantities=quantities)

@@ -279,6 +279,37 @@ campaign's report says so ([What a campaign assumed](#what-a-campaign-assumed)).
 How the pairs are made -- which sensor output is compared, by what
 measure -- is the backend's to say.
 
+### Effects a scenario sets
+
+Some settings are effects with no attribute of the ODD to set: what a
+scenario stages, such as the gap to a vehicle about to cut in or how far a
+crossing pedestrian is seen. They are drawn from the network itself. A
+quantity of the rules gives each (a root when nothing in the domain
+conditions it: [A part that reads no input](#a-part-that-reads-no-input)),
+and a knob with that `quantity` and no attribute writes it:
+
+```python
+sampler = openodd.OddSampler(
+    odd,
+    effects=[openodd.OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap", limits=(2, 30))],
+    backend=backend,                  # whose rules give vehicle_ahead_gap
+)
+```
+
+Each case draws every quantity at a quantile of its own (from the seed, the
+case and the quantity), at the values the case drew for the inputs that stand
+for the ODD's attributes (`concept:`, converted to the input's `unit`; an
+input of an attribute's name in version 2 rules). An input that stands for no
+attribute reads its `default`, and without one the sampler refuses. A quantity
+a quantity reads is drawn at its own quantile too. `limits` and `integer`
+apply to the value written, and the case keeps it (`OddSample.quantities`,
+recorded as `case.quantities`) for the [case plot](case_plot.md).
+
+A scenario's control (`controls`, keyed by measure) with a `quantity` that no
+attribute of the ODD reads is such an effect too. The ODD stays discrete, the
+conditions a system is designed for. The effects are continuous, drawn from
+distributions, and are what a search for instability moves.
+
 ## Chains
 
 A part may read another quantity of the same rules, so a quantity can derive
