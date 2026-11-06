@@ -201,6 +201,43 @@ changed between runs is listed once per basis). The Markdown report and
 `openodd-test-report` add a **Fidelity assumptions** section, flagging the
 parts that rest on nothing stated.
 
+## Knobs from the rules
+
+A knob that writes a fixed table -- `rain: {none: 0, light: [1, 30], ...}` --
+hides an assumption about the simulator in code: that light rain *is*
+CARLA's precipitation 1 to 30. Written as a quantity of the rules instead,
+the setting is an **effect** of the condition the sampler drew, with a
+distribution and a `basis` like any other, and a fit can estimate it from
+data pairing real conditions with the settings that reproduce them:
+
+```yaml
+version: 3
+taxonomy: taxonomy.yaml
+basis: {kind: expert}
+inputs:
+  rainfall_rate: {concept: weather.rain.rainfall_rate, unit: mm/h}
+quantities:
+  carla_precipitation:             # the simulator's setting: an effect
+    parts:
+      rain:
+        at: {rainfall_rate: [0, 2.5, 7.6, 50]}
+        uniform: {low: [0, 20, 45, 85], high: [5, 40, 75, 100]}
+```
+
+```python
+knob = openodd.OddKnob("environment.precipitation", quantity="carla_precipitation", limits=(0, 100))
+sampler = openodd.OddSampler(odd, knobs={"weather.rain.rainfall_rate": knob}, backend=backend)
+```
+
+The sampler draws the attribute (`weather.rain.rainfall_rate`, in its own
+unit) as it would for any knob, and the knob writes the quantity's value at
+it: read through the rule input that stands for the attribute (`concept:`;
+an input of the attribute's name in version 2 rules), from the backend's
+active rules, at a quantile of its own per case and knob -- the same for the
+same seed. `limits` and `integer` apply to the value written; `values`,
+`scale` and `offset` are not used. A knob in config takes `quantity:` too
+(`knobs_from_mapping`), and `Backend.manifest()` writes it.
+
 ## Chains
 
 A part may read another quantity of the same rules, so a quantity can derive

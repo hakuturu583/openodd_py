@@ -21,8 +21,10 @@ strategy would. A batch of samplers on one ODD goes on where the last left off
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
+import random
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union
@@ -73,6 +75,13 @@ class OddKnob:
         range: For a numeric attribute, ``[low, high]`` in its unit: what the
             run can bring about.
         limits: ``[low, high]`` the written value must lie in (``None``: open).
+        quantity: A quantity of the backend's rules whose value is written
+            instead of the attribute's: the setting is an effect of the
+            condition drawn, given by the rules (docs/rules.md, "Knobs from
+            the rules"). The quantity reads the attribute's value through the
+            rule input that stands for it (``concept:``, version 3), and is
+            drawn at a quantile of its own per case. ``scale``, ``offset``
+            and ``values`` are then not used; ``integer`` and ``limits`` are.
     """
 
     key: str
@@ -82,6 +91,7 @@ class OddKnob:
     integer: bool = False
     range: Optional[tuple[float, float]] = None
     limits: Optional[tuple[float, float]] = None
+    quantity: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.range is not None:
@@ -110,6 +120,26 @@ class OddKnob:
         return self._core().reach
 
 
+def _rule_input(backend: Backend, attribute: str, knob: OddKnob) -> str:
+    """The rule input through which *knob*'s quantity reads *attribute*: the
+    one that stands for it (``concept:``), else one of its name."""
+    rules = backend.active_rules
+    where = f"knob {knob.key} ({attribute})"
+    if rules is None:
+        raise ValueError(f"{where}: takes quantity {knob.quantity!r} from the rules, and the backend has none")
+    if knob.quantity not in rules.quantities:
+        raise ValueError(f"{where}: the rules give no quantity {knob.quantity!r}")
+    reads = set(rules.free_inputs)
+    for name, (concept, _unit) in rules.input_concepts.items():
+        if concept == attribute and name in reads:
+            return name
+    if attribute in reads:
+        return attribute
+    raise ValueError(
+        f"{where}: no input of the rules stands for {attribute} (give one concept: {attribute})"
+    )
+
+
 def knobs_from_mapping(raw: Optional[Mapping[str, Any]]) -> dict[str, OddKnob]:
     """Knobs by attribute name, from config (``{attribute: {key: ..., ...}}``).
 
@@ -122,7 +152,7 @@ def knobs_from_mapping(raw: Optional[Mapping[str, Any]]) -> dict[str, OddKnob]:
             continue
         if not isinstance(spec, Mapping):
             raise ValueError(f"knob {name}: expected a key or a mapping, got {spec!r}")
-        unknown = set(spec) - {"key", "values", "scale", "offset", "integer", "range", "limits"}
+        unknown = set(spec) - {"key", "values", "scale", "offset", "integer", "range", "limits", "quantity"}
         if unknown:
             raise ValueError(f"knob {name}: unknown fields {sorted(unknown)}")
         if "key" not in spec:
@@ -135,6 +165,7 @@ def knobs_from_mapping(raw: Optional[Mapping[str, Any]]) -> dict[str, OddKnob]:
             integer=bool(spec.get("integer", False)),
             range=None if spec.get("range") is None else _range(spec["range"]),
             limits=None if spec.get("limits") is None else _limits(spec["limits"]),
+            quantity=None if spec.get("quantity") is None else str(spec["quantity"]),
         )
     return knobs
 
@@ -263,10 +294,15 @@ class OddSampler:
         unknown = sorted(set(knobs) - names)
         if unknown:
             raise ValueError(f"OddSampler: ODD {odd.name} has no attributes {unknown}")
+        self._from_rules: dict[str, tuple[OddKnob, str]] = {}
         for attribute in odd.attributes:
             knob = knobs.get(attribute.name) or backend.knob(attribute, controls)
             if knob is not None:
                 chosen.append((attribute.name, knob._core()))
+                if knob.quantity is not None:
+                    self._from_rules[attribute.name] = (knob, _rule_input(backend, attribute.name, knob))
+        self._rules = backend.active_rules if self._from_rules else None
+        self._seed = str(seed)
         if strategy is None:
             strategy = "weighted" if weights is not None else "uniform"
         self.odd = odd
@@ -323,7 +359,7 @@ class OddSampler:
 
     def draw(self, index: int = 0, situation: Optional[str] = None) -> OddSample:
         """Draw one case; *situation*, if given, is a module the case aims at."""
-        case = OddSample._from_core(self._core.draw(index, situation))
+        case = self._realize(OddSample._from_core(self._core.draw(index, situation)))
         self._log_warnings()
         return case
 
@@ -333,6 +369,26 @@ class OddSampler:
         module given a share holds it."""
         if count < 0:
             raise ValueError("OddSampler: count must not be negative")
-        cases = [OddSample._from_core(c) for c in self._core.sample(count)]
+        cases = [self._realize(OddSample._from_core(c)) for c in self._core.sample(count)]
         self._log_warnings()
         return cases
+
+    def _realize(self, case: OddSample) -> OddSample:
+        """*case* with each knob that takes its value from the rules writing
+        the quantity's value at the attribute's drawn value."""
+        if not self._from_rules or self._rules is None:
+            return case
+        overrides = list(case.overrides)
+        for name, (knob, rule_input) in self._from_rules.items():
+            x = case.values.get(name)
+            if not isinstance(x, (int, float)) or isinstance(x, bool):
+                continue
+            # A quantile of its own per case and knob: reproducible from the seed.
+            p = random.Random(f"{self._seed}:{case.index}:{name}").random()
+            y = self._rules.quantile(str(knob.quantity), {rule_input: float(x)}, p)
+            if knob.limits is not None:
+                y = min(max(y, knob.limits[0]), knob.limits[1])
+            written = str(int(round(y))) if knob.integer else repr(float(y))
+            prefix = f"{knob.key}="
+            overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
+        return dataclasses.replace(case, overrides=overrides)

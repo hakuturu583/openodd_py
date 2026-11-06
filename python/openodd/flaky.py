@@ -324,6 +324,8 @@ class FlakySearch:
         )
         self.sampler._log_warnings()
         return [
-            OddSample._from_core(core, None if m is None else FlakyMetrics._from_core(m))
+            self.sampler._realize(
+                OddSample._from_core(core, None if m is None else FlakyMetrics._from_core(m))
+            )
             for core, m in drawn
         ]

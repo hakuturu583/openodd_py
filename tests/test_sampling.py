@@ -189,3 +189,72 @@ def test_weighted_refuses_what_it_cannot_hold() -> None:
     sampler = OddSampler(o, controls=CONTROLS, weights={"hidden": 0.5}, backend=backend())
     with pytest.raises(ValueError, match="does not follow from what the knobs set"):
         sampler.sample(4)
+
+
+RAIN_TAXONOMY = """
+TAXONOMY:
+  weather:
+    rainfall_rate: float precipitation_rate
+"""
+
+# CARLA's precipitation as an effect of the rainfall rate drawn.
+PRECIPITATION_RULES = """
+version: 3
+taxonomy: taxonomy.yaml
+basis: {kind: expert}
+inputs:
+  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}
+quantities:
+  carla_precipitation:
+    parts:
+      rain:
+        at: {rainfall_rate: [0, 2.5, 10]}
+        uniform: {low: [0, 20, 60], high: [5, 40, 90]}
+"""
+
+
+def test_a_knob_writes_what_the_rules_make_of_the_value_drawn(tmp_path: Path) -> None:
+    (tmp_path / "taxonomy.yaml").write_text(RAIN_TAXONOMY)
+    (tmp_path / "rules.yaml").write_text(PRECIPITATION_RULES)
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    knob = OddKnob("env.precipitation", quantity="carla_precipitation", limits=(0, 100))
+    b = Backend(probes={"rain_mm_h": (lambda c: c.get("rain"), "mm/h")}, rules=rules)
+    o = openodd.load_openodd(
+        RAIN_TAXONOMY,
+        bindings={"weather.rainfall_rate": {"probe": "rain_mm_h", "buckets": [0, 2.5, 10]}},
+        backend=b,
+    )
+    sampler = OddSampler(o, knobs={"weather.rainfall_rate": knob}, seed=5, backend=b)
+    cases = sampler.sample(40)
+    for case in cases:
+        x = case.values["weather.rainfall_rate"]
+        (written,) = [o for o in case.overrides if o.startswith("env.precipitation=")]
+        y = float(written.split("=", 1)[1])
+        low, high = rules.range("carla_precipitation", {"rainfall_rate": x})
+        assert low <= y <= high, (x, y)
+    # Reproducible from the seed, and not every case at one quantile.
+    again = OddSampler(o, knobs={"weather.rainfall_rate": knob}, seed=5, backend=b).sample(40)
+    assert [c.overrides for c in again] == [c.overrides for c in cases]
+    quantiles = {
+        round(
+            (float(c.overrides[-1].split("=")[1]) - rules.range("carla_precipitation", {"rainfall_rate": c.values["weather.rainfall_rate"]})[0]),
+            6,
+        )
+        for c in cases
+    }
+    assert len(quantiles) > 10
+
+
+def test_a_knob_from_the_rules_needs_an_input_for_its_attribute() -> None:
+    b = Backend(probes={"rain_mm_h": (lambda c: c.get("rain"), "mm/h")}, rules=openodd.Rules.from_text(
+        "version: 2\nquantities:\n  p:\n    parts:\n      x:\n        at: {water: [0, 1]}\n        uniform: {low: 0, high: 1}\n"
+    ))
+    o = openodd.load_openodd(
+        RAIN_TAXONOMY,
+        bindings={"weather.rainfall_rate": {"probe": "rain_mm_h", "buckets": [0, 2.5, 10]}},
+        backend=b,
+    )
+    with pytest.raises(ValueError, match="no input of the rules stands for weather.rainfall_rate"):
+        OddSampler(o, knobs={"weather.rainfall_rate": OddKnob("k", quantity="p")}, backend=b)
+    with pytest.raises(ValueError, match="no quantity 'nope'"):
+        OddSampler(o, knobs={"weather.rainfall_rate": OddKnob("k", quantity="nope")}, backend=b)
