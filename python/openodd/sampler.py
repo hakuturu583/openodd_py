@@ -298,7 +298,12 @@ class OddSampler:
         for attribute in odd.attributes:
             knob = knobs.get(attribute.name) or backend.knob(attribute, controls)
             if knob is not None:
-                chosen.append((attribute.name, knob._core()))
+                # A knob that writes a quantity of the rules sets the attribute
+                # only through them: the core draws the attribute over its
+                # range alone, and limits and rounding act on the value
+                # written (_realize), not on what is drawn.
+                core = knob if knob.quantity is None else OddKnob(knob.key, range=knob.range)
+                chosen.append((attribute.name, core._core()))
                 if knob.quantity is not None:
                     self._from_rules[attribute.name] = (knob, _rule_input(backend, attribute.name, knob))
         self._rules = backend.active_rules if self._from_rules else None
