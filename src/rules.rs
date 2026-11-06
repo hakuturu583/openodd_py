@@ -675,6 +675,38 @@ pub struct Part {
     pub text: String,
     /// What a fit to data holds as written (`fixed:`; [`crate::rules_fit`]).
     pub fixed: Vec<Hold>,
+    /// Where its values come from, as the part writes it (`basis:`); its
+    /// quantity's or its file's when it writes none ([`RuleSet::basis_of`]).
+    pub basis: Option<Basis>,
+}
+
+/// Where a distribution's values come from. A rule is not part of an ODD: it
+/// is an assumption about how faithfully a run renders the conditions it is
+/// given, and an assumption says what it rests on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Basis {
+    /// `fitted` (estimated from data), `expert` (set by someone who knows)
+    /// or `literature` (taken from a published source).
+    pub kind: String,
+    /// The rest as written -- `data` (`file`, `sha256`, `rows`),
+    /// `calibration`, `by`, `date`, `reference`, `text` -- as JSON.
+    pub details: serde_json::Value,
+}
+
+impl Basis {
+    pub const KINDS: [&'static str; 3] = ["fitted", "expert", "literature"];
+    /// What a part with no basis anywhere reads as (a version 2 set).
+    pub const UNSTATED: &'static str = "unstated";
+
+    /// The basis as one JSON object: `kind` and the details.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut out = serde_json::Map::new();
+        out.insert("kind".into(), self.kind.clone().into());
+        if let serde_json::Value::Object(d) = &self.details {
+            out.extend(d.clone());
+        }
+        serde_json::Value::Object(out)
+    }
 }
 
 /// Values of a part a fit to data holds as written: a parameter (`None`:
@@ -1005,6 +1037,8 @@ pub struct Quantity {
     pub combine: Combine,
     pub parts: Vec<Part>,
     pub text: String,
+    /// The basis of the parts that write none.
+    pub basis: Option<Basis>,
 }
 
 /// A quantity's distribution at some inputs: its parts', joined.
@@ -1334,6 +1368,8 @@ pub struct RuleSet {
     pub version: i64,
     /// The taxonomy its inputs' concepts are in (version 3).
     pub taxonomy: Option<Taxonomy>,
+    /// The basis of the parts that, with their quantities, write none.
+    pub basis: Option<Basis>,
     /// The rules as one document, every `extends` worked in: what a later
     /// set merges over ([`RuleSet::merged`]).
     doc: Node,
@@ -1440,7 +1476,10 @@ impl RuleSet {
 
     fn from_doc(doc: Node, source: &str, taxonomy: Option<Taxonomy>) -> Result<Self> {
         let at = Where::new(source);
-        let map = mapping(&doc, &at, &["version", "inputs", "quantities"])?;
+        let map = mapping(&doc, &at, &["version", "basis", "inputs", "quantities"])?;
+        let basis = get(map, "basis")
+            .map(|b| read_basis(b, &at.key("basis")))
+            .transpose()?;
         let version = get(map, "version")
             .and_then(Node::as_i64)
             .unwrap_or(OLDEST_VERSION);
@@ -1477,13 +1516,49 @@ impl RuleSet {
             files: Vec::new(),
             version,
             taxonomy,
+            basis,
             doc,
             order,
         };
         if version >= 3 {
             set.check_concepts(source)?;
+            set.check_bases(source)?;
         }
         Ok(set)
+    }
+
+    /// Version 3: every part says what its values rest on.
+    fn check_bases(&self, source: &str) -> Result<()> {
+        for q in self.quantities.values() {
+            for part in &q.parts {
+                if self.basis_of(&q.name, &part.name).is_none() {
+                    return Err(Where::new(source)
+                        .key("quantities")
+                        .key(&q.name)
+                        .key("parts")
+                        .key(&part.name)
+                        .error(format!(
+                            "no basis: say what its values rest on -- basis: {{kind: {}}} -- on \
+                             the part, its quantity or the file",
+                            Basis::KINDS.join(" | ")
+                        )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The basis of a part: its own, else its quantity's, else the file's;
+    /// `None` when none says (a version 2 set's parts may be unstated).
+    pub fn basis_of(&self, quantity: &str, part: &str) -> Option<&Basis> {
+        let q = self.quantities.get(quantity)?;
+        q.parts
+            .iter()
+            .find(|p| p.name == part)?
+            .basis
+            .as_ref()
+            .or(q.basis.as_ref())
+            .or(self.basis.as_ref())
     }
 
     /// Version 3's roles: every input a part reads stands for a concept of
@@ -1779,7 +1854,14 @@ fn document(text: &str, source: &str) -> Result<Node> {
     let map = mapping(
         &doc,
         &at,
-        &["version", "extends", "taxonomy", "inputs", "quantities"],
+        &[
+            "version",
+            "extends",
+            "taxonomy",
+            "basis",
+            "inputs",
+            "quantities",
+        ],
     )?;
     match get(map, "version").and_then(Node::as_i64) {
         Some(2) if get(map, "taxonomy").is_some() => Err(at.key("taxonomy").error(
@@ -2080,7 +2162,7 @@ fn read_quantity(name: &str, node: &Node, source: &str, at: &Where) -> Result<Qu
              the concepts are the inputs' (inputs.<name>.concept)",
         ));
     }
-    let map = mapping(node, at, &["combine", "parts", "text"])?;
+    let map = mapping(node, at, &["combine", "parts", "text", "basis"])?;
     let combine = match get(map, "combine").map(NodeExt::py_str).as_deref() {
         None | Some("min") => Combine::Min,
         Some("max") => Combine::Max,
@@ -2105,11 +2187,65 @@ fn read_quantity(name: &str, node: &Node, source: &str, at: &Where) -> Result<Qu
         combine,
         parts,
         text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
+        basis: get(map, "basis")
+            .map(|b| read_basis(b, &at.key("basis")))
+            .transpose()?,
+    })
+}
+
+/// A `basis:`: its `kind`, and what it says besides.
+fn read_basis(node: &Node, at: &Where) -> Result<Basis> {
+    let map = mapping(
+        node,
+        at,
+        &[
+            "kind",
+            "data",
+            "calibration",
+            "by",
+            "date",
+            "reference",
+            "text",
+        ],
+    )?;
+    let kind = get(map, "kind").map(NodeExt::py_str).ok_or_else(|| {
+        at.key("kind")
+            .error(format!("missing: one of {}", Basis::KINDS.join(", ")))
+    })?;
+    if !Basis::KINDS.contains(&kind.as_str()) {
+        return Err(at.key("kind").error(format!(
+            "'{kind}' is not one of {}",
+            Basis::KINDS.join(", ")
+        )));
+    }
+    if let Some(data) = get(map, "data") {
+        let at = at.key("data");
+        let data = mapping(data, &at, &["file", "sha256", "rows"])?;
+        if let Some(rows) = get(data, "rows") {
+            number(rows, &at.key("rows"))?;
+        }
+    }
+    if let Some(c) = get(map, "calibration") {
+        let at = at.key("calibration");
+        for (k, v) in mapping(c, &at, &[])? {
+            number(v, &at.key(&k.py_str()))?;
+        }
+    }
+    let mut details = serde_json::Map::new();
+    for (k, v) in map {
+        let k = k.py_str();
+        if k != "kind" {
+            details.insert(k, v.to_json());
+        }
+    }
+    Ok(Basis {
+        kind,
+        details: serde_json::Value::Object(details),
     })
 }
 
 fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
-    let mut known = vec!["at", "text", "fixed"];
+    let mut known = vec!["at", "text", "fixed", "basis"];
     known.extend(Family::ALL.iter().map(|f| f.name()));
     let map = mapping(node, at, &known)?;
     // Its axes: the inputs `at` names, in order, and their points.
@@ -2199,6 +2335,9 @@ fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
         values,
         text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
         fixed,
+        basis: get(map, "basis")
+            .map(|b| read_basis(b, &at.key("basis")))
+            .transpose()?,
     };
     for k in 0..size {
         part.dist_at(k)
@@ -3375,7 +3514,7 @@ quantities:
         RuleSet::parse_with(text, "x.yaml", &Origin::Text, &mut Given(map))
     }
 
-    const V3: &str = "version: 3\ntaxonomy: https://example.com/taxonomy.yaml\ninputs:\n  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}\nquantities:\n  grip:\n    parts:\n      rain:\n        at: {rainfall_rate: [0, 10]}\n        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n";
+    const V3: &str = "version: 3\ntaxonomy: https://example.com/taxonomy.yaml\nbasis: {kind: expert, by: tests}\ninputs:\n  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}\nquantities:\n  grip:\n    parts:\n      rain:\n        at: {rainfall_rate: [0, 10]}\n        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n";
 
     #[test]
     fn version_3_inputs_stand_for_taxonomy_concepts() {
@@ -3460,5 +3599,61 @@ quantities:
             refs.iter().map(Origin::label).collect::<Vec<_>>(),
             [TAXONOMY_URL]
         );
+    }
+
+    #[test]
+    fn a_part_says_what_its_values_rest_on() {
+        let text = V3.replace(
+            "        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n",
+            "        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n        basis: {kind: fitted, data: {file: drives.csv, sha256: abc, rows: 120}, calibration: {in_band: 0.88}}\n",
+        );
+        let set = with_taxonomy(&text).unwrap();
+        let b = set.basis_of("grip", "rain").unwrap();
+        assert_eq!(b.kind, "fitted");
+        assert_eq!(b.to_json()["data"]["rows"], 120);
+        assert_eq!(b.to_json()["calibration"]["in_band"], 0.88);
+        // Without its own, the file's.
+        let set = with_taxonomy(V3).unwrap();
+        assert_eq!(set.basis_of("grip", "rain").unwrap().kind, "expert");
+        assert_eq!(
+            set.basis_of("grip", "rain").unwrap().to_json()["by"],
+            "tests"
+        );
+        // and the quantity's before the file's.
+        let text = V3.replace(
+            "  grip:\n    parts:",
+            "  grip:\n    basis: {kind: literature, reference: some paper}\n    parts:",
+        );
+        assert_eq!(
+            with_taxonomy(&text)
+                .unwrap()
+                .basis_of("grip", "rain")
+                .unwrap()
+                .kind,
+            "literature"
+        );
+    }
+
+    #[test]
+    fn version_3_refuses_a_part_resting_on_nothing() {
+        let e = with_taxonomy(&V3.replace("basis: {kind: expert, by: tests}\n", ""))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("quantities.grip.parts.rain: no basis"), "{e}");
+        let e = with_taxonomy(&V3.replace("kind: expert", "kind: guess"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("'guess' is not one of fitted, expert, literature"),
+            "{e}"
+        );
+        let e = with_taxonomy(&V3.replace("by: tests", "by: tests, rows: 3"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("unknown fields"), "{e}");
+        // Version 2 parts may rest on nothing said.
+        let set = RuleSet::parse(GRIP, "grip.yaml").unwrap();
+        assert!(set.quantities["grip"].parts[0].basis.is_none());
+        assert!(set.basis_of("grip", "water").is_none());
     }
 }

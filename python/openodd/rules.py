@@ -249,6 +249,31 @@ class Rules:
         of a version 2 set (version 3 refuses them)."""
         return list(self._core.unclassified_inputs())
 
+    def parts(self, quantity: str) -> list[str]:
+        """*quantity*'s parts, in the order written."""
+        return list(self._call(self._core.parts, quantity))
+
+    def basis(self, quantity: str, part: str) -> dict[str, Any]:
+        """What *part* of *quantity* rests on: ``kind`` (``fitted``,
+        ``expert``, ``literature``, or ``unstated`` when nothing says) and
+        what its ``basis:`` says besides -- the part's own, else its
+        quantity's, else the file's. A rule is an assumption about how
+        faithfully a run renders its conditions, not part of an ODD; this is
+        what the assumption rests on.
+
+        Raises:
+            RulesError: When there is no such quantity or part.
+        """
+        return dict(json.loads(self._call(self._core.basis, quantity, part)))
+
+    def bases(self) -> dict[tuple[str, str], dict[str, Any]]:
+        """``(quantity, part)`` -> :meth:`basis`, for every part."""
+        return {
+            (q, part): self.basis(q, part)
+            for q in self.quantities
+            for part in self.parts(q)
+        }
+
     @property
     def files(self) -> list[tuple[str, str]]:
         """``(path or URL, sha256)`` of every file read, the files extended

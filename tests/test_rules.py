@@ -339,6 +339,7 @@ TAXONOMY:
 GRIP_V3 = """
 version: 3
 taxonomy: taxonomy.yaml
+basis: {kind: expert}
 inputs:
   rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}
 quantities:
@@ -371,3 +372,34 @@ class TestInputsAndTheTaxonomy:
             rules = Rules.from_text(GRIP)
         assert rules.version == 2
         assert rules.unclassified_inputs == ["water"]
+
+
+class TestBasis:
+    def test_each_part_says_what_it_rests_on(self, tmp_path: Path) -> None:
+        (tmp_path / "taxonomy.yaml").write_text(TAXONOMY)
+        text = GRIP_V3.replace(
+            "        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n",
+            "        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n"
+            "        basis: {kind: fitted, data: {file: drives.csv, rows: 120}}\n",
+        )
+        (tmp_path / "grip.yaml").write_text(text)
+        rules = Rules.read(tmp_path / "grip.yaml")
+        assert rules.parts("grip") == ["rain"]
+        assert rules.basis("grip", "rain") == {
+            "kind": "fitted",
+            "data": {"file": "drives.csv", "rows": 120},
+        }
+        (tmp_path / "grip.yaml").write_text(GRIP_V3)
+        assert Rules.read(tmp_path / "grip.yaml").bases() == {("grip", "rain"): {"kind": "expert"}}
+
+    def test_version_2_parts_are_unstated(self) -> None:
+        rules = Rules.from_text(GRIP)
+        assert rules.basis("grip", "water") == {"kind": "unstated"}
+        with pytest.raises(RulesError, match="no part 'nope'"):
+            rules.basis("grip", "nope")
+
+    def test_version_3_refuses_a_part_resting_on_nothing(self, tmp_path: Path) -> None:
+        (tmp_path / "taxonomy.yaml").write_text(TAXONOMY)
+        (tmp_path / "grip.yaml").write_text(GRIP_V3.replace("basis: {kind: expert}\n", ""))
+        with pytest.raises(RulesError, match="no basis"):
+            Rules.read(tmp_path / "grip.yaml")

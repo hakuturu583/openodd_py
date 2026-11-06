@@ -493,6 +493,7 @@ fn add_quantity() {
             combine: None,
             parts: vec![PartDoc::new("part".into(), input)],
             text: String::new(),
+            basis: None,
         };
         sel = Some(GSel::Node(NodeKey::Quantity(q.id)));
         d.quantities.push(q);
