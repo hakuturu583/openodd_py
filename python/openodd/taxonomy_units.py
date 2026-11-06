@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
+from . import _core
+
 
 @dataclass(frozen=True)
 class ModelUnit:
@@ -76,7 +78,12 @@ def conversion_block(units: Sequence[ModelUnit]) -> dict[str, dict[str, dict[str
                 by_type[t].append(u)
     block: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
     for unit_type, members in by_type.items():
-        anchor, others = members[0], members[1:]
+        # A unit this library knows anchors the others, when the type has
+        # one: a reader adds a unit only through one it knows already, and an
+        # unknown anchor would become a base of its own, cut off from it.
+        known = _core.Units()
+        anchor = next((u for u in members if known.unit_type(u.symbol) is not None), members[0])
+        others = [u for u in members if u is not anchor]
         targets: dict[str, dict[str, float]] = {}
         if not others:
             targets[anchor.symbol] = {"scale": 1.0, "offset": 0.0}
