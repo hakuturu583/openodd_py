@@ -1,0 +1,63 @@
+# A taxonomy written in the shape tier4/taxonomy's EA export takes, so that CI
+# checks this reader keeps reading that shape. It is written here and copies
+# none of that file's content (that repository is private); each construct is
+# one the export uses:
+#
+# - each root container holds a record of its own name;
+# - categoricals defined by bounds and half-open ranges on a number;
+# - lists of literals quoted as strings ("[a]", "[a, b]");
+# - unit types with their unit in the name (speed_km_per_h), and traffic_rate;
+# - a categorical defined by literals of another categorical defined by ranges;
+# - empty records, strings and bare floats, which are not read as attributes.
+TAXONOMY:
+  environment:
+    environment:
+      weather:
+        drizzle:
+          drizzle_rate: float precipitation_rate
+          drizzle_intensity:
+            none:
+              drizzle_rate: "< 0.1 mm/h"
+            some:
+              drizzle_rate: "[0.1 .. 1.0) mm/h"
+            much:
+              drizzle_rate: ">= 1.0 mm/h"
+        gust:
+          gust_speed: float speed_km_per_h
+          gust_intensity:
+            still:
+              gust_speed: "< 10 km/h"
+            gusty:
+              gust_speed: "[10 .. 40) km/h"
+            stormy:
+              gust_speed: ">= 40 km/h"
+        other: {}
+      traffic:
+        flow_rate: float traffic_rate
+        flow_level:
+          thin:
+            flow_rate: "< 200 veh/h"
+          busy:
+            flow_rate: ">= 200 veh/h"
+  scenery:
+    scenery:
+      geometry:
+        slope:
+          slope_angle: float plane_angle_in_degrees
+        bend:
+          bend_kind:
+            straight:
+              bend_detail: "[none]"
+            bending:
+              bend_detail: "[to_left, to_right]"
+          bend_detail:
+            none:
+              bend_curvature: "[-0.01 .. 0.01]"
+            to_left:
+              bend_curvature: "< -0.01"
+            to_right:
+              bend_curvature: "> 0.01"
+          bend_curvature: float
+      notes:
+        label: string
+        weight: float
