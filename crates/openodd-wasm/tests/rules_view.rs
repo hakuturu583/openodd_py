@@ -383,3 +383,26 @@ fn a_categorical_slider_starts_at_a_written_label() {
     assert!(close(data["outputs"]["low"].as_f64().unwrap(), 250.0));
     assert!(v.rules_html_str(r#"{"quantity": "sight"}"#, "{}").is_ok());
 }
+
+#[wasm_bindgen_test]
+#[test]
+fn a_categorical_slider_starts_where_every_part_is_written() {
+    // One part at day and night, another at night alone: the quantity has a
+    // distribution at night only, so it starts there.
+    let text = "version: 2\ninputs:\n  time_of_day: {labels: [day, dusk, night]}\nquantities:\n  sight:\n    parts:\n      light:\n        at: {time_of_day: [day, night]}\n        uniform: {low: [250, 50], high: [400, 150]}\n      glare:\n        at: {time_of_day: [night]}\n        uniform: {low: 40, high: 200}\n";
+    let v = RulesView::from_text(text, "sight.yaml").expect("reads");
+    let data: Json =
+        serde_json::from_str(&v.rules_json_str(r#"{"quantity": "sight"}"#, "{}").unwrap()).unwrap();
+    assert!(close(data["inputs"][0]["value"].as_f64().unwrap(), 2.0));
+    // A query at day snaps to night, where the quantity has a distribution.
+    let at: Json = serde_json::from_str(
+        &v.rules_json_str(
+            r#"{"quantity": "sight", "inputs": {"time_of_day": 0}}"#,
+            "{}",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(close(at["inputs"][0]["value"].as_f64().unwrap(), 2.0));
+    assert!(v.rules_html_str(r#"{"quantity": "sight"}"#, "{}").is_ok());
+}

@@ -397,18 +397,33 @@ struct View<'a> {
     part_responses: Vec<Curves>,
 }
 
-/// The points `quantity`'s parts are written at for `input`, increasing.
+/// The points of `input` `quantity` has a distribution at, increasing: those
+/// every part reading it is written at (the quantity is joined at one value
+/// of each input). When the parts share none, every part's, so the view
+/// still says where each is written.
 fn written(quantity: &Quantity, input: &str) -> Vec<f64> {
-    let mut out: Vec<f64> = quantity
+    let per_part: Vec<&Vec<f64>> = quantity
         .parts
         .iter()
         .flat_map(|p| &p.axes)
         .filter(|a| a.input == input)
-        .flat_map(|a| a.points.iter().copied())
+        .map(|a| &a.points)
         .collect();
-    out.sort_by(f64::total_cmp);
-    out.dedup();
-    out
+    let Some((first, rest)) = per_part.split_first() else {
+        return Vec::new();
+    };
+    let shared: Vec<f64> = first
+        .iter()
+        .copied()
+        .filter(|x| rest.iter().all(|p| p.contains(x)))
+        .collect();
+    if !shared.is_empty() {
+        return shared;
+    }
+    let mut all: Vec<f64> = per_part.iter().flat_map(|p| p.iter().copied()).collect();
+    all.sort_by(f64::total_cmp);
+    all.dedup();
+    all
 }
 
 /// Whether `input` is a categorical input of `rules` (read at its labels).
