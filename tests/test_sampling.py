@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import openodd
-from openodd import Backend, OddDraws, OddKnob, OddSampler, load_and_merge, merge_coverage
+from openodd import Backend, OddDraws, OddKnob, OddSample, OddSampler, load_and_merge, merge_coverage
 
 ODD = """
 TAXONOMY:
@@ -338,3 +339,95 @@ def test_the_case_keeps_what_the_rules_wrote_and_a_plot_places_it(tmp_path: Path
     assert "carla_precipitation" in plot.attributes
     data = plot.data(x="weather.rainfall_rate", y="carla_precipitation")
     assert data["y"]["name"] == "carla_precipitation" and len(data["cases"]) == 6
+
+
+# What a scenario sets up: a root of the network (the gap) and an effect of
+# the rainfall rate drawn (how far a pedestrian is seen).
+EFFECT_RULES = """
+version: 3
+taxonomy: taxonomy.yaml
+basis: {kind: expert}
+inputs:
+  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}
+quantities:
+  vehicle_ahead_gap:
+    parts:
+      staged:
+        uniform: {low: 2, high: 30}
+  pedestrian_seen_m:
+    parts:
+      rain:
+        at: {rainfall_rate: [0, 10]}
+        uniform: {low: [80, 20], high: [120, 40]}
+"""
+
+
+def _effects_setup(tmp_path: Path) -> tuple[Any, Any, Any]:
+    (tmp_path / "taxonomy.yaml").write_text(RAIN_TAXONOMY)
+    (tmp_path / "rules.yaml").write_text(EFFECT_RULES)
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    b = Backend(probes={"rain_mm_h": (lambda c: c.get("rain"), "mm/h")}, rules=rules)
+    o = openodd.load_openodd(
+        RAIN_TAXONOMY,
+        bindings={"weather.rainfall_rate": {"probe": "rain_mm_h", "buckets": [0, 2.5, 10]}},
+        backend=b,
+    )
+    return rules, b, o
+
+
+def _written(case: OddSample, key: str) -> float:
+    (written,) = [x for x in case.overrides if x.startswith(f"{key}=")]
+    return float(written.split("=", 1)[1])
+
+
+def test_effects_are_drawn_from_the_rules(tmp_path: Path) -> None:
+    """A scenario's settings drawn from the network: a root, and an effect of
+    the condition drawn, each at a quantile of its own."""
+    rules, b, o = _effects_setup(tmp_path)
+    effects = [
+        OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap"),
+        OddKnob("scenario.sight_m", quantity="pedestrian_seen_m", integer=True),
+    ]
+    rain = {"weather.rainfall_rate": OddKnob("env.rain_mm_h", range=(0, 10))}
+    sampler = OddSampler(o, rain, seed=4, backend=b, effects=effects)
+    assert sampler.effects == ["vehicle_ahead_gap", "pedestrian_seen_m"]
+    cases = sampler.sample(30)
+    gaps = []
+    for case in cases:
+        gap = _written(case, "scenario.npc_gap_m")
+        assert 2 <= gap <= 30 and case.quantities["vehicle_ahead_gap"] == gap
+        low, high = rules.range("pedestrian_seen_m", {"rainfall_rate": case.values["weather.rainfall_rate"]})
+        sight = _written(case, "scenario.sight_m")
+        assert sight == int(sight) and low - 0.5 <= sight <= high + 0.5
+        gaps.append(gap)
+    assert len(set(gaps)) > 20  # spread over the range, not one value
+    again = OddSampler(o, rain, seed=4, backend=b, effects=effects).sample(30)
+    assert [c.overrides for c in again] == [c.overrides for c in cases]
+
+
+def test_a_control_no_attribute_reads_is_an_effect(tmp_path: Path) -> None:
+    _, b, o = _effects_setup(tmp_path)
+    controls = {
+        "vehicle_ahead_gap_m": OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap", limits=(5, 25)),
+        "unused_m": OddKnob("scenario.unused"),  # no quantity: nothing to draw
+    }
+    rain = {"weather.rainfall_rate": OddKnob("env.rain_mm_h", range=(0, 10))}
+    cases = OddSampler(o, rain, controls=controls, seed=1, backend=b).sample(10)
+    for case in cases:
+        assert 5 <= _written(case, "scenario.npc_gap_m") <= 25
+        assert not any(x.startswith("scenario.unused=") for x in case.overrides)
+
+
+def test_effects_need_rules_that_give_them(tmp_path: Path) -> None:
+    rules, b, o = _effects_setup(tmp_path)
+    with pytest.raises(ValueError, match="no quantity 'nope'"):
+        OddSampler(o, backend=b, effects=[OddKnob("k", quantity="nope")])
+    with pytest.raises(ValueError, match="writes no quantity"):
+        OddSampler(o, backend=b, effects=[OddKnob("k")])
+    bare = Backend(probes={"rain_mm_h": (lambda c: c.get("rain"), "mm/h")})
+    with pytest.raises(ValueError, match="the backend has none"):
+        OddSampler(o, backend=bare, effects=[OddKnob("k", quantity="vehicle_ahead_gap")])
+    # An input standing for no attribute of the ODD, with no default.
+    other = openodd.load_openodd("TAXONOMY:\n  speed: float velocity\n", backend=b)
+    with pytest.raises(ValueError, match="read rainfall_rate, which stands for no attribute"):
+        OddSampler(other, backend=b, effects=[OddKnob("k", quantity="pedestrian_seen_m")])
