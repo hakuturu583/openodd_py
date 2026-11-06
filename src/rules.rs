@@ -3785,9 +3785,15 @@ quantities:
     #[test]
     fn a_rule_file_names_the_taxonomy_openodd_ships() {
         let text = "version: 3\ntaxonomy: {bundled: default}\nbasis: {kind: expert}\n\
-                    inputs:\n  speed: {concept: dynamic.ego_speed, unit: km/h}\n\
+                    inputs:\n  speed: {concept: ego_vehicle.ego_vehicle.velocity, unit: km/h}\n\
+                    \x20 rain: {concept: environment_conditions.environment_conditions.weather.rain.rainfall_rate, unit: mm/h}\n\
+                    \x20 time: {concept: environment_conditions.environment_conditions.illumination.time_of_day}\n\
                     quantities:\n  gap:\n    parts:\n      p:\n        at: {speed: [0, 100]}\n\
-                    \x20       uniform: {low: [2, 10], high: [10, 40]}\n";
+                    \x20       uniform: {low: [2, 10], high: [10, 40]}\n\
+                    \x20 spray:\n    parts:\n      p:\n        at: {rain: [0, 10]}\n\
+                    \x20       uniform: {low: [0, 1], high: [1, 5]}\n\
+                    \x20 glare:\n    parts:\n      p:\n        at: {time: [day, night]}\n\
+                    \x20       uniform: {low: [0, 0], high: [1, 2]}\n";
         let rules = RuleSet::parse(text, "r.yaml").unwrap();
         let t = rules.taxonomy.as_ref().unwrap();
         assert_eq!(t.label, "bundled:default");
@@ -3797,7 +3803,7 @@ quantities:
                 bundled_taxonomy("default").unwrap().as_bytes()
             ))
         );
-        assert!(t.concepts.contains_key("dynamic.ego_speed"));
+        assert!(t.concepts.contains_key("ego_vehicle.ego_vehicle.velocity"));
         // Nothing for a host to fetch.
         assert_eq!(
             RuleSet::taxonomy_reference(text, "r.yaml", &Origin::Text).unwrap(),

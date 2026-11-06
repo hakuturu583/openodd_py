@@ -124,9 +124,10 @@ else is this library's.
 
 A `default` ODD ships with the package (`openodd.bundled_odd()`,
 [python/openodd/odds/default](python/openodd/odds/default)): every attribute a road-vehicle
-simulator commonly measures, after ISO 34503, and no modules. Its binding names the probes
-a backend provides (`ego_speed_kph`, `measure: vehicle_ahead_gap_m`, ...); its revision
-changes only when its files do.
+simulator commonly measures, after ISO 34503, and no modules. Its taxonomy is a subset of
+tier4/taxonomy's, under upstream's ids (`default.yaml`); what upstream lacks yet is in
+`pending_upstream.yaml`. Its binding names the probes a backend provides (`ego_speed_kph`,
+`rainfall_rate_mm_h`, ...); its revision changes only when its files do.
 
 ```python
 import openodd
