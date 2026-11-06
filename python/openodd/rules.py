@@ -240,6 +240,14 @@ class Rules:
         return self._core.taxonomy
 
     @property
+    def taxonomy_concepts(self) -> dict[str, dict[str, Any]]:
+        """Concept -> what the taxonomy a version 3 set names declares it to
+        be (``kind``, and ``primitive``, ``unit_type``, ``literals``), as
+        :attr:`.OddAttribute.concept` gives it; empty for version 2. Kept
+        from when the set was read: the taxonomy is not read again."""
+        return dict(json.loads(self._core.taxonomy_concepts_json()))
+
+    @property
     def input_concepts(self) -> dict[str, tuple[str, str]]:
         """Input -> ``(concept, unit)``: the taxonomy concept each input
         stands for (version 3), and the unit its points are written in."""

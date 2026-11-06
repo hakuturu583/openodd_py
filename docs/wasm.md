@@ -140,7 +140,8 @@ value chosen. The same engine as Python's `openodd.Rules` computes it.
 |---|---|
 | `loadRules(RulesView, url, {text})` (viewer.js) | fetch a rule file (or read `text` as if from `url`) and every file it [extends](rules.md#extending-a-rule-file); a git source cannot be read in the browser |
 | `new RulesView(text, source, files)`, `merge(text, source, files)` | read a rule file from its location `source`, what it extends from `files` (`{location: text}`); `merge` reads one over these rules, naming only what it changes |
-| `RulesView.references(text, source)` | the locations a file extends, to fetch (what `loadRules` does) |
+| `RulesView.references(text, source)` | the rule files a file extends, to fetch and follow (what `loadRules` does) |
+| `RulesView.taxonomy_reference(text, source)` | the taxonomy a version 3 file names (JSON string, or `null`): fetched, not followed as a rule file (`loadRules` does both) |
 | `files()` | `[{location, sha256}]` of every file read |
 | `quantities()` | a JSON array |
 | `inputs(quantity)` | a JSON array of `{name, universe: [low, high], default, quantity}`, the universe the outermost points; `quantity` is true for another quantity the parts read ([chains](rules.md#chains)): one given is observed, one left out worked out at its median |

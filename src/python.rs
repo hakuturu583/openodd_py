@@ -484,6 +484,26 @@ fn module_holds(name: String, holds: bool) -> PyResult<Condition> {
     })
 }
 
+/// What a taxonomy declares a concept to be, as JSON: `kind`, and for a
+/// number its `primitive` and `unit_type`, and its `literals`.
+fn concept_value(concept: &crate::model::ConceptKind, literals: &[String]) -> serde_json::Value {
+    use crate::model::ConceptKind as K;
+    let mut out = match concept {
+        K::Number {
+            primitive,
+            unit_type,
+        } => {
+            serde_json::json!({"kind": "number", "primitive": primitive, "unit_type": unit_type})
+        }
+        K::Boolean => serde_json::json!({"kind": "boolean"}),
+        K::Categorical => serde_json::json!({"kind": "categorical"}),
+        K::Derived => serde_json::json!({"kind": "derived"}),
+        K::Other => serde_json::json!({"kind": "other"}),
+    };
+    out["literals"] = literals.to_vec().into();
+    out
+}
+
 /// A measurable taxonomy concept.
 #[pyclass(module = "openodd._core")]
 #[derive(Clone)]
@@ -596,21 +616,7 @@ impl Attribute {
     /// declares it), a number's `primitive` and `unit_type`, and a
     /// categorical's `literals`.
     fn concept_json(&self) -> String {
-        use crate::model::ConceptKind as K;
-        let mut out = match &self.inner.concept {
-            K::Number {
-                primitive,
-                unit_type,
-            } => {
-                serde_json::json!({"kind": "number", "primitive": primitive, "unit_type": unit_type})
-            }
-            K::Boolean => serde_json::json!({"kind": "boolean"}),
-            K::Categorical => serde_json::json!({"kind": "categorical"}),
-            K::Derived => serde_json::json!({"kind": "derived"}),
-            K::Other => serde_json::json!({"kind": "other"}),
-        };
-        out["literals"] = self.inner.literals.clone().into();
-        out.to_string()
+        concept_value(&self.inner.concept, &self.inner.literals).to_string()
     }
 
     /// The attributes a derived attribute is worked out from (empty otherwise).
@@ -2401,6 +2407,20 @@ impl RuleSet {
             .taxonomy
             .as_ref()
             .map(|t| (t.label.clone(), t.sha256.clone()))
+    }
+
+    /// What the taxonomy a version 3 set names declares each concept to be,
+    /// as a JSON object of `concept_json`s (`{}` for version 2): kept from
+    /// when the set was read, so it needs no second read of the taxonomy.
+    fn taxonomy_concepts_json(&self) -> String {
+        let mut out = serde_json::Map::new();
+        if let Some(t) = &self.inner.taxonomy {
+            for (name, kind) in &t.concepts {
+                let lits = t.literals.get(name).map(Vec::as_slice).unwrap_or(&[]);
+                out.insert(name.clone(), concept_value(kind, lits));
+            }
+        }
+        serde_json::Value::Object(out).to_string()
     }
 
     /// Input -> `(concept, unit)`, for the inputs that name a concept.

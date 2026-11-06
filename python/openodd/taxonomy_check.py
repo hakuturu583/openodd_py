@@ -36,7 +36,7 @@ from . import _core
 from .backend import Backend
 from .loader import _wrap, load_openodd
 from .model import OddDefinition
-from .rules import Rules, RulesError, fetch_url
+from .rules import Rules, RulesError
 
 __all__ = ["Finding", "TaxonomyCheck", "check_taxonomy", "main"]
 
@@ -139,16 +139,6 @@ def _compare(name: str, ours: Mapping[str, Any], theirs: Mapping[str, Any]) -> O
     return None
 
 
-def _rules_taxonomy(rule_set: Rules) -> dict[str, dict[str, Any]]:
-    """Concept -> its declaration in the taxonomy *rule_set* names (empty
-    when it names none: version 2)."""
-    if rule_set.taxonomy is None:
-        return {}
-    where = rule_set.taxonomy[0]
-    text = fetch_url(where) if where.startswith("https://") else Path(where).read_text(encoding="utf-8")
-    return _declared(load_openodd(text))
-
-
 def check_taxonomy(
     reference: Union[PathLike, OddDefinition],
     *,
@@ -190,8 +180,9 @@ def check_taxonomy(
                 "a rule input that stands for no taxonomy concept (version 2 rules)",
             ))
         # What the rules' own taxonomy declares each concept to be: the
-        # declaration the rules were checked against when read.
-        own = _rules_taxonomy(rule_set)
+        # declaration the rules were checked against when read, kept by the
+        # core (its label may be a git source, not a readable path).
+        own = rule_set.taxonomy_concepts
         for name, (concept, _unit) in rule_set.input_concepts.items():
             ours = own.get(concept, {"kind": "number"})
             where = f"{path} (input {name})"

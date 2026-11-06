@@ -110,3 +110,28 @@ def test_a_binding_that_leaves_its_units_to_the_backend(tmp_path: Path) -> None:
     result = check_taxonomy(tmp_path / "reference.yaml", odds=[tmp_path / "b.yaml"])
     assert result.ok, result.findings
     assert main([str(tmp_path / "reference.yaml"), "--odd", str(tmp_path / "b.yaml")]) == 0
+
+
+def test_the_rules_taxonomy_is_not_read_again(files: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rules taxonomy's label (a URL, or ``url@rev:path`` for a git source)
+    need not be readable as a path: the declarations kept when the rules were
+    read are compared, and the taxonomy is fetched once."""
+    import openodd.rules
+
+    fetched: list[str] = []
+
+    def fetch(url: str) -> str:
+        fetched.append(url)
+        return OURS.replace("integer count", "float traffic_rate")
+
+    monkeypatch.setattr(openodd.rules, "fetch_url", fetch)
+    (files / "v3_url.yaml").write_text(
+        (files / "v3.yaml")
+        .read_text()
+        .replace("taxonomy: ours.yaml", "taxonomy: https://example.com/taxonomy.yaml")
+        .replace("weather.rainfall_rate", "traffic.flow_rate")
+    )
+    result = check_taxonomy(files / "reference.yaml", rules=[files / "v3_url.yaml"])
+    # The fetched taxonomy declares the flow rate as the reference does.
+    assert result.findings == []
+    assert fetched == ["https://example.com/taxonomy.yaml"]

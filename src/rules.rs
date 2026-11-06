@@ -1007,12 +1007,24 @@ pub struct Taxonomy {
     pub sha256: String,
     /// Each concept the taxonomy declares, and what it is.
     pub concepts: IndexMap<String, crate::model::ConceptKind>,
+    /// The literals each concept declares (empty for a number).
+    pub literals: IndexMap<String, Vec<String>>,
 }
 
 impl Taxonomy {
     /// The taxonomy of an OpenODD file's `text`.
     pub fn parse(text: &str, label: &str) -> Result<Self> {
         use crate::loader::{load_openodd, AnyProbe, Options, Source};
+        // One file: its IMPORTs would be read from the process's working
+        // directory, not from where the taxonomy was, and its SHA-256 would
+        // not cover them.
+        let docs = parse_all(text).map_err(|e| Error::value(format!("{label}: {e}")))?;
+        if docs.iter().any(|d| d.get("IMPORT").is_some()) {
+            return Err(Error::value(format!(
+                "{label}: a rule file's taxonomy is one OpenODD file, and this one IMPORTs \
+                 others; name a file that holds the whole taxonomy"
+            )));
+        }
         let loaded = load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe)
             .map_err(|e| Error::value(format!("{label}: {e}")))?;
         Ok(Taxonomy {
@@ -1023,6 +1035,12 @@ impl Taxonomy {
                 .attributes
                 .iter()
                 .map(|a| (a.name.clone(), a.concept.clone()))
+                .collect(),
+            literals: loaded
+                .odd
+                .attributes
+                .iter()
+                .map(|a| (a.name.clone(), a.literals.clone()))
                 .collect(),
         })
     }
@@ -1464,14 +1482,33 @@ impl RuleSet {
         Ok(set)
     }
 
-    /// The references a rule file's `text` extends, each as the origin it
-    /// names from `origin`: what a host fetches ahead ([`Given`]).
+    /// The files a rule file's `text` reads, each as the origin it names
+    /// from `origin`: what a host fetches ahead ([`Given`]) -- the rule
+    /// files it extends ([`RuleSet::extends_references`]), then its taxonomy
+    /// ([`RuleSet::taxonomy_reference`]).
     pub fn references(text: &str, source: &str, origin: &Origin) -> Result<Vec<Origin>> {
+        let mut refs = Self::extends_references(text, source, origin)?;
+        refs.extend(Self::taxonomy_reference(text, source, origin)?);
+        Ok(refs)
+    }
+
+    /// The rule files a rule file's `text` extends: each a rule file in
+    /// turn, whose own references a host follows.
+    pub fn extends_references(text: &str, source: &str, origin: &Origin) -> Result<Vec<Origin>> {
         let doc = document(text, source)?;
-        let at = Where::new(source);
-        let mut refs = extends_of(&doc, &at)?;
-        refs.extend(taxonomy_of(&doc, &at)?);
-        refs.iter().map(|r| origin.of(r)).collect()
+        extends_of(&doc, &Where::new(source))?
+            .iter()
+            .map(|r| origin.of(r))
+            .collect()
+    }
+
+    /// The taxonomy a rule file's `text` names: an OpenODD file, not a rule
+    /// file, so a host fetches it and goes no further.
+    pub fn taxonomy_reference(text: &str, source: &str, origin: &Origin) -> Result<Option<Origin>> {
+        let doc = document(text, source)?;
+        taxonomy_of(&doc, &Where::new(source))?
+            .map(|r| origin.of(&r))
+            .transpose()
     }
 
     fn from_doc(doc: Node, source: &str, taxonomy: Option<Taxonomy>) -> Result<Self> {
@@ -3608,6 +3645,16 @@ quantities:
             refs.iter().map(Origin::label).collect::<Vec<_>>(),
             [TAXONOMY_URL]
         );
+        // apart from the rule files extended, which a host follows in turn
+        assert!(RuleSet::extends_references(V3, "x.yaml", &Origin::Text)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            RuleSet::taxonomy_reference(V3, "x.yaml", &Origin::Text)
+                .unwrap()
+                .map(|o| o.label()),
+            Some(TAXONOMY_URL.to_string())
+        );
     }
 
     #[test]
@@ -3664,5 +3711,21 @@ quantities:
         let set = RuleSet::parse(GRIP, "grip.yaml").unwrap();
         assert!(set.quantities["grip"].parts[0].basis.is_none());
         assert!(set.basis_of("grip", "water").is_none());
+    }
+
+    #[test]
+    fn a_taxonomy_that_imports_others_is_refused() {
+        let mut map = IndexMap::new();
+        map.insert(
+            TAXONOMY_URL.to_string(),
+            format!("IMPORT: [more.yaml]\n{ROAD_TAXONOMY}"),
+        );
+        let e = RuleSet::parse_with(V3, "x.yaml", &Origin::Text, &mut Given(map))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("is one OpenODD file, and this one IMPORTs others"),
+            "{e}"
+        );
     }
 }

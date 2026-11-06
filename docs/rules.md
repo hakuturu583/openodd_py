@@ -137,7 +137,7 @@ Reading a version 3 file refuses:
 
 The taxonomy is read from where the file that names it says, like
 `extends`; a file it extends may name it instead, and the nearest name wins.
-It is one OpenODD file, read on its own (its `IMPORT`s are not followed).
+It is one OpenODD file, read on its own: one that `IMPORT`s others is refused, since its imports would be read from the working directory and its SHA-256 would not cover them.
 `Rules.version`, `Rules.taxonomy` (`(path or URL, sha256)`) and
 `Rules.input_concepts` (input → `(concept, unit)`) say what was read.
 
