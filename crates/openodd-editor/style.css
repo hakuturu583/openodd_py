@@ -227,6 +227,7 @@ textarea.code { font-family: var(--mono); font-size: 12.5px; min-height: 120px; 
 .inline input { flex: 1; min-width: 0; }
 .inline .num { max-width: 90px; }
 .inline .unit { max-width: 80px; }
+.inline .bracket { font-family: ui-monospace, monospace; padding: 0 6px; min-width: 1.6em; }
 .ops { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; flex: none; }
 .ops button { border: none; background: var(--surface); padding: 4px 7px; cursor: pointer; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
 .ops button + button { border-left: 1px solid var(--border); }

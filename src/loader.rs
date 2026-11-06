@@ -509,11 +509,19 @@ const NUMBER: &str = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?";
 /// A concept's or module's id.
 pub static IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_.\-]*$").unwrap());
-/// `[low .. high] unit` (or `[low, high]`).
+/// `[low .. high] unit` (or `[low, high]`). Either end may be open: `(` or
+/// `)` leaves it out, as in `[0.1 .. 2.5) mm/h`.
 pub static RANGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\[\s*(?P<low>[^\],]+?)\s*(?:\.\.|,)\s*(?P<high>[^\]]+?)\s*\]\s*(?P<unit>\S+)?$")
-        .unwrap()
+    Regex::new(
+        r"^(?P<open>[\[(])\s*(?P<low>[^\],()]+?)\s*(?:\.\.|,)\s*(?P<high>[^\]()]+?)\s*(?P<close>[\])])\s*(?P<unit>\S+)?$",
+    )
+    .unwrap()
 });
+
+/// Whether a [`RANGE_RE`] match includes its low and its high end.
+pub fn range_ends(m: &regex::Captures<'_>) -> (bool, bool) {
+    (&m["open"] == "[", &m["close"] == "]")
+}
 /// `<op> rest`: a bound (`<= 60 km/h`, `>= heavy`).
 pub static BOUND_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?P<op><=|>=|<|>)\s*(?P<rest>.+)$").unwrap());
@@ -1577,13 +1585,19 @@ impl<'r> Reader<'r> {
                     "{where_}: {name}: '{text}' ends before it starts"
                 )));
             }
+            let (include_low, include_high) = range_ends(&m);
+            if low == high && !(include_low && include_high) {
+                return Err(Error::open_odd(format!(
+                    "{where_}: {name}: '{text}' holds for no value"
+                )));
+            }
             return Ok(Condition::Leaf {
                 attribute,
                 predicate: Predicate::Interval {
                     low,
                     high,
-                    include_low: true,
-                    include_high: true,
+                    include_low,
+                    include_high,
                 },
             });
         }
@@ -1896,10 +1910,22 @@ fn categorical(
         if let Some(m) = range {
             let (low, high) = (m["low"].trim().to_string(), m["high"].trim().to_string());
             require_literals(concept, &[low.clone(), high.clone()], where_)?;
-            let i = order.iter().position(|x| *x == low).unwrap();
-            let j = order.iter().position(|x| *x == high).unwrap();
-            let (i, j) = (i.min(j), i.max(j));
-            return is_in(attribute, &order[i..=j]);
+            let (mut include_low, mut include_high) = range_ends(&m);
+            let mut i = order.iter().position(|x| *x == low).unwrap();
+            let mut j = order.iter().position(|x| *x == high).unwrap();
+            if i > j {
+                // Written high to low: each bracket stays with its literal.
+                std::mem::swap(&mut i, &mut j);
+                std::mem::swap(&mut include_low, &mut include_high);
+            }
+            let i = if include_low { i } else { i + 1 };
+            let j = if include_high { j + 1 } else { j };
+            if i >= j {
+                return Err(Error::open_odd(format!(
+                    "{where_}: {name} '{text}' holds for no literal"
+                )));
+            }
+            return is_in(attribute, &order[i..j]);
         }
         let b = bound.unwrap();
         let reference = b["rest"].trim().to_string();
@@ -2489,5 +2515,104 @@ TAXONOMY:
             .unwrap_err()
             .to_string();
         assert!(err.contains("needs at least two literals"), "{err}");
+    }
+
+    /// tier4/taxonomy keeps neighbouring literals apart with half-open ranges.
+    #[test]
+    fn half_open_ranges_keep_neighbouring_literals_apart() {
+        let text = r#"
+TAXONOMY:
+  rate: float precipitation_rate
+  level:
+    no_rain: {rate: "< 0.1 mm/h"}
+    light_rain: {rate: "[0.1 .. 2.5) mm/h"}
+    moderate_rain: {rate: "[2.5 .. 7.6] mm/h"}
+    heavy_rain: {rate: "(7.6 .. 1000] mm/h"}
+MODULES:
+  below_moderate:
+    INCLUDE_AND:
+      rate: "[0 .. 2.5) mm/h"
+"#;
+        let loaded = load_openodd(
+            &[Source::Text(text.into())],
+            &Options {
+                bindings: Some(
+                    parse_all("rate: {probe: rain, unit: mm/h}")
+                        .unwrap()
+                        .remove(0),
+                ),
+                ..Default::default()
+            },
+            &Units1,
+        )
+        .unwrap();
+        let odd = loaded.odd;
+        assert_eq!(
+            odd.attribute("level").unwrap().concept,
+            ConceptKind::Derived
+        );
+        let at = |x: f64| {
+            let mut v = crate::model::Values::new();
+            v.insert("rate".into(), Value::Float(x));
+            odd.complete(&mut v);
+            let inside = odd.evaluate(&v).inside;
+            (v["level"].clone(), inside)
+        };
+        let s = |x: &str| Value::Str(x.into());
+        assert_eq!(at(0.1), (s("light_rain"), true));
+        assert_eq!(at(2.4), (s("light_rain"), true));
+        assert_eq!(at(2.5), (s("moderate_rain"), false));
+        assert_eq!(at(7.6), (s("moderate_rain"), false));
+        assert_eq!(at(7.7), (s("heavy_rain"), false));
+    }
+
+    #[test]
+    fn open_ends_of_a_range_of_literals_leave_those_literals_out() {
+        let text = r#"
+TAXONOMY:
+  rate: float precipitation_rate
+  level:
+    a: {rate: "< 1 mm/h"}
+    b: {rate: "[1 .. 2) mm/h"}
+    c: {rate: "[2 .. 3) mm/h"}
+    d: {rate: ">= 3 mm/h"}
+MODULES:
+  m:
+    INCLUDE_AND:
+      level: "(a .. d)"
+"#;
+        let load = |range: &str| {
+            load_openodd(
+                &[Source::Text(text.replace("(a .. d)", range))],
+                &Options {
+                    bindings: Some(
+                        parse_all("rate: {probe: rain, unit: mm/h}")
+                            .unwrap()
+                            .remove(0),
+                    ),
+                    ..Default::default()
+                },
+                &Units1,
+            )
+        };
+        for (range, outside) in [
+            ("(a .. d)", vec!["a", "d"]),
+            ("[a .. c)", vec!["c", "d"]),
+            ("(c .. a]", vec!["c", "d"]),
+            ("[a .. d]", vec![]),
+        ] {
+            let odd = load(range).unwrap().odd;
+            assert_eq!(odd.outside_buckets("level"), outside, "{range}");
+        }
+        let err = load("(a .. b)").unwrap_err();
+        assert!(err.to_string().contains("holds for no literal"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_half_open_range_is_refused() {
+        let text = "TAXONOMY:\n  v: float velocity\nMODULES:\n  m:\n    INCLUDE_AND: {v: \"[5 .. 5) km/h\"}\n";
+        let err =
+            load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe).unwrap_err();
+        assert!(err.to_string().contains("holds for no value"), "{err}");
     }
 }
