@@ -206,6 +206,17 @@ class OddAttribute:
         return self.source[0] == "derived" or _code_derived(self.probe)
 
     @property
+    def concept(self) -> dict[str, Any]:
+        """What the taxonomy declares it to be: ``kind`` (``number``,
+        ``boolean``, ``categorical``, ``derived``, or ``other`` for an
+        attribute no taxonomy declares), a number's ``primitive`` and
+        ``unit_type``, and a categorical's ``literals``."""
+        core = getattr(self._core, "concept_json", None)
+        if core is None:
+            return {"kind": "other", "literals": []}
+        return dict(json.loads(core()))
+
+    @property
     def derived_from(self) -> list[str]:
         """The attributes a derived attribute is worked out from."""
         if _code_derived(self.probe):

@@ -90,7 +90,7 @@ const ALIASES: &[(&str, &str)] = &[
 /// tier4/taxonomy writes some of its types with their unit in the name
 /// (`speed_km_per_h`, `plane_angle_in_degrees`): the unit a condition writes
 /// still says which, so they are the dimension.
-fn same_type(name: &str) -> &str {
+pub fn same_type(name: &str) -> &str {
     match name {
         "duration" => "time",
         "distance" => "length",

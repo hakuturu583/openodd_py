@@ -1345,6 +1345,7 @@ impl<'r> Reader<'r> {
             Kind::Categorical if !concept.definitions.is_empty() => ConceptKind::Derived,
             Kind::Categorical | Kind::Reference => ConceptKind::Categorical,
         };
+        attribute.literals = concept.literals.clone();
         if let Some(b) = buckets {
             attribute
                 .set_buckets(b)
