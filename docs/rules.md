@@ -629,6 +629,47 @@ need not be one on its own. `Rules.files` lists every file read, the
 extended ones first, with the SHA-256 of each: what a run records of the
 rules it followed.
 
+## A scenario's nodes
+
+A backend's rules are the network every scenario shares: the weather, and
+what follows from it (the road's grip, how far drivers see). A scenario adds
+nodes of its own, in a rule file kept with it: what it sets up, such as the
+gap to a vehicle about to cut in. An added node may read the shared nodes,
+causes and effects alike (a gap that lengthens on a wet road reads the grip).
+It may not replace one:
+
+```yaml
+# cut_in/rules.yaml
+version: 2
+basis: {kind: expert, by: Scenario team}
+quantities:
+  vehicle_ahead_gap:
+    parts:
+      grip:
+        at: {grip: [0.45, 1.1]}
+        uniform: {low: [5, 2], high: [40, 30]}
+```
+
+```python
+backend.add_rules("cut_in/rules.yaml")   # the shared network, and the scenario's nodes
+backend.active_rules.upstream("vehicle_ahead_gap")   # ["grip"]
+backend.add_rules(None)                  # the shared network alone
+```
+
+`Rules.extended(added)` joins them, and `Rules.read_extending(path)` reads a
+scenario's file joined to the shared rules. That file is checked as part of
+the joined network, so a version 3 node that reads a shared quantity names no
+concept for it. The join refuses a quantity both define, an input both
+describe otherwise (its `default`, `concept` or `unit`), and taxonomies of
+different content, so one scenario can never change what another's cases
+follow. Each side keeps its own `basis`: a file-level basis stays with that
+file's quantities, and a campaign's report says who set which node. The
+backend also checks the joined network against its `rule_inputs`. Merging a file over the rules (`Rules.merged`,
+`Backend.use_rules`: a fit, a run's measured weather) is how the shared
+network changes, and the scenario's nodes still add to the result. A
+sampler's [effects](#effects-a-scenario-sets) are usually the scenario's
+nodes.
+
 ## The backend
 
 | Member | |

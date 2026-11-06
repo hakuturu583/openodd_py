@@ -2364,6 +2364,45 @@ impl RuleSet {
         Ok(RuleSet { inner })
     }
 
+    /// `added`'s nodes added to this rule set; nothing is replaced.
+    fn extended(&self, added: &RuleSet) -> PyResult<RuleSet> {
+        Ok(RuleSet {
+            inner: self.inner.extended(&added.inner).map_err(err)?,
+        })
+    }
+
+    /// The file at `location` (a path or URL), and the files it extends,
+    /// added to this rule set and checked joined to it.
+    #[pyo3(signature = (location, fetch=None))]
+    fn load_extending(
+        &self,
+        py: Python<'_>,
+        location: &str,
+        fetch: Option<PyObject>,
+    ) -> PyResult<Self> {
+        let origin = rule_origin(location);
+        let inner = with_fetch(py, fetch, |f| self.inner.load_extending(&origin, f))?;
+        Ok(RuleSet { inner })
+    }
+
+    /// A rule file's `text` added to this rule set; what it extends is read
+    /// relative to `base`.
+    #[pyo3(signature = (text, source, base=None, fetch=None))]
+    fn parse_extending(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        source: &str,
+        base: Option<&str>,
+        fetch: Option<PyObject>,
+    ) -> PyResult<Self> {
+        let origin = base.map(rule_origin).unwrap_or(crate::rules::Origin::Text);
+        let inner = with_fetch(py, fetch, |f| {
+            self.inner.parse_extending(text, source, &origin, f)
+        })?;
+        Ok(RuleSet { inner })
+    }
+
     /// This rule set with `over`'s rules merged over it.
     fn merged(&self, over: &RuleSet) -> PyResult<RuleSet> {
         Ok(RuleSet {
