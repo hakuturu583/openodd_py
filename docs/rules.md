@@ -7,6 +7,36 @@ which the Rust core evaluates. Each rule is a **conditional distribution**:
 given some inputs, the distribution of a quantity. A run draws a value from it
 at a quantile.
 
+## Where the rules stand
+
+The rules are a Bayesian network over the conditions a run is given and what
+follows from them. They sit beside the ODD and its taxonomy, not in them:
+
+| | Holds | Where |
+|---|---|---|
+| **Taxonomy** | The vocabulary: each condition's name and its value range, qualitative and orthogonal (rain intensity, by its rainfall rate) | An OpenODD file -- a shared one, such as tier4/taxonomy |
+| **ODD** | Which values of that vocabulary a system is designed for | OpenODD modules over the taxonomy |
+| **Rules: causes** | The inputs the rules are given: conditions of the taxonomy, in its vocabulary and value ranges | `inputs:` with a `concept` ([Inputs and the taxonomy](#inputs-and-the-taxonomy)) |
+| **Rules: effects** | What the causes do -- the road's grip, how far drivers see -- and the simulator's own settings: never in the taxonomy | `quantities:` |
+| **Rules: distributions** | How the effects are spread given the causes: an **assumption about how faithfully the simulator renders the conditions**, not part of the ODD | each part, with its `basis` ([The basis of a part](#the-basis-of-a-part)) |
+
+Why so:
+
+- **The taxonomy stays small and stable.** Causal links and distributions
+  are not conditions a system is designed for; written into the taxonomy,
+  they would swell its vocabulary and couple each of its terms to one
+  simulator. Kept apart, a change of the taxonomy reaches the rules only
+  where they name its concepts, and the rules change without touching it.
+- **Every cause can be traced.** Since each input is a concept of the
+  taxonomy, every condition a rule conditions on is one an ODD can name and
+  restrict -- no "dark ODD" hides in the rules. A condition the taxonomy
+  lacks is added to it, not invented in the rules.
+- **Every assumption says what it rests on.** A distribution fitted to data
+  measured in the real world and one set by someone's judgement are not
+  equally strong; the `basis` of each part says which, the fit writes it
+  ([Fitting to data](#fitting-to-data)), and a campaign's report lists the
+  assumptions its runs rested on ([What a campaign assumed](#what-a-campaign-assumed)).
+
 ```python
 import openodd
 
@@ -153,6 +183,24 @@ version 3 every part must have one; a version 2 part with none is
 as `text` does. `Rules.basis(quantity, part)` gives it as a dict,
 `Rules.bases()` every part's.
 
+### What a campaign assumed
+
+A run's coverage file records the rules its backend followed
+(`Backend.active_rules`) when it ends:
+
+```json
+"rules": {"version": 3, "taxonomy": ["taxonomy.yaml", "9c1e..."],
+          "files": [["weather_rules.yaml", "3195..."]],
+          "parts": [{"quantity": "tire_friction", "part": "rain",
+                     "basis": {"kind": "fitted", "data": {"rows": 18234}, ...}}]}
+```
+
+`merge_coverage` gathers them: `CoverageReport.assumptions` lists each part
+with what it rests on and the runs that followed it so (a part whose basis
+changed between runs is listed once per basis). The Markdown report and
+`openodd-test-report` add a **Fidelity assumptions** section, flagging the
+parts that rest on nothing stated.
+
 ## Knobs from the rules
 
 A knob that writes a fixed table -- `rain: {none: 0, light: [1, 30], ...}` --
@@ -259,6 +307,14 @@ or from the shell:
 ```sh
 openodd-rules-fit weather.yaml drives/*.csv -o weather_fitted.yaml [-q grip] [--weight w]
 ```
+
+**What a fitted part rests on.** Each part a fit moves gets a `basis` of
+kind `fitted` ([The basis of a part](#the-basis-of-a-part)): the rows it
+was fitted from, the files they were read from with their SHA-256
+(`data_files=`; `openodd-rules-fit` names the files it reads), the
+calibration after the fit, who fitted (`by=`, `openodd <version>` by
+default) and when (`date=`, today by default). A part the fit holds whole
+keeps the basis it has.
 
 **What is estimated.** The rule file's own numbers: every parameter at every
 point a part writes. The families, the inputs and their points stay as

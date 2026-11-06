@@ -232,6 +232,7 @@ class TestReport:
             "failing_cells": failing_cells,
             "flaky_cases": flaky_cases,
             "cases_recorded": len(self.report.cases),
+            "assumptions": self.report.assumptions,
         }
 
     def markdown(self, *, max_holes: int = 20) -> str:
@@ -248,7 +249,7 @@ class TestReport:
         s = self.summary()
         parts = [f"<style>{_CSS}</style>", '<div class="oo-cov oo-report">',
                  _header(s), _analysis(analysis), _results(s), _failures(s),
-                 _coverage(s), _flaky(s)]
+                 _coverage(s), _flaky(s), _assumptions(s)]
         if views:
             parts.append(self._views(cases_x, cases_y))
         parts.append("</div>")
@@ -501,6 +502,34 @@ _CSS = """
 
 
 # -- the command ----------------------------------------------------------------
+
+
+def _assumptions(s: Mapping[str, Any]) -> str:
+    rows = s.get("assumptions") or []
+    if not rows:
+        return ""
+
+    def rests_on(basis: Mapping[str, Any]) -> str:
+        said = [str(basis[k]) for k in ("by", "date", "reference") if basis.get(k)]
+        rows_ = (basis.get("data") or {}).get("rows")
+        if rows_ is not None:
+            said.append(f"{rows_} rows")
+        in_band = (basis.get("calibration") or {}).get("in_band")
+        if in_band is not None:
+            said.append(f"{_pct(in_band)} in the central 90%")
+        return escape(", ".join(said))
+
+    # Fitted to data: traceable; nothing stated: not.
+    tone = {"fitted": "pass", "unstated": "fail"}
+    table = _table(["Rule", "Basis", "Rests on", "Runs"], [[
+        escape(f"{a['quantity']}.{a['part']}"),
+        _badge(str(a["basis"].get("kind", "unstated")), tone.get(str(a["basis"].get("kind")), "")),
+        rests_on(a["basis"]),
+        _num(a["runs"]),
+    ] for a in rows])
+    return _section("Fidelity assumptions", table, note=(
+        "The rules the runs followed: how faithfully the simulator renders the conditions it "
+        "is given, assumed -- not part of the ODD. Unstated rules rest on nothing traceable."))
 
 
 def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-test-report") -> int:

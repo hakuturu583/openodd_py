@@ -62,8 +62,25 @@ struct GNode {
     /// A second line: a variable's value at the tested inputs, a factor's
     /// distribution.
     sub: String,
+    /// An input's taxonomy concept (version 3: a cause the rules are given);
+    /// `None` for an input that stands for none, and for the other nodes.
+    concept: Option<String>,
     x: f64,
     y: f64,
+}
+
+impl GNode {
+    /// Its role in the network: `cause` (an input that is a taxonomy
+    /// concept), `unclassified` (an input that is none), `effect` (a
+    /// quantity), `factor` (a part).
+    fn role(&self) -> &'static str {
+        match (self.kind, &self.concept) {
+            (Kind::Input, Some(_)) => "cause",
+            (Kind::Input, None) => "unclassified",
+            (Kind::Quantity, _) => "effect",
+            (Kind::Part, _) => "factor",
+        }
+    }
 }
 
 impl GNode {
@@ -309,12 +326,18 @@ fn build(
     for name in doc.free_inputs() {
         let id = input_id(&name);
         let (x, y) = at(&id);
+        let concept = doc
+            .inputs
+            .iter()
+            .find(|i| i.name == name)
+            .and_then(|i| i.concept.clone());
         nodes.push(GNode {
             key: NodeKey::Input(name.clone()),
             id,
             kind: Kind::Input,
             sub: value(&name),
             label: name,
+            concept,
             x,
             y,
         });
@@ -329,6 +352,7 @@ fn build(
             kind: Kind::Quantity,
             label: q.name.clone(),
             sub: value(&q.name),
+            concept: None,
             x,
             y,
         });
@@ -341,6 +365,7 @@ fn build(
                 kind: Kind::Part,
                 label: p.name.clone(),
                 sub: dist_label(p),
+                concept: None,
                 x,
                 y,
             });
@@ -776,6 +801,31 @@ fn GraphCanvas() -> impl IntoView {
                 .collect_view()
         })
     };
+    // The taxonomy's side of the network: a box around the causes.
+    let taxonomy = move || {
+        graph.with(|(nodes, _)| {
+            let causes: Vec<&GNode> = nodes.iter().filter(|n| n.role() == "cause").collect();
+            if causes.is_empty() {
+                return None;
+            }
+            let pad = 14.0;
+            let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for n in &causes {
+                let (w, h) = n.size();
+                x0 = x0.min(n.x - w / 2.0);
+                y0 = y0.min(n.y - h / 2.0);
+                x1 = x1.max(n.x + w / 2.0);
+                y1 = y1.max(n.y + h / 2.0);
+            }
+            let (x, y) = (x0 - pad, y0 - pad - 12.0);
+            Some(view! {
+                <g class="g-taxonomy">
+                    <rect x=x y=y width=x1 - x0 + 2.0 * pad height=y1 - y0 + 2.0 * pad + 12.0 rx="10"/>
+                    <text x=x + 8.0 y=y + 13.0>"taxonomy"</text>
+                </g>
+            })
+        })
+    };
     let nodes = move || {
         graph.with(|(nodes, _)| {
             nodes
@@ -797,9 +847,21 @@ fn GraphCanvas() -> impl IntoView {
                         }
                         .into_any(),
                         kind => {
-                            let class = if kind == Kind::Input { "g-node var input" } else { "g-node var quantity" };
+                            let class = format!(
+                                "g-node var {} {}",
+                                if kind == Kind::Input { "input" } else { "quantity" },
+                                n.role()
+                            );
+                            let tip = match (&n.concept, n.role()) {
+                                (Some(c), _) => format!("A cause: the taxonomy concept {c}"),
+                                (None, "unclassified") => {
+                                    "An input that stands for no taxonomy concept (version 2 rules)".to_string()
+                                }
+                                _ => "An effect the rules work out: not in the taxonomy".to_string(),
+                            };
                             view! {
                                 <g class=class class:selected=sel>
+                                    <title>{tip}</title>
                                     <rect x=x - w / 2.0 y=y - h / 2.0 width=w height=h rx=h / 2.0/>
                                     <text class="g-label" x=x y=y - 2.0>{label}</text>
                                     <text class="g-sub" x=x y=y + 13.0>{sub}</text>
@@ -835,8 +897,9 @@ fn GraphCanvas() -> impl IntoView {
                 "Drag a variable's "<span class="g-port-key"></span>" onto a factor "<span class="g-factor-key"></span>" or a quantity to make it read the variable."
             </span>
             <span class="graph-key">
-                <span class="key input">"input"</span>
-                <span class="key quantity">"quantity"</span>
+                <span class="key input cause" title="An input that is a taxonomy concept">"cause"</span>
+                <span class="key input unclassified" title="An input that is no taxonomy concept (version 2)">"unclassified"</span>
+                <span class="key quantity" title="A quantity the rules work out">"effect"</span>
                 <span class="key factor">"factor (part)"</span>
                 <span class="key chain">"chain"</span>
             </span>
@@ -858,6 +921,7 @@ fn GraphCanvas() -> impl IntoView {
                         <path d="M0,0 L10,5 L0,10 z" class="g-arrowhead"/>
                     </marker>
                 </defs>
+                {taxonomy}
                 {edges}
                 {nodes}
                 {wire}
@@ -980,6 +1044,29 @@ fn InputCard(name: String) -> impl IntoView {
             }
         });
     };
+    // The taxonomy concept it stands for, and the unit of its points.
+    let set_concept = move |ev: leptos::ev::Event| {
+        let c = event_target_value(&ev).trim().to_string();
+        let n = current.get_untracked();
+        r.doc.update(|d| {
+            ensure(d, &n);
+            if let Some(i) = d.inputs.iter_mut().find(|i| i.name == n) {
+                i.concept = (!c.is_empty()).then_some(c);
+            }
+        });
+    };
+    let set_unit = move |ev: leptos::ev::Event| {
+        let u = event_target_value(&ev).trim().to_string();
+        let n = current.get_untracked();
+        r.doc.update(|d| {
+            ensure(d, &n);
+            if let Some(i) = d.inputs.iter_mut().find(|i| i.name == n) {
+                i.unit = u;
+            }
+        });
+    };
+    let is_cause =
+        Memo::new(move |_| described.with(|i| i.as_ref().is_some_and(|i| i.concept.is_some())));
     let remove = move |_| {
         let n = current.get_untracked();
         r.doc.update(|d| d.inputs.retain(|i| i.name != n));
@@ -993,6 +1080,25 @@ fn InputCard(name: String) -> impl IntoView {
                     <input class="title-input" prop:value=move || current.get() on:change=rename aria-label="Input name"/>
                 </div>
                 <p class="muted">"A value the backend gives the rules (a knob's, or one it derives)."</p>
+                <p class="muted">{move || if is_cause.get() {
+                    "A cause: a condition of the taxonomy, named as the taxonomy names it."
+                } else {
+                    "Unclassified: it stands for no taxonomy concept. Version 3 rules refuse that -- name its concept, or make it a quantity."
+                }}</p>
+                <div class="grid2">
+                    <label class="field">
+                        <span>"Taxonomy concept"</span>
+                        <input placeholder="none" class="mono"
+                            prop:value=move || described.with(|i| i.as_ref().and_then(|i| i.concept.clone()).unwrap_or_default())
+                            on:change=set_concept/>
+                    </label>
+                    <label class="field">
+                        <span>"Unit of its points"</span>
+                        <input placeholder="the concept's"
+                            prop:value=move || described.with(|i| i.as_ref().map(|i| i.unit.clone()).unwrap_or_default())
+                            on:change=set_unit/>
+                    </label>
+                </div>
                 <div class="grid2">
                     <label class="field">
                         <span>"Default"</span>
@@ -1120,5 +1226,30 @@ fn EdgeCard(q: u64, p: u64, k: usize) -> impl IntoView {
             </div>
         }
         .into_any()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inputs_that_are_concepts_are_causes_and_quantities_effects() {
+        let doc = RulesDoc::from_yaml(
+            "version: 3\ntaxonomy: t.yaml\nbasis: {kind: expert}\ninputs:\n  rate: {concept: weather.rainfall_rate}\nquantities:\n  grip:\n    parts:\n      rain:\n        at: {rate: [0, 10], water: [0, 1]}\n        uniform: {low: 0.5, high: 1.0}\n",
+        )
+        .unwrap();
+        let (nodes, _) = build(&doc, &HashMap::new(), &HashMap::new());
+        let role = |label: &str| {
+            nodes
+                .iter()
+                .find(|n| n.label == label)
+                .map(|n| n.role())
+                .unwrap()
+        };
+        assert_eq!(role("rate"), "cause");
+        assert_eq!(role("water"), "unclassified");
+        assert_eq!(role("grip"), "effect");
+        assert_eq!(role("rain"), "factor");
     }
 }

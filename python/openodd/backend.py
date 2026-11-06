@@ -312,7 +312,9 @@ class Backend:
         name, with their units; the reader keys (``measure``); each knob, by
         the probe whose attribute it sets, with the values it writes per
         bucket label; the inputs the rules may read, each with the knob whose
-        written value it is; and the rule files followed, with their SHA-256.
+        written value it is and, for version 3 rules, the taxonomy concept it
+        stands for (``concept``, ``unit``: a cause); and the rule files
+        followed, with their SHA-256, and their taxonomy.
         The editor reads it to connect an ODD's attributes, the binding that
         measures them, and the rules (docs/editor.md).
         """
@@ -331,12 +333,18 @@ class Backend:
                 continue
             knobs[name] = _knob_manifest(knob)
         inputs: dict[str, Any] = {}
+        concepts = self.rules.input_concepts if self.rules is not None else {}
         for name in self.rule_inputs:
             entry = {}
             if name in self.rule_input_knobs:
                 entry["knob"] = self.rule_input_knobs[name]
             if name in self.rule_input_text:
                 entry["text"] = self.rule_input_text[name]
+            # A cause: the taxonomy concept it stands for (version 3 rules).
+            if name in concepts:
+                entry["concept"], unit = concepts[name]
+                if unit:
+                    entry["unit"] = unit
             inputs[str(name)] = entry
         out: dict[str, Any] = {
             "openodd_backend": MANIFEST_VERSION,
@@ -348,6 +356,8 @@ class Backend:
         }
         if self.rules is not None:
             out["rules"] = [{"file": f, "sha256": h} for f, h in self.rules.files]
+            if self.rules.taxonomy is not None:
+                out["taxonomy"] = {"file": self.rules.taxonomy[0], "sha256": self.rules.taxonomy[1]}
         return out
 
 

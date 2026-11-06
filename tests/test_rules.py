@@ -403,3 +403,14 @@ class TestBasis:
         (tmp_path / "grip.yaml").write_text(GRIP_V3.replace("basis: {kind: expert}\n", ""))
         with pytest.raises(RulesError, match="no basis"):
             Rules.read(tmp_path / "grip.yaml")
+
+
+def test_the_manifest_says_which_inputs_are_causes(tmp_path: Path) -> None:
+    (tmp_path / "taxonomy.yaml").write_text(TAXONOMY)
+    (tmp_path / "grip.yaml").write_text(GRIP_V3)
+    backend = Backend(rules=Rules.read(tmp_path / "grip.yaml"), rule_inputs=["rainfall_rate"])
+    manifest = backend.manifest()
+    assert manifest["rule_inputs"]["rainfall_rate"] == {"concept": "weather.rainfall_rate", "unit": "mm/h"}
+    assert manifest["taxonomy"]["file"].endswith("taxonomy.yaml")
+    plain = Backend(rules=Rules.from_text(GRIP), rule_inputs=["water"]).manifest()
+    assert plain["rule_inputs"]["water"] == {} and "taxonomy" not in plain

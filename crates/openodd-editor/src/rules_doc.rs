@@ -467,7 +467,13 @@ impl RulesDoc {
                     d.shape = grid;
                 }
                 match parts.iter_mut().find(|p| p.name == fp.name) {
-                    Some(p) => p.dist = fp.dist,
+                    Some(p) => {
+                        p.dist = fp.dist;
+                        // A part the fit moved now rests on the data.
+                        if fp.basis.is_some() {
+                            p.basis = fp.basis;
+                        }
+                    }
                     None => parts.push(fp),
                 }
             }

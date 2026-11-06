@@ -577,6 +577,8 @@ input.points { width: 100%; min-width: 180px; }
 .graph-key { display: inline-flex; gap: 10px; font-size: 12px; color: var(--muted); }
 .graph-key .key::before { content: ""; display: inline-block; width: 14px; height: 10px; margin-right: 4px; vertical-align: -1px; border-radius: 6px; border: 1.5px solid; }
 .graph-key .key.input::before { background: var(--surface); border-color: var(--muted); }
+.graph-key .key.cause::before { background: var(--inside-soft); border-color: var(--inside); }
+.graph-key .key.unclassified::before { background: var(--depends-soft); border-color: var(--depends); border-style: dashed; }
 .graph-key .key.quantity::before { background: var(--accent-soft); border-color: var(--accent); }
 .graph-key .key.factor::before { width: 10px; border-radius: 2px; background: var(--text); border-color: var(--text); }
 .graph-key .key.chain::before { height: 0; border-width: 2px 0 0; border-radius: 0; border-color: var(--carries); border-style: dashed; vertical-align: 3px; }
@@ -591,6 +593,10 @@ svg.graph.wiring { cursor: crosshair; }
 .g-node.var rect { stroke-width: 1.5; }
 .g-node.input rect { fill: var(--surface); stroke: var(--muted); }
 .g-node.quantity rect { fill: var(--accent-soft); stroke: var(--accent); }
+.g-node.cause rect { fill: var(--inside-soft); stroke: var(--inside); }
+.g-node.unclassified rect { fill: var(--depends-soft); stroke: var(--depends); stroke-dasharray: 4 3; }
+.g-taxonomy rect { fill: none; stroke: var(--inside); stroke-dasharray: 6 4; stroke-width: 1.2; }
+.g-taxonomy text { font-size: 11px; fill: var(--inside); font-weight: 600; pointer-events: none; }
 .g-node.factor rect { fill: var(--text); stroke: var(--text); }
 .g-node.selected rect { stroke: var(--accent); stroke-width: 3; }
 .g-node.factor.selected rect { fill: var(--accent); }

@@ -479,6 +479,9 @@ pub struct Attribute {
     /// The unit its numbers are read in when no probe's unit is known: the
     /// first a condition on it writes (`""`: none).
     pub written_unit: String,
+    /// A categorical's literals, as the taxonomy lists them (empty for
+    /// another concept, or one that names a type of the taxonomy).
+    pub literals: Vec<String>,
 }
 
 impl Attribute {
@@ -503,6 +506,7 @@ impl Attribute {
             item: None,
             concept: ConceptKind::Other,
             written_unit: String::new(),
+            literals: Vec::new(),
         })
     }
 
