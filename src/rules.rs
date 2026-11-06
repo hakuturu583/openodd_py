@@ -1550,16 +1550,21 @@ impl RuleSet {
                 .map(|m| m.keys().map(NodeExt::py_str).collect())
                 .unwrap_or_default()
         };
+        // A shared node, or an input a shared node reads: an added quantity
+        // of its name would change how the shared nodes are worked out.
+        let free = self.free_inputs();
         let mut clash: Vec<String> = names(added, "quantities")
             .into_iter()
-            .filter(|q| self.quantities.contains_key(q))
+            .filter(|q| {
+                self.quantities.contains_key(q) || self.inputs.contains_key(q) || free.contains(q)
+            })
             .collect();
         if !clash.is_empty() {
             clash.sort();
             return Err(at.error(format!(
-                "defines {}, which the rules it adds to define: a scenario adds nodes to the \
-                 shared network, it does not replace them (give its own name; to change the \
-                 shared rules, merge a file over them)",
+                "defines {}, which the rules it adds to define or read: a scenario adds nodes \
+                 to the shared network, it does not replace them or their inputs (give its own \
+                 name; to change the shared rules, merge a file over them)",
                 clash.join(", ")
             )));
         }

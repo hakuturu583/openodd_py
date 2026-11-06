@@ -286,6 +286,10 @@ class Backend:
                 formed, or they read an input not in :attr:`rule_inputs`.
         """
         if rules is None:
+            if self._rules_added is not None:
+                # The scenario's nodes still add to the shared rules alone;
+                # if they do not, nothing changes.
+                self._rules_joined = (self.rules, self._join(self.rules, self._rules_added))
             self._rules_in_use = None
             return self.rules
         if isinstance(rules, Rules):

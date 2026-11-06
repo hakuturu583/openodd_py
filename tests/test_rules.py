@@ -533,3 +533,23 @@ def test_a_scenarios_nodes_read_only_what_the_backend_gives(tmp_path: Path) -> N
     with pytest.raises(RulesError, match="wind"):
         backend.add_rules(Rules.from_text(wind))
     assert backend.add_rules(Rules.from_text(SCENARIO)).quantities[-1] == "npc_speed_offset"
+
+
+def test_a_scenario_node_may_not_take_a_shared_input(tmp_path: Path) -> None:
+    """An added quantity named like an input a shared node reads would change
+    how the shared node is worked out."""
+    water = "version: 2\nquantities:\n  water:\n    parts:\n      base:\n        uniform: {low: 0, high: 100}\n"
+    with pytest.raises(RulesError, match="defines water, which the rules it adds to define or read"):
+        Rules.from_text(GRIP).extended(Rules.from_text(water))
+
+
+def test_dropping_a_runs_rules_keeps_the_scenarios_nodes_joined() -> None:
+    """A scenario that reads a node only a run's rules give: dropping those
+    rules is refused, and the backend stays as it was."""
+    backend = Backend(rule_inputs=["water"])
+    backend.use_rules(Rules.from_text(GRIP))
+    backend.add_rules(Rules.from_text(SCENARIO))
+    with pytest.raises(RulesError, match="grip"):
+        backend.use_rules(None)
+    assert "vehicle_ahead_gap" in backend.active_rules.quantities
+    assert "grip" in backend.active_rules.quantities
