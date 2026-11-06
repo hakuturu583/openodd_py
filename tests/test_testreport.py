@@ -331,3 +331,18 @@ def test_unusual_fields_still_render() -> None:
     odd = ReportAnalysis("pass", "h", "s", [openodd.Finding("high", "t1", "d"), openodd.Finding("critical", "t2", "d")])
     html = TestReport([doc]).html(analysis=odd, views=False)
     assert html.index("t2") < html.index("t1")
+
+
+def test_the_fidelity_assumptions() -> None:
+    docs = _campaign()
+    for i, doc in enumerate(docs):
+        doc["rules"] = {"files": [["w.yaml", "aa"]], "parts": [
+            {"quantity": "grip", "part": "rain",
+             "basis": {"kind": "fitted", "data": {"rows": 50}} if i % 2 else None},
+        ]}
+    report = TestReport(docs)
+    kinds = {a["basis"]["kind"]: a["runs"] for a in report.summary()["assumptions"]}
+    assert kinds == {"unstated": (len(docs) + 1) // 2, "fitted": len(docs) // 2}
+    page = report.html(views=False)
+    assert "<h2>Fidelity assumptions" in page and "50 rows" in page
+    assert "Fidelity assumptions" not in TestReport(_campaign()).html(views=False)

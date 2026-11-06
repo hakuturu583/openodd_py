@@ -153,6 +153,24 @@ version 3 every part must have one; a version 2 part with none is
 as `text` does. `Rules.basis(quantity, part)` gives it as a dict,
 `Rules.bases()` every part's.
 
+### What a campaign assumed
+
+A run's coverage file records the rules its backend followed
+(`Backend.active_rules`) when it ends:
+
+```json
+"rules": {"version": 3, "taxonomy": ["taxonomy.yaml", "9c1e..."],
+          "files": [["weather_rules.yaml", "3195..."]],
+          "parts": [{"quantity": "tire_friction", "part": "rain",
+                     "basis": {"kind": "fitted", "data": {"rows": 18234}, ...}}]}
+```
+
+`merge_coverage` gathers them: `CoverageReport.assumptions` lists each part
+with what it rests on and the runs that followed it so (a part whose basis
+changed between runs is listed once per basis). The Markdown report and
+`openodd-test-report` add a **Fidelity assumptions** section, flagging the
+parts that rest on nothing stated.
+
 ## Chains
 
 A part may read another quantity of the same rules, so a quantity can derive

@@ -1314,6 +1314,11 @@ impl CoverageReport {
     fn cases_json(&self) -> String {
         serde_json::Value::Array(self.inner.cases.iter().map(|c| c.to_json()).collect()).to_string()
     }
+    /// The rule parts the runs followed, each with what it rests on, as JSON.
+    fn assumptions_json(&self) -> String {
+        serde_json::Value::Array(self.inner.assumptions.iter().map(|a| a.to_json()).collect())
+            .to_string()
+    }
     /// The naturalistic failure rate of the weighted runs, per scenario and
     /// environment, as JSON.
     fn weighted_outcomes_json(&self) -> String {

@@ -352,6 +352,66 @@ impl OddExposure {
     }
 }
 
+/// A rule part some runs followed, and what it rests on: an assumption about
+/// how faithfully the runs rendered their conditions, not part of the ODD.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assumption {
+    pub quantity: String,
+    pub part: String,
+    /// Its `basis` as the run recorded it (`{"kind": "unstated"}` when none).
+    pub basis: Json,
+    /// The runs that followed it so.
+    pub runs: i64,
+    /// The rule files it was read from, `(path or URL, sha256)`, each once.
+    pub files: Vec<(String, String)>,
+}
+
+impl Assumption {
+    pub fn kind(&self) -> &str {
+        self.basis
+            .get("kind")
+            .and_then(Json::as_str)
+            .unwrap_or("unstated")
+    }
+
+    pub fn to_json(&self) -> Json {
+        json!({
+            "quantity": self.quantity,
+            "part": self.part,
+            "basis": self.basis,
+            "runs": self.runs,
+            "files": self.files.iter().map(|(f, h)| json!([f, h])).collect::<Vec<_>>(),
+        })
+    }
+
+    /// What it rests on, in a few words: who, when, from how many rows, how
+    /// well it matched.
+    fn summary(&self) -> String {
+        let b = &self.basis;
+        let mut out = Vec::new();
+        for key in ["by", "date", "reference"] {
+            if let Some(v) = b.get(key).and_then(Json::as_str) {
+                out.push(v.to_string());
+            }
+        }
+        if let Some(rows) = b
+            .get("data")
+            .and_then(|d| d.get("rows"))
+            .and_then(Json::as_f64)
+        {
+            out.push(format!("{rows} rows"));
+        }
+        if let Some(x) = b
+            .get("calibration")
+            .and_then(|c| c.get("in_band"))
+            .and_then(Json::as_f64)
+        {
+            out.push(format!("{} in the central 90%", pct0(x)));
+        }
+        out.join(", ")
+    }
+}
+
 /// Coverage merged over a number of runs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CoverageReport {
@@ -369,6 +429,9 @@ pub struct CoverageReport {
     /// runs that recorded an importance-sampling weight
     /// (`crate::weighted`). Empty when none did.
     pub weighted_outcomes: Vec<crate::weighted::WeightedOutcome>,
+    /// The rule parts the runs followed, each with what it rests on, in the
+    /// order first met. Empty when no run recorded its rules.
+    pub assumptions: Vec<Assumption>,
 }
 
 /// How flaky a case is (see `crate::flaky::Metrics`).
@@ -527,6 +590,12 @@ impl CoverageReport {
                 "entries": self.entries.iter().filter(|e| &e.group == g).map(MergedEntry::to_json).collect::<Vec<_>>(),
             }))).collect::<Map<_, _>>(),
         });
+        // Only when there is any: a report of runs that recorded no rules is
+        // unchanged.
+        if !self.assumptions.is_empty() {
+            out["assumptions"] =
+                Json::Array(self.assumptions.iter().map(Assumption::to_json).collect());
+        }
         // Only when there is any: a report without weights is unchanged.
         if !self.weighted_outcomes.is_empty() {
             out["weighted_outcomes"] = Json::Array(
@@ -697,6 +766,7 @@ impl CoverageReport {
                 }
             }
         }
+        lines.extend(assumptions_markdown(&self.assumptions));
         lines.extend(cases_markdown(&self.cases, MAX_CASE_ROWS));
         lines.extend(crate::weighted::markdown(&self.weighted_outcomes));
         lines.extend(crate::cell_flakiness::markdown(
@@ -705,6 +775,50 @@ impl CoverageReport {
         ));
         lines.join("\n") + "\n"
     }
+}
+
+/// The rules the runs followed, as assumptions about how faithfully they
+/// rendered their conditions: each part, what it rests on, and its runs.
+fn assumptions_markdown(assumptions: &[Assumption]) -> Vec<String> {
+    if assumptions.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        String::new(),
+        "## Fidelity assumptions".into(),
+        String::new(),
+        "The rules the runs followed: how faithfully the simulator renders the conditions \
+         it is given, assumed -- not part of the ODD."
+            .into(),
+        String::new(),
+        "| Rule | Basis | Rests on | Runs |".into(),
+        "|---|---|---|---|".into(),
+    ];
+    for a in assumptions {
+        lines.push(format!(
+            "| {}.{} | {} | {} | {} |",
+            a.quantity,
+            a.part,
+            a.kind(),
+            a.summary(),
+            a.runs
+        ));
+    }
+    let unstated = assumptions
+        .iter()
+        .filter(|a| a.kind() == "unstated")
+        .count();
+    if unstated > 0 {
+        lines.extend([
+            String::new(),
+            format!(
+                "**{unstated} of {} rest on nothing stated** (version 2 rules): their results \
+                 cannot be traced to data or to anyone's judgement.",
+                assumptions.len()
+            ),
+        ]);
+    }
+    lines
 }
 
 /// The "Flaky cases" section: the runs that recorded their case, flakiest
@@ -975,6 +1089,60 @@ fn strings(v: Option<&Json>) -> Vec<String> {
 }
 
 /// Merge coverage documents (the contents of coverage files) into a report.
+/// A run's `rules` (the coverage file's: `files`, and per part its
+/// `quantity`, `part` and `basis`) into the assumptions met so far.
+fn add_assumptions(into: &mut Vec<Assumption>, rules: &Json) {
+    let files: Vec<(String, String)> = rules
+        .get("files")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let pair = f.as_array()?;
+            Some((
+                pair.first()?.as_str()?.into(),
+                pair.get(1)?.as_str()?.into(),
+            ))
+        })
+        .collect();
+    for raw in rules
+        .get("parts")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let text = |k: &str| raw.get(k).and_then(Json::as_str).unwrap_or("").to_string();
+        let (quantity, part) = (text("quantity"), text("part"));
+        let basis = raw
+            .get("basis")
+            .filter(|b| b.is_object())
+            .cloned()
+            .unwrap_or_else(|| json!({"kind": "unstated"}));
+        let found = into
+            .iter_mut()
+            .find(|a| a.quantity == quantity && a.part == part && a.basis == basis);
+        let a = match found {
+            Some(a) => a,
+            None => {
+                into.push(Assumption {
+                    quantity,
+                    part,
+                    basis,
+                    runs: 0,
+                    files: Vec::new(),
+                });
+                into.last_mut().expect("just pushed")
+            }
+        };
+        a.runs += 1;
+        for f in &files {
+            if !a.files.contains(f) {
+                a.files.push(f.clone());
+            }
+        }
+    }
+}
+
 pub fn merge_coverage(documents: &[Json]) -> Result<CoverageReport> {
     let mut report = CoverageReport::default();
     let mut merged: IndexMap<String, usize> = IndexMap::new();
@@ -994,6 +1162,9 @@ pub fn merge_coverage(documents: &[Json]) -> Result<CoverageReport> {
             .to_string();
         *report.scenarios.entry(scenario.clone()).or_default() += 1;
         report.cases.extend(CaseRun::read(index, &scenario, doc));
+        if let Some(rules) = doc.get("rules").filter(|r| r.is_object()) {
+            add_assumptions(&mut report.assumptions, rules);
+        }
         if let Some(odd) = doc.get("odd").filter(|o| o.is_object()) {
             let name = odd.get("name").and_then(Json::as_str).unwrap_or("");
             report
@@ -1203,5 +1374,58 @@ mod tests {
             md.contains("| odd.rain | tick | 50% | 1/2 | none |"),
             "{md}"
         );
+    }
+
+    #[test]
+    fn the_rules_the_runs_followed_are_their_assumptions() {
+        let with_rules = |grip: Json| {
+            let mut d = doc("none", true);
+            d["rules"] = json!({
+                "version": 3,
+                "files": [["weather.yaml", "aa"]],
+                "parts": [
+                    {"quantity": "grip", "part": "rain", "basis": grip},
+                    {"quantity": "sight", "part": "fog", "basis": null},
+                ],
+            });
+            d
+        };
+        let fitted = json!({"kind": "fitted", "by": "me", "data": {"rows": 120}, "calibration": {"in_band": 0.88}});
+        let r = merge_coverage(&[
+            with_rules(fitted.clone()),
+            with_rules(fitted),
+            with_rules(json!({"kind": "expert"})),
+            doc("none", true),
+        ])
+        .unwrap();
+        let got: Vec<(String, &str, i64)> = r
+            .assumptions
+            .iter()
+            .map(|a| (format!("{}.{}", a.quantity, a.part), a.kind(), a.runs))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("grip.rain".to_string(), "fitted", 2),
+                ("sight.fog".to_string(), "unstated", 3),
+                ("grip.rain".to_string(), "expert", 1),
+            ]
+        );
+        assert_eq!(
+            r.assumptions[0].files,
+            [("weather.yaml".to_string(), "aa".to_string())]
+        );
+        assert_eq!(r.to_json()["assumptions"][0]["runs"], 2);
+        let md = r.to_markdown(20);
+        assert!(md.contains("## Fidelity assumptions"), "{md}");
+        assert!(
+            md.contains("| grip.rain | fitted | me, 120 rows, 88% in the central 90% | 2 |"),
+            "{md}"
+        );
+        assert!(md.contains("**1 of 3 rest on nothing stated**"), "{md}");
+        // A report of runs that recorded no rules is as it was.
+        let plain = merge_coverage(&[doc("none", true)]).unwrap();
+        assert!(plain.to_json().get("assumptions").is_none());
+        assert!(!plain.to_markdown(20).contains("Fidelity assumptions"));
     }
 }
