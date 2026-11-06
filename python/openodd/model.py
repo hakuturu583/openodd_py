@@ -217,6 +217,13 @@ class OddAttribute:
         return dict(json.loads(core()))
 
     @property
+    def parameter(self) -> bool:
+        """Whether it is a scenario parameter (a binding file's
+        ``parameters``): measured, covered and drawn like any attribute, but
+        no taxonomy concept and no condition of the domain."""
+        return bool(getattr(self._core, "parameter", False))
+
+    @property
     def derived_from(self) -> list[str]:
         """The attributes a derived attribute is worked out from."""
         if _code_derived(self.probe):

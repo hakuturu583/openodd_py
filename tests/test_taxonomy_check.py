@@ -135,3 +135,15 @@ def test_the_rules_taxonomy_is_not_read_again(files: Path, monkeypatch: pytest.M
     # The fetched taxonomy declares the flow rate as the reference does.
     assert result.findings == []
     assert fetched == ["https://example.com/taxonomy.yaml"]
+
+
+def test_a_scenario_parameter_is_not_looked_for(tmp_path: Path) -> None:
+    """#92: a binding's parameters stand for no taxonomy concept."""
+    (tmp_path / "reference.yaml").write_text(REFERENCE)
+    (tmp_path / "odd.yaml").write_text("TAXONOMY:\n  road:\n    speed_limit: float speed_km_per_h\n")
+    (tmp_path / "b.yaml").write_text(
+        "openodd: [odd.yaml]\nparameters:\n"
+        "  scenario.lead_gap: {type: float length, measure: gap_m, buckets: [0, 10]}\n"
+    )
+    result = check_taxonomy(tmp_path / "reference.yaml", odds=[tmp_path / "b.yaml"])
+    assert result.ok, result.findings

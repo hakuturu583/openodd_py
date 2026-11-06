@@ -482,6 +482,10 @@ pub struct Attribute {
     /// A categorical's literals, as the taxonomy lists them (empty for
     /// another concept, or one that names a type of the taxonomy).
     pub literals: Vec<String>,
+    /// A scenario parameter (a binding's `parameters:`): measured and covered
+    /// like any attribute, but no taxonomy concept and no condition of the
+    /// domain.
+    pub parameter: bool,
 }
 
 impl Attribute {
@@ -507,6 +511,7 @@ impl Attribute {
             concept: ConceptKind::Other,
             written_unit: String::new(),
             literals: Vec::new(),
+            parameter: false,
         })
     }
 

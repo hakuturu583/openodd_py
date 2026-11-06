@@ -91,6 +91,9 @@ pub struct Options {
     pub text: String,
     /// Module -> criteria: the modules covered as situations.
     pub situations: Option<Node>,
+    /// Scenario parameter -> its type and how it is measured (the
+    /// `parameters` of a binding file).
+    pub parameters: Option<Node>,
 }
 
 /// An ODD read from files, with the transmission it was read from.
@@ -551,6 +554,8 @@ struct Concept {
     ordered: bool,
     /// Index of its attribute, once built.
     attribute: Option<usize>,
+    /// A scenario parameter, not a taxonomy concept.
+    parameter: bool,
 }
 
 impl Concept {
@@ -564,11 +569,22 @@ impl Concept {
             definitions: vec![],
             ordered: false,
             attribute: None,
+            parameter: false,
         }
     }
 
     fn name(&self) -> String {
         self.path.join(".")
+    }
+
+    /// The shortest name it answers to: a taxonomy concept's last segment, a
+    /// scenario parameter's full name (it answers to nothing shorter).
+    fn short_name(&self) -> String {
+        if self.parameter {
+            self.name()
+        } else {
+            self.path.last().cloned().unwrap_or_default()
+        }
     }
 }
 
@@ -902,6 +918,9 @@ impl<'r> Reader<'r> {
                 }
             }
         }
+        if let Some(parameters) = &options.parameters {
+            reader.add_parameters(parameters)?;
+        }
         if let Some(s) = &options.situations {
             if let Some(pairs) = s.as_mapping() {
                 reader.situations = pairs.iter().map(|(k, v)| (k.py_str(), v.clone())).collect();
@@ -910,15 +929,85 @@ impl<'r> Reader<'r> {
         Ok(reader)
     }
 
+    /// A binding's `parameters`: attributes a scenario sets up, each with
+    /// its OpenODD `type` and how it is measured, that stand for no taxonomy
+    /// concept.
+    fn add_parameters(&mut self, parameters: &Node) -> Result<()> {
+        let Some(pairs) = parameters.as_mapping() else {
+            return Err(Error::open_odd(
+                "parameters: expected a mapping".to_string(),
+            ));
+        };
+        for (k, v) in pairs {
+            let name = k.py_str();
+            let path: Vec<String> = name.split('.').map(str::to_string).collect();
+            if name.is_empty() || path.iter().any(String::is_empty) {
+                return Err(Error::open_odd(format!(
+                    "parameters: {name:?} is not a name"
+                )));
+            }
+            if let Some(c) = self.concepts.values().find(|c| {
+                c.name() == name || c.path.starts_with(&path) || path.starts_with(&c.path)
+            }) {
+                return Err(Error::open_odd(format!(
+                    "parameters.{name}: the taxonomy declares {}; a scenario parameter stands \
+                     for no concept of it",
+                    c.name()
+                )));
+            }
+            let Some(spec) = v.as_mapping() else {
+                return Err(Error::open_odd(format!(
+                    "parameters.{name}: expected a mapping"
+                )));
+            };
+            let Some(type_) = v.get("type") else {
+                return Err(Error::open_odd(format!(
+                    "parameters.{name}: needs a type (an OpenODD type: `float length`, \
+                     `boolean`, a list of literals)"
+                )));
+            };
+            if type_.is_mapping() {
+                return Err(Error::open_odd(format!(
+                    "parameters.{name}: type is a number's type, boolean or a list of literals"
+                )));
+            }
+            let mut found = IndexMap::new();
+            flatten(type_, &path, &HashMap::new(), &mut found, &BTreeSet::new())
+                .map_err(|e| Error::open_odd(format!("parameters.{name}: {e}")))?;
+            let Some(mut concept) = found.shift_remove(&name) else {
+                return Err(Error::open_odd(format!(
+                    "parameters.{name}: cannot read the type {}",
+                    type_.py_repr()
+                )));
+            };
+            if concept.kind == Kind::Reference {
+                return Err(Error::open_odd(format!(
+                    "parameters.{name}: type is a number's type, boolean or a list of literals"
+                )));
+            }
+            concept.parameter = true;
+            self.concepts.insert(name.clone(), concept);
+            let binding: Mapping = spec
+                .iter()
+                .filter(|(k, _)| k.py_str() != "type")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            self.bindings.insert(name, Node::Mapping(binding));
+        }
+        Ok(())
+    }
+
     // -- names ----------------------------------------------------------------
 
     /// The concept `reference` names: its id, or a dotted tail of its path.
     fn concept(&self, reference: &str, where_: &str) -> Result<&Concept> {
         let suffix = format!(".{reference}");
+        // A scenario parameter answers to its full name only: one sharing a
+        // tail with a taxonomy concept leaves the concept's name unambiguous.
         let found: Vec<&Concept> = self
             .concepts
             .values()
-            .filter(|c| c.name() == reference || c.name().ends_with(&suffix))
+            .filter(|c| c.name() == reference || (!c.parameter && c.name().ends_with(&suffix)))
             .collect();
         match found.len() {
             0 => Err(Error::open_odd(format!(
@@ -976,7 +1065,8 @@ impl<'r> Reader<'r> {
             .concepts
             .values()
             .filter(|c| {
-                (c.name() == reference || c.name().ends_with(&suffix))
+                !c.parameter
+                    && (c.name() == reference || c.name().ends_with(&suffix))
                     && c.path.get(..concept.path.len()) != Some(&concept.path[..])
             })
             .collect();
@@ -1346,6 +1436,7 @@ impl<'r> Reader<'r> {
             Kind::Categorical | Kind::Reference => ConceptKind::Categorical,
         };
         attribute.literals = concept.literals.clone();
+        attribute.parameter = concept.parameter;
         if let Some(b) = buckets {
             attribute
                 .set_buckets(b)
@@ -1506,7 +1597,15 @@ impl<'r> Reader<'r> {
         where_: &str,
         _within: Option<&[String]>,
     ) -> Result<String> {
-        Ok(self.concept(reference, where_)?.name())
+        let concept = self.concept(reference, where_)?;
+        if concept.parameter {
+            return Err(Error::open_odd(format!(
+                "{where_}: {} is a scenario parameter, not a condition of the domain: \
+                 its distribution is the rules'",
+                concept.name()
+            )));
+        }
+        Ok(concept.name())
     }
 
     fn leaf(
@@ -1672,7 +1771,7 @@ impl<'r> Reader<'r> {
                     "{where_}: a module's id must not contain 'unknown'"
                 )));
             }
-            if self.concepts.values().any(|c| c.path.last() == Some(&name)) {
+            if self.concepts.values().any(|c| c.short_name() == name) {
                 return Err(Error::open_odd(format!(
                     "{where_}: a module's id must not be a concept's"
                 )));
@@ -1804,11 +1903,7 @@ impl<'r> Reader<'r> {
         }
         self.mark_situations(&mut modules)?;
         self.threshold_buckets(&modules)?;
-        let tails: BTreeSet<String> = self
-            .concepts
-            .values()
-            .filter_map(|c| c.path.last().cloned())
-            .collect();
+        let tails: BTreeSet<String> = self.concepts.values().map(Concept::short_name).collect();
         let clash: Vec<String> = self.labels.intersection(&tails).cloned().collect();
         if !clash.is_empty() {
             return Err(Error::open_odd(format!(
@@ -2187,7 +2282,7 @@ fn load_binding_doc(
         .filter(|k| {
             !matches!(
                 k.as_str(),
-                "openodd" | "name" | "text" | "probes" | "situations"
+                "openodd" | "name" | "text" | "probes" | "situations" | "parameters"
             )
         })
         .collect();
@@ -2209,6 +2304,7 @@ fn load_binding_doc(
         ),
         text: doc.get("text").map(NodeExt::py_str).unwrap_or_default(),
         situations: doc.get("situations").cloned(),
+        parameters: doc.get("parameters").cloned(),
     };
     let sources = binding_sources(path, doc)?;
     let mut loaded = load_with(files, &sources, &options, resolver, Some(file_name(path)))?;
@@ -2426,6 +2522,101 @@ ODD:
             load_transmission(&Transmission::from_archive(&archive).unwrap(), &Units1).unwrap();
         assert_eq!(back.revision(), loaded.revision());
         assert_eq!(back.odd.structure_digest(), loaded.odd.structure_digest());
+    }
+
+    #[test]
+    fn a_binding_declares_scenario_parameters() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "odd.yaml", TAXONOMY);
+        let binding = write(
+            dir.path(),
+            "b.yaml",
+            "openodd: [odd.yaml]\nparameters:\n  scenario.lead_gap:\n    type: float length\n    \
+             measure: gap_m\n    buckets: [0, 10, 20]\n    text: Gap to the lead\n  \
+             scenario.side: {type: [left, right]}\n",
+        );
+        let odd = load_binding(&binding, &Units1).unwrap().odd;
+        let gap = odd.attribute("scenario.lead_gap").unwrap();
+        assert!(gap.parameter);
+        assert_eq!(gap.unit, "m");
+        assert_eq!(gap.text, "Gap to the lead");
+        assert_eq!(gap.item.as_ref().unwrap().labels.len(), 2);
+        assert_eq!(
+            gap.concept,
+            ConceptKind::Number {
+                primitive: "float".into(),
+                unit_type: "length".into()
+            }
+        );
+        let side = odd.attribute("scenario.side").unwrap();
+        assert!(side.parameter);
+        assert_eq!(side.literals, ["left", "right"]);
+        assert!(!odd.attribute("speed").unwrap().parameter);
+
+        // Nor does it take a module's label or id: `lead` and `side` stay theirs.
+        write(
+            dir.path(),
+            "odd4.yaml",
+            "TAXONOMY:\n  speed: float velocity\nMODULES:\n  side:\n    LABEL: lead\n    \
+             INCLUDE_AND:\n      speed: \"< 60 km/h\"\n  top:\n    INCLUDE_AND:\n      lead: true\n",
+        );
+        let b = write(
+            dir.path(),
+            "b4.yaml",
+            "openodd: [odd4.yaml]\nparameters:\n  scenario.lead: {type: float length}\n  \
+             scenario.side: {type: [left, right]}\n",
+        );
+        let odd = load_binding(&b, &Units1).unwrap().odd;
+        assert!(odd.attribute("scenario.lead").unwrap().parameter);
+    }
+
+    #[test]
+    fn a_scenario_parameter_is_no_concept_and_no_condition() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "odd.yaml", TAXONOMY);
+        let refused = |parameters: &str| {
+            let b = write(
+                dir.path(),
+                "b.yaml",
+                &format!("openodd: [odd.yaml]\nparameters:\n{parameters}"),
+            );
+            load_binding(&b, &Units1).unwrap_err().to_string()
+        };
+        let e = refused("  gap: {type: float length}\n");
+        assert!(e.contains("the taxonomy declares gap"), "{e}");
+        let e = refused("  scenario.gap: {measure: gap_m}\n");
+        assert!(e.contains("needs a type"), "{e}");
+        let e = refused("  scenario.gap: {type: {a: float length}}\n");
+        assert!(e.contains("type is"), "{e}");
+        let e = refused("  scenario.gap: {type: float length, probe: nope}\n");
+        assert!(e.contains("unknown probe"), "{e}");
+
+        // A module's condition cannot name one.
+        write(
+            dir.path(),
+            "odd2.yaml",
+            "TAXONOMY:\n  speed: float velocity\nMODULES:\n  near:\n    INCLUDE_AND:\n      \
+             scenario.gap: \"< 10 m\"\n",
+        );
+        let b = write(
+            dir.path(),
+            "b2.yaml",
+            "openodd: [odd2.yaml]\nparameters:\n  scenario.gap: {type: float length}\n",
+        );
+        let e = load_binding(&b, &Units1).unwrap_err().to_string();
+        assert!(e.contains("is a scenario parameter"), "{e}");
+
+        // One sharing a tail with a concept leaves the concept's name as it
+        // was: `speed` and `gap` still name the taxonomy's.
+        let b = write(
+            dir.path(),
+            "b3.yaml",
+            "openodd: [odd.yaml]\nparameters:\n  scenario.speed: {type: float velocity}\n  \
+             scenario.gap: {type: float length}\nprobes:\n  speed: {probe: speed_kph}\n",
+        );
+        let odd = load_binding(&b, &Units1).unwrap().odd;
+        assert!(odd.attribute("scenario.speed").unwrap().parameter);
+        assert!(!odd.attribute("speed").unwrap().parameter);
     }
 
     #[test]
