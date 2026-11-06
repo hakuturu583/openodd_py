@@ -671,11 +671,13 @@ fn misread_definitions(
             let mut near: Vec<&str> = ids
                 .keys()
                 .map(String::as_str)
-                .filter(|id| *id != t && (id.ends_with(t) || t.ends_with(*id)))
+                .filter(|id| *id != t && (id.contains(t) || t.contains(*id)))
+                .filter(|id| id.len().min(t.len()) >= 4)
                 .collect();
             near.sort_unstable();
             let hint = match near.as_slice() {
                 [] => String::new(),
+                many if many.len() > 3 => String::new(),
                 [one] => format!("; did you mean '{one}'?"),
                 many => format!("; did you mean one of {}?", many.join(", ")),
             };
@@ -2506,6 +2508,25 @@ TAXONOMY:
             "{err}"
         );
         assert!(!err.contains("cannot read the type"), "{err}");
+        // and its horizontal plane, which reads `horizontal_plane_detail`.
+        let text = r#"
+TAXONOMY:
+  curvature: float
+  horizontal_plane_type:
+    straight: {horizontal_plane_detail: "[no_curved]"}
+    curve: {horizontal_plane_detail: "[curved_left, curved_right]"}
+  horizontal_plane_detail_type:
+    no_curved: {curvature: "[-0.02 .. 0.02]"}
+    curved_left: {curvature: "< -0.02"}
+    curved_right: {curvature: "> 0.02"}
+"#;
+        let err = load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("did you mean 'horizontal_plane_detail_type'?"),
+            "{err}"
+        );
     }
 
     #[test]
