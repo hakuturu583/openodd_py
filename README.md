@@ -125,7 +125,7 @@ else is this library's.
 A `default` ODD ships with the package (`openodd.bundled_odd()`,
 [python/openodd/odds/default](python/openodd/odds/default)): every attribute a road-vehicle
 simulator commonly measures, after ISO 34503, and no modules. Its binding names the probes
-a backend provides (`ego_speed_kph`, `measure: vehicle_ahead_gap_m`, ...); its revision
+a backend provides (`ego_speed_kph`, `rain`, ...); its revision
 changes only when its files do.
 
 ```python

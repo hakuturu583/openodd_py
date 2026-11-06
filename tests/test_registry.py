@@ -60,11 +60,8 @@ def _bundled_backend() -> openodd.Backend:
     names = ["in_junction", "lanelet_location", "lanelet_subtype", "speed_limit_kph", "lane_count",
              "illumination", "rain", "fog", "ego_speed_kph", "traffic_density", "pedestrian_nearby"]
     units = {"speed_limit_kph": "km/h", "ego_speed_kph": "km/h"}
-    measures = {"vehicle_ahead_gap_m": "m", "vehicle_ahead_relative_speed_kph": "km/h",
-                "crossing_pedestrian_gap_m": "m", "crossing_pedestrian_speed_ms": "m/s"}
     return openodd.Backend(
         probes={n: ((lambda c, n=n: c.get(n)), units.get(n, "")) for n in names},
-        readers={"measure": lambda k: ((lambda c, k=k: c.get(k)), measures[k])},
     )
 
 

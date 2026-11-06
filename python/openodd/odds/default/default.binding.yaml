@@ -1,9 +1,8 @@
 # How the default ODD is measured. The probe names are the backend's: a
-# backend that measures the default ODD names these probes (and reads the
-# `measure:` keys). Buckets a run only passes through are not covered: road
+# backend that measures the default ODD names these probes. Buckets a run only passes through are not covered: road
 # attributes count a stay of 2 s, ego speed one of 3 s (an ego accelerating
 # from a stop to 60 km/h passes through every bucket below, but has driven at
-# none of those speeds), the vehicle ahead one of 1 s.
+# none of those speeds).
 openodd: [default.yaml]
 name: default
 text: Every attribute the framework measures; no restrictions.
@@ -58,21 +57,3 @@ probes:
   dynamic.pedestrian_nearby:
     probe: pedestrian_nearby
     text: A pedestrian within 50 m of the ego
-  dynamic.vehicle_ahead_gap:
-    measure: vehicle_ahead_gap_m
-    buckets: [0, 10, 20, 30, 50, 100]
-    min_stay: 1
-    text: Gap to the nearest vehicle ahead in the ego's lane or one beside it
-  dynamic.vehicle_ahead_relative_speed:
-    measure: vehicle_ahead_relative_speed_kph
-    buckets: [-30, -15, -5, 5, 15, 30]
-    min_stay: 1
-    text: That vehicle's speed less the ego's
-  dynamic.crossing_pedestrian_gap:
-    measure: crossing_pedestrian_gap_m
-    buckets: [0, 10, 20, 30, 50]
-    text: How far ahead a pedestrian crossing ahead set off
-  dynamic.crossing_pedestrian_speed:
-    measure: crossing_pedestrian_speed_ms
-    buckets: [0.5, 1.0, 1.5, 2.5, 4.0]
-    text: That pedestrian's speed
