@@ -1200,6 +1200,24 @@ pub enum Reference {
     Url { url: String, sha256: Option<String> },
     /// A file in a git repository at a revision ([`crate::sources`]).
     Git(GitSource),
+    /// A taxonomy openodd ships, by name (`{bundled: default}`): read from
+    /// the core's own copy ([`bundled_taxonomy`]).
+    Bundled(String),
+}
+
+/// The taxonomies openodd ships, by name: the default ODD's, which stands in
+/// for tier4/taxonomy as a subset of it until that can be named.
+const BUNDLED_TAXONOMIES: [(&str, &str); 1] = [(
+    "default",
+    include_str!("../python/openodd/odds/default/default.yaml"),
+)];
+
+/// The text of the taxonomy openodd ships as `name`.
+pub fn bundled_taxonomy(name: &str) -> Option<&'static str> {
+    BUNDLED_TAXONOMIES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, text)| *text)
 }
 
 /// Where a rule file was read from: what a relative [`Reference::Path`] in
@@ -1219,6 +1237,11 @@ impl Origin {
         Ok(match reference {
             Reference::Url { url, .. } => Origin::Url(url.clone()),
             Reference::Git(g) => Origin::Git(g.clone()),
+            Reference::Bundled(name) => {
+                return Err(Error::value(format!(
+                    "bundled:{name} is a taxonomy openodd ships, not a file"
+                )))
+            }
             Reference::Path(p) => match self {
                 Origin::Url(base) if !is_absolute_path(p) => Origin::Url(url_join(base, p)?),
                 Origin::Git(g) if !is_absolute_path(p) => Origin::Git(GitSource::new(
@@ -1631,7 +1654,9 @@ impl RuleSet {
     /// file, so a host fetches it and goes no further.
     pub fn taxonomy_reference(text: &str, source: &str, origin: &Origin) -> Result<Option<Origin>> {
         let doc = document(text, source)?;
+        // A bundled taxonomy is the core's own: nothing to fetch.
         taxonomy_of(&doc, &Where::new(source))?
+            .filter(|r| !matches!(r, Reference::Bundled(_)))
             .map(|r| origin.of(&r))
             .transpose()
     }
@@ -2055,7 +2080,14 @@ fn extends_of(doc: &Node, at: &Where) -> Result<Vec<Reference>> {
     };
     let mut out = Vec::new();
     for (k, item) in items.into_iter().enumerate() {
-        out.push(reference_of(item, &at.index(k))?);
+        let at = at.index(k);
+        let reference = reference_of(item, &at)?;
+        if let Reference::Bundled(name) = &reference {
+            return Err(at.error(format!(
+                "bundled:{name} is a taxonomy, not a rule file: only `taxonomy` may name it"
+            )));
+        }
+        out.push(reference);
     }
     Ok(out)
 }
@@ -2081,6 +2113,18 @@ fn reference_of(item: &Node, at: &Where) -> Result<Reference> {
                 return Err(at.error(format!("{s}: only https:// URLs are read")))
             }
             Node::String(s) if !s.trim().is_empty() => Reference::Path(s.clone()),
+            Node::Mapping(_) if item.get("bundled").is_some() => {
+                let map = mapping(item, &at, &["bundled"])?;
+                let name = get(map, "bundled").map(NodeExt::py_str).unwrap_or_default();
+                if bundled_taxonomy(&name).is_none() {
+                    let known: Vec<&str> = BUNDLED_TAXONOMIES.iter().map(|(n, _)| *n).collect();
+                    return Err(at.error(format!(
+                        "bundled: '{name}' is no taxonomy openodd ships; it ships {}",
+                        known.join(", ")
+                    )));
+                }
+                Reference::Bundled(name)
+            }
             Node::Mapping(_) if item.get("url").is_some() => {
                 let map = mapping(item, &at, &["url", "sha256"])?;
                 let url = get(map, "url").map(NodeExt::py_str).unwrap_or_default();
@@ -2105,7 +2149,7 @@ fn reference_of(item: &Node, at: &Where) -> Result<Reference> {
             }
             other => {
                 return Err(at.error(format!(
-                "expected a path, an https:// URL, {{url, sha256}} or {{git, rev, path}}, got {}",
+                "expected a path, an https:// URL, {{url, sha256}}, {{git, rev, path}} or {{bundled: <name>}}, got {}",
                 other.py_repr()
             )))
             }
@@ -2167,9 +2211,19 @@ fn compose(
     // it extends named.
     if let Some(reference) = taxonomy_of(&doc, &at)? {
         let at = at.key("taxonomy");
-        let next = origin.of(&reference).map_err(|e| at.error(e))?;
-        let label = next.label();
-        let text = fetch.fetch(&next).map_err(|e| at.error(e))?;
+        let (label, text) = match &reference {
+            Reference::Bundled(name) => (
+                format!("bundled:{name}"),
+                bundled_taxonomy(name)
+                    .expect("checked when read")
+                    .to_string(),
+            ),
+            _ => {
+                let next = origin.of(&reference).map_err(|e| at.error(e))?;
+                let text = fetch.fetch(&next).map_err(|e| at.error(e))?;
+                (next.label(), text)
+            }
+        };
         if let Reference::Url {
             sha256: Some(want), ..
         } = &reference
@@ -3502,6 +3556,43 @@ quantities:
             .parts
             .iter()
             .any(|p| p.name == "water" && p.axes.is_empty()));
+    }
+
+    #[test]
+    fn a_rule_file_names_the_taxonomy_openodd_ships() {
+        let text = "version: 3\ntaxonomy: {bundled: default}\nbasis: {kind: expert}\n\
+                    inputs:\n  speed: {concept: dynamic.ego_speed, unit: km/h}\n\
+                    quantities:\n  gap:\n    parts:\n      p:\n        at: {speed: [0, 100]}\n\
+                    \x20       uniform: {low: [2, 10], high: [10, 40]}\n";
+        let rules = RuleSet::parse(text, "r.yaml").unwrap();
+        let t = rules.taxonomy.as_ref().unwrap();
+        assert_eq!(t.label, "bundled:default");
+        assert_eq!(
+            t.sha256,
+            hex::encode(Sha256::digest(
+                bundled_taxonomy("default").unwrap().as_bytes()
+            ))
+        );
+        assert!(t.concepts.contains_key("dynamic.ego_speed"));
+        // Nothing for a host to fetch.
+        assert_eq!(
+            RuleSet::taxonomy_reference(text, "r.yaml", &Origin::Text).unwrap(),
+            None
+        );
+        let e = RuleSet::parse(&text.replace("bundled: default", "bundled: nope"), "r.yaml")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("'nope' is no taxonomy openodd ships; it ships default"),
+            "{e}"
+        );
+        let e = RuleSet::parse(
+            "version: 2\nextends: {bundled: default}\nquantities: {}\n",
+            "r.yaml",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("only `taxonomy` may name it"), "{e}");
     }
 
     #[test]
