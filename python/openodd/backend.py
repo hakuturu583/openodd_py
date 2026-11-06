@@ -357,6 +357,8 @@ def _first_line(text: Optional[str]) -> str:
 
 def _knob_manifest(knob: "OddKnob") -> dict[str, Any]:
     out: dict[str, Any] = {"key": knob.key}
+    if knob.quantity is not None:
+        out["quantity"] = knob.quantity
     if knob.values:
         out["values"] = {
             str(label): (list(v) if isinstance(v, (list, tuple)) else v)
