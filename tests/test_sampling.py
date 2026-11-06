@@ -479,3 +479,31 @@ def test_an_effect_input_the_sampler_does_not_draw_is_refused(tmp_path: Path) ->
         OddSampler(o, speed, backend=b, effects=[OddKnob("k", quantity="pedestrian_seen_m")])
     # A root reads nothing: it is drawn.
     OddSampler(o, speed, backend=b, effects=[OddKnob("k", quantity="vehicle_ahead_gap")]).sample(2)
+
+
+def test_a_knob_on_an_attribute_reads_an_effect_at_the_value_written(tmp_path: Path) -> None:
+    """Knobs on attributes and effects are realized together, in the rules'
+    order: a quantity an attribute's knob writes reads an effect's at the
+    value written to the run."""
+    (tmp_path / "taxonomy.yaml").write_text(RAIN_TAXONOMY)
+    (tmp_path / "rules.yaml").write_text(
+        "version: 3\ntaxonomy: taxonomy.yaml\nbasis: {kind: expert}\n"
+        "inputs:\n  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}\n"
+        "quantities:\n"
+        "  staged:\n    parts:\n      base:\n        uniform: {low: 0, high: 10}\n"
+        "  rain_and_staged:\n    parts:\n      same:\n"
+        "        at: {rainfall_rate: [0, 10], staged: [0, 10]}\n"
+        "        uniform: {low: [[0, 10], [0, 10]], high: [[0, 10], [0, 10]]}\n"
+    )
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    b = Backend(probes={"rain_mm_h": (lambda c: c.get("rain"), "mm/h")}, rules=rules)
+    o = openodd.load_openodd(
+        RAIN_TAXONOMY,
+        bindings={"weather.rainfall_rate": {"probe": "rain_mm_h", "buckets": [0, 2.5, 10]}},
+        backend=b,
+    )
+    knobs = {"weather.rainfall_rate": OddKnob("env.copy", quantity="rain_and_staged")}
+    effects = [OddKnob("scenario.staged", quantity="staged", integer=True)]
+    for case in OddSampler(o, knobs, seed=8, backend=b, effects=effects).sample(20):
+        # rain_and_staged copies staged, whatever the rain: as written, rounded.
+        assert _written(case, "env.copy") == pytest.approx(_written(case, "scenario.staged"))
