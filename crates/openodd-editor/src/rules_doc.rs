@@ -481,6 +481,12 @@ impl RulesDoc {
         Ok(())
     }
 
+    /// Whether its inputs may name taxonomy concepts: from version 3, which
+    /// names its taxonomy. A version 2 file that wrote one could not be read.
+    pub fn names_concepts(&self) -> bool {
+        self.version.unwrap_or(2) >= 3
+    }
+
     pub fn quantity(&self, id: u64) -> Option<&QuantityDoc> {
         self.quantities.iter().find(|q| q.id == id)
     }
@@ -1595,6 +1601,16 @@ mod tests {
             "{out}"
         );
         assert_eq!(RulesDoc::from_yaml(&out).unwrap().to_yaml().unwrap(), out);
+    }
+
+    #[test]
+    fn only_a_version_3_file_names_concepts() {
+        assert!(!RulesDoc::default().names_concepts());
+        assert!(!RulesDoc::from_yaml("version: 2\nquantities: {}\n")
+            .unwrap()
+            .names_concepts());
+        let v3 = "version: 3\ntaxonomy: t.yaml\nbasis: {kind: expert}\nquantities: {}\n";
+        assert!(RulesDoc::from_yaml(v3).unwrap().names_concepts());
     }
 
     #[test]
