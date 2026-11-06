@@ -197,6 +197,9 @@ export async function loadRules(RulesView, url, { text, fetchText } = {}) {
       files[ref] = await get(ref);
       queue.push([files[ref], ref]);
     }
+    // A version 3 file's taxonomy is an OpenODD file: fetched, not followed.
+    const taxonomy = JSON.parse(RulesView.taxonomy_reference(body, from));
+    if (taxonomy !== null && !(taxonomy in files)) files[taxonomy] = await get(taxonomy);
   }
   return new RulesView(top, source, JSON.stringify(files));
 }
