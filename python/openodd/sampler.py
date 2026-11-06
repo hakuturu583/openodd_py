@@ -474,61 +474,61 @@ class OddSampler:
         return [q for q in self._rules.order if q in wanted] if self._rules is not None else []
 
     def _realize(self, case: OddSample) -> OddSample:
-        """*case* with each knob that takes its value from the rules writing
-        the quantity's value at the attribute's drawn value, and each effect
-        its quantity's at the case's inputs."""
+        """*case* with every knob that takes its value from the rules writing
+        it: a knob on an attribute, the quantity at the attribute's drawn
+        value; an effect, its quantity at the case's inputs.
+
+        One pass over the quantities in the rules' order, so a quantity reads
+        whatever it depends on at the value written to the run (after that
+        knob's limits and rounding), whichever kind of knob wrote it. A
+        quantity no knob writes is read at its own quantile, the same in
+        every evaluation of the case."""
         if (not self._from_rules and not self._effects) or self._rules is None:
             return case
         overrides = list(case.overrides)
         quantities = dict(case.quantities)
+        # The inputs that stand for the ODD's attributes, at the values drawn
+        # (in the attribute's unit; the rule's points are in the input's).
+        inputs: dict[str, float] = {}
+        for rule_input, (attribute, unit, input_unit) in self._effect_inputs.items():
+            x = case.values.get(attribute)
+            if isinstance(x, (int, float)) and not isinstance(x, bool):
+                inputs[rule_input] = _core.convert(float(x), unit, input_unit)
+        # Each quantity at a quantile of its own per case, reproducible from
+        # the seed: an effect's is the case's own parameter when it has one
+        # (quantile(q), drawn with it and moved by the flaky search); a knob
+        # on an attribute keeps one of its own (from the attribute's name).
+        quantiles = {
+            q: random.Random(f"{self._seed}:{case.index}:{q}").random() for q in self._rules.order
+        }
+        writers: dict[str, list[OddKnob]] = {}
         for name, (knob, rule_input, unit, input_unit) in self._from_rules.items():
             x = case.values.get(name)
             if not isinstance(x, (int, float)) or isinstance(x, bool):
                 continue
-            # The value drawn is in the attribute's unit; the rule's points
-            # are in its input's.
-            x = _core.convert(float(x), unit, input_unit)
-            # A quantile of its own per case and knob: reproducible from the seed.
-            p = random.Random(f"{self._seed}:{case.index}:{name}").random()
-            y = self._rules.quantile(str(knob.quantity), {rule_input: float(x)}, p)
-            if knob.limits is not None:
-                y = min(max(y, knob.limits[0]), knob.limits[1])
-            written = str(int(round(y))) if knob.integer else repr(float(y))
-            # What the case ran with: the value written, rounded if it was.
-            quantities[str(knob.quantity)] = float(written)
-            prefix = f"{knob.key}="
-            overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
-        if self._effects:
-            # The inputs that stand for the ODD's attributes, at the values drawn.
-            inputs: dict[str, float] = {}
-            for rule_input, (attribute, unit, input_unit) in self._effect_inputs.items():
-                x = case.values.get(attribute)
-                if isinstance(x, (int, float)) and not isinstance(x, bool):
-                    inputs[rule_input] = _core.convert(float(x), unit, input_unit)
-            # Each quantity at a quantile of its own per case: reproducible
-            # from the seed, and shared by every knob and chain that reads it.
-            quantiles = {
-                q: random.Random(f"{self._seed}:{case.index}:{q}").random() for q in self._rules.order
-            }
-            # An effect's own quantile is a parameter of the case
-            # (quantile(q), drawn with it and moved by the flaky search).
-            for q in self.effects:
-                p = case.values.get(quantile_name(q))
-                if isinstance(p, (int, float)) and not isinstance(p, bool):
-                    quantiles[q] = min(max(float(p), 0.0), 1.0)
-            # A quantity already written (by an attribute's knob, or an
-            # effect before it) is read at the value written, after its
-            # limits and rounding: what the run is set to.
-            inputs.update(quantities)
-            for q in self.effects:
-                y = self._rules.quantile(q, inputs, quantiles[q], quantiles)
-                for knob in self._effects:
-                    if knob.quantity != q:
-                        continue
-                    v = y if knob.limits is None else min(max(y, knob.limits[0]), knob.limits[1])
-                    written = str(int(round(v))) if knob.integer else repr(float(v))
-                    quantities.setdefault(q, float(written))
-                    prefix = f"{knob.key}="
-                    overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
-                inputs[q] = quantities[q]
+            inputs[rule_input] = _core.convert(float(x), unit, input_unit)
+            q = str(knob.quantity)
+            if q not in writers:
+                quantiles[q] = random.Random(f"{self._seed}:{case.index}:{name}").random()
+            writers.setdefault(q, []).append(knob)
+        for q in self.effects:
+            p = case.values.get(quantile_name(q))
+            if q not in writers and isinstance(p, (int, float)) and not isinstance(p, bool):
+                quantiles[q] = min(max(float(p), 0.0), 1.0)
+            writers.setdefault(q, []).extend(k for k in self._effects if k.quantity == q)
+        # A quantity already in the case is read at that value.
+        inputs.update(quantities)
+        for q in self._rules.order:
+            if q not in writers:
+                continue
+            y = self._rules.quantile(q, inputs, quantiles[q], quantiles)
+            for knob in writers[q]:
+                v = y if knob.limits is None else min(max(y, knob.limits[0]), knob.limits[1])
+                written = str(int(round(v))) if knob.integer else repr(float(v))
+                # What the case ran with: the value written, rounded if it
+                # was (the first knob's, when several write it).
+                quantities.setdefault(q, float(written))
+                prefix = f"{knob.key}="
+                overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
+            inputs[q] = quantities[q]
         return dataclasses.replace(case, overrides=overrides, quantities=quantities)
