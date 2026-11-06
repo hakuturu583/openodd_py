@@ -569,9 +569,11 @@ fn FileView() -> impl IntoView {
                     </table>
                     <h3>"Rule inputs"</h3>
                     <table class="rules-table compact">
-                        <thead><tr><th>"Input"</th><th>"Written by the knob"</th><th>"Says"</th></tr></thead>
+                        <thead><tr><th>"Input"</th><th>"Taxonomy concept"</th><th>"Written by the knob"</th><th>"Says"</th></tr></thead>
                         <tbody>{m.rule_inputs.iter().map(|r| view! {
-                            <tr><td class="mono">{r.name.clone()}</td><td class="mono">{r.knob.clone().unwrap_or_default()}</td><td class="hint">{r.text.clone()}</td></tr>
+                            <tr><td class="mono">{r.name.clone()}</td>
+                            <td class="mono">{r.concept.clone().unwrap_or_else(|| "(unclassified)".into())}</td>
+                            <td class="mono">{r.knob.clone().unwrap_or_default()}</td><td class="hint">{r.text.clone()}</td></tr>
                         }).collect_view()}</tbody>
                     </table>
                     <div class="actions"><button class="mini danger" on:click=move |_| { b.manifest.set(None); b.manifest_text.set(String::new()); }><Icon name="x"/>"Forget the manifest"</button></div>

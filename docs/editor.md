@@ -171,6 +171,14 @@ is dashed, and the graph runs left to right, each quantity after those it
 reads. Each variable shows its value at the tested inputs (a quantity at its
 median), each factor its distribution's family.
 
+Each variable shows its role ([Where the rules stand](rules.md#where-the-rules-stand)):
+an input that names a taxonomy concept is a **cause** (green, inside a
+dashed *taxonomy* box), one that names none is **unclassified** (amber,
+dashed: version 3 rules refuse it), and a quantity is an **effect**. Hover a
+variable to read its role and concept; select an input to set its
+*taxonomy concept* and the *unit of its points*. The Binding mode's manifest
+table lists each rule input's concept likewise (`Backend.manifest()`).
+
 - **Drag a node** to move it; *Arrange* lays the graph out in layers again.
   Where each node is is kept in the browser, by name.
 - **Drag from a variable's port** (the dot on its right) onto a factor to make
