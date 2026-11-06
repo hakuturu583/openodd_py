@@ -63,6 +63,10 @@ const BUILTIN: &[(&str, &str, f64, f64)] = &[
     ("1/h", "occurrence", 1.0, 0.0),
     ("1/hr", "occurrence", 1.0, 0.0),
     ("occ/hr", "occurrence", 1.0, 0.0),
+    // traffic rate (veh/h): vehicles passing a point
+    ("veh/h", "traffic_rate", 1.0, 0.0),
+    ("veh/min", "traffic_rate", 60.0, 0.0),
+    ("veh/s", "traffic_rate", 3600.0, 0.0),
 ];
 
 const ALIASES: &[(&str, &str)] = &[
@@ -77,14 +81,21 @@ const ALIASES: &[(&str, &str)] = &[
     ("degree", "deg"),
     ("degrees", "deg"),
     ("percent", "%"),
+    ("veh/hr", "veh/h"),
+    ("vph", "veh/h"),
 ];
 
 /// Unit types that are the same dimension under another name.
+///
+/// tier4/taxonomy writes some of its types with their unit in the name
+/// (`speed_km_per_h`, `plane_angle_in_degrees`): the unit a condition writes
+/// still says which, so they are the dimension.
 fn same_type(name: &str) -> &str {
     match name {
         "duration" => "time",
         "distance" => "length",
-        "speed" => "velocity",
+        "speed" | "speed_km_per_h" => "velocity",
+        "plane_angle" | "plane_angle_in_degrees" => "angle",
         other => other,
     }
 }
@@ -230,6 +241,27 @@ mod tests {
     fn refuses_across_types() {
         assert!(convert(1.0, "m", "s").is_err());
         assert!(convert(1.0, "furlong", "m").is_err());
+    }
+
+    #[test]
+    fn tier4_taxonomy_unit_types_are_known() {
+        let u = Units::new();
+        for (unit, unit_type) in [
+            ("km/h", "speed"),
+            ("km/h", "speed_km_per_h"),
+            ("m/s", "speed_km_per_h"),
+            ("m", "distance"),
+            ("deg", "plane_angle_in_degrees"),
+            ("rad", "plane_angle"),
+            ("veh/h", "traffic_rate"),
+            ("mm/h", "precipitation_rate"),
+        ] {
+            u.check_type(unit, unit_type).unwrap();
+        }
+        assert!(u.check_type("m", "speed_km_per_h").is_err());
+        assert!(u.check_type("km/h", "traffic_rate").is_err());
+        assert!((convert(2.0, "veh/min", "veh/h").unwrap() - 120.0).abs() < 1e-9);
+        assert_eq!(normalize_unit("vph"), "veh/h");
     }
 
     #[test]
