@@ -1482,6 +1482,126 @@ impl RuleSet {
         Ok(set)
     }
 
+    /// `added`'s nodes added to these rules, which they may read; nothing
+    /// is replaced ([`RuleSet::extend_doc`]): a scenario's nodes on the
+    /// network every scenario shares.
+    pub fn extended(&self, added: &RuleSet) -> Result<RuleSet> {
+        self.extend_doc(
+            &added.doc,
+            added.files.clone(),
+            added.taxonomy.clone(),
+            &added
+                .files
+                .last()
+                .map(|f| f.label.clone())
+                .unwrap_or_else(|| "<rules>".into()),
+        )
+    }
+
+    /// The file at `origin`, and the files it extends, added to these rules
+    /// ([`RuleSet::extended`]). It is checked joined to them, so its nodes
+    /// may read theirs (a version 3 node reading a shared quantity names no
+    /// concept for it).
+    pub fn load_extending(&self, origin: &Origin, fetch: &mut dyn Fetch) -> Result<Self> {
+        let text = fetch.fetch(origin)?;
+        self.parse_extending(&text, &origin.label(), origin, fetch)
+    }
+
+    /// [`RuleSet::load_extending`] for a rule file's `text` in hand.
+    pub fn parse_extending(
+        &self,
+        text: &str,
+        source: &str,
+        origin: &Origin,
+        fetch: &mut dyn Fetch,
+    ) -> Result<Self> {
+        let mut files = Vec::new();
+        let mut taxonomy = None;
+        let added = compose(
+            text,
+            source,
+            origin,
+            fetch,
+            &mut Vec::new(),
+            &mut files,
+            &mut taxonomy,
+        )?;
+        self.extend_doc(&added, files, taxonomy, source)
+    }
+
+    /// These rules and the document `added` joined, checked as one network.
+    ///
+    /// Refused: a quantity both define, an input both describe otherwise
+    /// (its `default`, `concept` or `unit`), taxonomies of different
+    /// content. Each side's file-level `basis` is kept with its own
+    /// quantities (written onto each that names none), so neither takes
+    /// the other's.
+    fn extend_doc(
+        &self,
+        added: &Node,
+        files: Vec<FileRead>,
+        taxonomy: Option<Taxonomy>,
+        source: &str,
+    ) -> Result<RuleSet> {
+        let at = Where::new(source);
+        let names = |doc: &Node, key: &str| -> Vec<String> {
+            doc.get(key)
+                .and_then(Node::as_mapping)
+                .map(|m| m.keys().map(NodeExt::py_str).collect())
+                .unwrap_or_default()
+        };
+        let mut clash: Vec<String> = names(added, "quantities")
+            .into_iter()
+            .filter(|q| self.quantities.contains_key(q))
+            .collect();
+        if !clash.is_empty() {
+            clash.sort();
+            return Err(at.error(format!(
+                "defines {}, which the rules it adds to define: a scenario adds nodes to the \
+                 shared network, it does not replace them (give its own name; to change the \
+                 shared rules, merge a file over them)",
+                clash.join(", ")
+            )));
+        }
+        let field = |doc: &Node, input: &str, key: &str| -> Option<String> {
+            doc.get("inputs")
+                .and_then(|i| i.get(input))
+                .and_then(|i| i.get(key))
+                .map(|v| v.to_f64().map(py_float_repr).unwrap_or_else(|| v.py_str()))
+        };
+        for name in names(added, "inputs") {
+            if names(&self.doc, "inputs").contains(&name)
+                && ["default", "concept", "unit"]
+                    .iter()
+                    .any(|k| field(&self.doc, &name, k) != field(added, &name, k))
+            {
+                return Err(at
+                    .key("inputs")
+                    .key(&name)
+                    .error("describes the input otherwise than the rules it adds to"));
+            }
+        }
+        if let (Some(mine), Some(theirs)) = (&self.taxonomy, &taxonomy) {
+            if mine.sha256 != theirs.sha256 {
+                return Err(at.error(format!(
+                    "draws on taxonomy {}, and the rules it adds to on {}: one network is in \
+                     one vocabulary",
+                    theirs.label, mine.label
+                )));
+            }
+        }
+        let mut doc = with_own_basis(&self.doc);
+        merge_doc(&mut doc, &with_own_basis(added));
+        let mut set = Self::from_doc(doc, source, taxonomy.or_else(|| self.taxonomy.clone()))?;
+        for (name, q) in &mut set.quantities {
+            if let Some(mine) = self.quantities.get(name) {
+                q.source = mine.source.clone();
+            }
+        }
+        set.files = self.files.iter().cloned().chain(files).collect();
+        Ok(set)
+    }
+
     /// The files a rule file's `text` reads, each as the origin it names
     /// from `origin`: what a host fetches ahead ([`Given`]) -- the rule
     /// files it extends ([`RuleSet::extends_references`]), then its taxonomy
@@ -2074,6 +2194,29 @@ fn compose(
 }
 
 /// Merge the rule document `over` into `base` (see [`RuleSet::merged`]).
+/// `doc` with its file-level `basis` written onto each quantity that names
+/// none, and taken off the file: what each quantity rests on, kept with it
+/// when the document is joined to another ([`RuleSet::extended`]).
+fn with_own_basis(doc: &Node) -> Node {
+    let mut doc = untag(doc).clone();
+    let Some(map) = doc.as_mapping_mut() else {
+        return doc;
+    };
+    let Some(basis) = map.remove("basis") else {
+        return doc;
+    };
+    if let Some(Node::Mapping(quantities)) = map.get_mut("quantities") {
+        for (_, q) in quantities.iter_mut() {
+            if let Node::Mapping(q) = q {
+                if !q.contains_key("basis") {
+                    q.insert(Node::String("basis".into()), basis.clone());
+                }
+            }
+        }
+    }
+    doc
+}
+
 fn merge_doc(base: &mut Node, over: &Node) {
     let (Node::Mapping(b), Node::Mapping(o)) = (base, untag(over)) else {
         return;

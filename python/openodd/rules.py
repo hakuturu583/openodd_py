@@ -233,36 +233,47 @@ class Rules:
         """These rules with *added*'s nodes added: the network these rules are
         (a backend's, which every scenario shares) and the nodes a scenario
         adds to it. An added node may read these rules' quantities and inputs.
-
-        Unlike :meth:`merged`, nothing is replaced.
+        Unlike :meth:`merged`, nothing is replaced, and each side keeps its
+        own ``basis``.
 
         Raises:
             RulesError: When *added* defines a quantity these rules define,
-                describes an input otherwise (its ``default``, or its
-                ``concept`` and ``unit``), or draws on another taxonomy; or
-                when the joined rules are not well formed.
+                describes an input otherwise (its ``default``, ``concept`` or
+                ``unit``), or draws on a taxonomy of other content; or when the
+                joined rules are not well formed.
         """
-        where = ", ".join(path for path, _ in added.files) or "<rules>"
-        clash = sorted(set(self.quantities) & set(added.quantities))
-        if clash:
-            raise RulesError(
-                f"{where}: defines {', '.join(clash)}, which the rules it adds to define: "
-                "a scenario adds nodes to the shared network, it does not replace them "
-                "(give its own name; to change the shared rules, merge a file over them)"
-            )
-        ours_d, theirs_d = self.input_defaults, added.input_defaults
-        ours_c, theirs_c = self.input_concepts, added.input_concepts
-        for name in sorted(set(ours_d) & set(theirs_d)):
-            if ours_d[name] != theirs_d[name] or ours_c.get(name) != theirs_c.get(name):
-                raise RulesError(
-                    f"{where}: describes input {name} otherwise than the rules it adds to"
-                )
-        if self.taxonomy and added.taxonomy and self.taxonomy[1] != added.taxonomy[1]:
-            raise RulesError(
-                f"{where}: draws on taxonomy {added.taxonomy[0]}, and the rules it adds to "
-                f"on {self.taxonomy[0]}: one network is in one vocabulary"
-            )
-        return self.merged(added)
+        return Rules(self._call(self._core.extended, added._core))
+
+    def read_extending(
+        self,
+        location: Union[str, "os.PathLike[str]"],
+        fetch: Optional[Callable[[str], str]] = None,
+    ) -> "Rules":
+        """The file at *location* (a path or an ``https://`` URL), and the
+        files it extends, added to these rules (:meth:`extended`). It is
+        checked joined to them, so its nodes may read theirs: a version 3
+        node that reads a shared quantity names no concept for it.
+
+        Raises:
+            RulesError: When it cannot be read, or :meth:`extended` refuses it.
+        """
+        where = str(location)
+        if not where.startswith(("https://", "http://")):
+            where = str(Path(where))
+        return Rules(self._call(self._core.load_extending, where, fetch or fetch_url))
+
+    def text_extending(
+        self,
+        text: str,
+        source: str = "<rules>",
+        base: Union[str, "os.PathLike[str]", None] = None,
+        fetch: Optional[Callable[[str], str]] = None,
+    ) -> "Rules":
+        """:meth:`read_extending` for a rule file's *text* in hand."""
+        where = None if base is None else str(base)
+        return Rules(
+            self._call(self._core.parse_extending, text, source, where, fetch or fetch_url)
+        )
 
     @property
     def version(self) -> int:

@@ -656,10 +656,15 @@ backend.active_rules.upstream("vehicle_ahead_gap")   # ["grip"]
 backend.add_rules(None)                  # the shared network alone
 ```
 
-`Rules.extended(added)` joins them. It refuses a quantity both define, an
-input both describe otherwise (its `default`, or its `concept` and `unit`),
-and taxonomies of different content, so one scenario can never change what
-another's cases follow. Merging a file over the rules (`Rules.merged`,
+`Rules.extended(added)` joins them, and `Rules.read_extending(path)` reads a
+scenario's file joined to the shared rules. That file is checked as part of
+the joined network, so a version 3 node that reads a shared quantity names no
+concept for it. The join refuses a quantity both define, an input both
+describe otherwise (its `default`, `concept` or `unit`), and taxonomies of
+different content, so one scenario can never change what another's cases
+follow. Each side keeps its own `basis`: a file-level basis stays with that
+file's quantities, and a campaign's report says who set which node. The
+backend also checks the joined network against its `rule_inputs`. Merging a file over the rules (`Rules.merged`,
 `Backend.use_rules`: a fit, a run's measured weather) is how the shared
 network changes, and the scenario's nodes still add to the result. A
 sampler's [effects](#effects-a-scenario-sets) are usually the scenario's

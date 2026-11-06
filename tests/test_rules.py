@@ -470,7 +470,7 @@ def test_a_scenario_adds_nodes_to_the_shared_network(tmp_path: Path) -> None:
         shared.extended(Rules.from_text(GRIP.replace("0.90", "0.95")))
     # Nor an input described otherwise.
     with_default = "version: 2\ninputs:\n  water: {default: 10}\n" + GRIP.split("version: 2\n", 1)[1]
-    with pytest.raises(RulesError, match="describes input water otherwise"):
+    with pytest.raises(RulesError, match="inputs.water: describes the input otherwise"):
         Rules.from_text(with_default).extended(
             Rules.from_text("version: 2\ninputs:\n  water: {default: 20}\n" + SCENARIO.split("version: 2\n", 1)[1])
         )
@@ -491,3 +491,45 @@ def test_a_backend_holds_a_scenarios_nodes(tmp_path: Path) -> None:
     with pytest.raises(RulesError, match="defines grip"):
         backend.add_rules(tmp_path / "bad.yaml")
     assert backend.add_rules(None).quantities == ["grip"]
+
+
+# A version 3 scenario: its gap reads the shared grip, which it names no
+# concept for, and its own basis.
+SCENARIO_V3 = """
+version: 3
+taxonomy: taxonomy.yaml
+basis: {kind: expert, by: scenario team}
+quantities:
+  vehicle_ahead_gap:
+    parts:
+      grip:
+        at: {grip: [0.5, 1.1]}
+        uniform: {low: [5, 2], high: [40, 30]}
+"""
+
+
+def test_a_version_3_scenario_reads_the_shared_nodes_and_keeps_its_basis(tmp_path: Path) -> None:
+    (tmp_path / "taxonomy.yaml").write_text(TAXONOMY)
+    (tmp_path / "grip.yaml").write_text(GRIP_V3.replace("{kind: expert}", "{kind: expert, by: weather team}"))
+    (tmp_path / "cut_in.yaml").write_text(SCENARIO_V3)
+    shared = Rules.read(tmp_path / "grip.yaml")
+    # On its own it is no network: grip stands for no concept.
+    with pytest.raises(RulesError, match="'grip' is read by a part but stands for no taxonomy concept"):
+        Rules.read(tmp_path / "cut_in.yaml")
+    joined = shared.read_extending(tmp_path / "cut_in.yaml")
+    assert joined.upstream("vehicle_ahead_gap") == ["grip"]
+    # Each side keeps what its parts rest on.
+    assert joined.bases() == {
+        ("grip", "rain"): {"kind": "expert", "by": "weather team"},
+        ("vehicle_ahead_gap", "grip"): {"kind": "expert", "by": "scenario team"},
+    }
+    backend = Backend(rules=shared)
+    assert backend.add_rules(tmp_path / "cut_in.yaml").bases() == joined.bases()
+
+
+def test_a_scenarios_nodes_read_only_what_the_backend_gives(tmp_path: Path) -> None:
+    backend = Backend(rules=Rules.from_text(GRIP), rule_inputs=["water"])
+    wind = SCENARIO.replace("at: {grip: [0.45, 1.1]}", "at: {wind: [0, 20]}")
+    with pytest.raises(RulesError, match="wind"):
+        backend.add_rules(Rules.from_text(wind))
+    assert backend.add_rules(Rules.from_text(SCENARIO)).quantities[-1] == "npc_speed_offset"

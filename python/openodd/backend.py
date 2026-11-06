@@ -129,12 +129,13 @@ class Backend:
     _rules_in_use: Optional[Rules] = field(
         default=None, init=False, repr=False, compare=False
     )
-    #: A scenario's nodes, added to the shared network (:meth:`add_rules`).
-    _rules_added: Optional[Rules] = field(
+    #: A scenario's nodes, added to the shared network (:meth:`add_rules`):
+    #: rules, or the file they are read from.
+    _rules_added: Union[Rules, str, None] = field(
         default=None, init=False, repr=False, compare=False
     )
-    #: The shared rules and the added, and the two joined.
-    _rules_joined: Optional[tuple[Rules, Rules, Rules]] = field(
+    #: The shared rules and the added, joined (:attr:`active_rules`).
+    _rules_joined: Optional[tuple[Optional[Rules], Rules]] = field(
         default=None, init=False, repr=False, compare=False
     )
 
@@ -224,16 +225,26 @@ class Backend:
         :attr:`rules` -- the shared network -- with a scenario's nodes added
         (:meth:`add_rules`)."""
         shared = self._rules_in_use if self._rules_in_use is not None else self.rules
-        added = self._rules_added
-        if added is None:
+        if self._rules_added is None:
             return shared
-        if shared is None:
-            return added
         joined = self._rules_joined
-        if joined is None or joined[0] is not shared or joined[1] is not added:
-            joined = (shared, added, shared.extended(added))
+        if joined is None or joined[0] is not shared:
+            joined = (shared, self._join(shared, self._rules_added))
             self._rules_joined = joined
-        return joined[2]
+        return joined[1]
+
+    def _join(self, shared: Optional[Rules], added: Union[Rules, str]) -> Rules:
+        """*shared* with *added* (rules, or a rule file) added, checked
+        against :attr:`rule_inputs`."""
+        if shared is None:
+            joined = added if isinstance(added, Rules) else Rules.read(added)
+        elif isinstance(added, Rules):
+            joined = shared.extended(added)
+        else:
+            joined = shared.read_extending(added)
+        if self.rule_inputs:
+            joined.check_inputs(self.rule_inputs)
+        return joined
 
     def add_rules(
         self, rules: Union[str, "os.PathLike[str]", Rules, None]
@@ -241,22 +252,26 @@ class Backend:
         """Add a scenario's nodes -- a rule file (a path or an ``https://``
         URL), or rules -- to the shared network (:meth:`.Rules.extended`):
         what the scenario sets up, such as the gap to a vehicle about to cut
-        in, which may read the shared nodes. ``None`` drops them. Returns the
+        in, which may read the shared nodes. A file is checked joined to the
+        shared rules (:meth:`.Rules.read_extending`), and joined again to a
+        run's rules (:meth:`use_rules`). ``None`` drops them. Returns the
         rules followed (:attr:`active_rules`).
 
         Raises:
-            RulesError: When the file cannot be read, or it defines a node the
-                shared rules define (see :meth:`.Rules.extended`).
+            RulesError: When the file cannot be read, it defines a node the
+                shared rules define (see :meth:`.Rules.extended`), or the
+                joined rules read an input not in :attr:`rule_inputs`.
         """
         if rules is None:
             self._rules_added = None
+            self._rules_joined = None
             return self.active_rules
-        added = rules if isinstance(rules, Rules) else Rules.read(rules)
+        added: Union[Rules, str] = rules if isinstance(rules, Rules) else str(rules)
         shared = self._rules_in_use if self._rules_in_use is not None else self.rules
-        if shared is not None:
-            shared.extended(added)  # refuse it now, not at the first draw
+        # Refused now, not at the first draw.
+        self._rules_joined = (shared, self._join(shared, added))
         self._rules_added = added
-        return self.active_rules
+        return self._rules_joined[1]
 
     def use_rules(
         self, rules: Union[str, "os.PathLike[str]", Rules, None]
@@ -283,7 +298,8 @@ class Backend:
         if self.rule_inputs:
             followed.check_inputs(self.rule_inputs)
         if self._rules_added is not None:
-            followed.extended(self._rules_added)  # the scenario's nodes still add to it
+            # The scenario's nodes still add to it.
+            self._rules_joined = (followed, self._join(followed, self._rules_added))
         self._rules_in_use = followed
         return self._rules_in_use
 
