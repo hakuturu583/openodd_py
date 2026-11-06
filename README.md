@@ -3,7 +3,9 @@
 [ASAM OpenODD 1.0](https://www.asam.net/standards/detail/openodd/) for Python, on a Rust core.
 
 - Read an ODD from OpenODD YAML (taxonomy, modules, `IMPORT`, unit conversions) and a
-  *binding* file saying how each concept is measured.
+  *binding* file saying how each concept is measured. `openodd-taxonomy-units model.xml`
+  writes the units an EA taxonomy model defines (tier4/taxonomy's `taxonomy_master.xml`)
+  as the `conversion:` block an ODD imports.
 - Judge values against it with OpenODD's three-valued, missing-value semantics, and work
   out which buckets of each attribute lie outside it.
 - **Version** it: an ODD's revision is the digest of the transmission it was read from
