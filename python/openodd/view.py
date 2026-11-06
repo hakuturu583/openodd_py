@@ -37,11 +37,15 @@ script.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from . import _core
+
+if TYPE_CHECKING:
+    from .rules import Rules
 
 __all__ = ["ANY", "CasePlot", "CoverageView", "page", "parse_conditions", "script", "styles"]
 
@@ -314,6 +318,98 @@ class CasePlot:
         out: dict[str, Any] = json.loads(self._core.drift_json(q, self._extra(False, knobs)))
         return out
 
+    def drift_rules(
+        self,
+        rules: "Rules",
+        quantities: Mapping[str, str],
+        *,
+        extends: Optional[str] = None,
+        scenario: Optional[str] = None,
+        environment: Any = ANY,
+        measured_at: Optional[float] = None,
+        by: str = "openodd drift",
+        date: Optional[str] = None,
+    ) -> str:
+        """The correction :meth:`drift` suggests, for the knobs that take
+        their value from the rules (``OddKnob(quantity=...)``), as a rule
+        file over *rules*: ``""`` when there is none to write.
+
+        *quantities* maps an attribute to the quantity its knob writes. Where
+        the runs staged it as ``measured = a * drawn + b`` and the fit is
+        trusted (``calibration.status == "suggest"``), the quantity's value
+        for a drawn ``x`` should be the one it has now at ``(x - b) / a``:
+        each part reading the attribute's input has its points moved from
+        ``p`` to ``a * p + b``, its distributions as they are, and a
+        ``basis`` of kind ``fitted`` saying so. With *extends* (the rules'
+        path or URL), the file extends them.
+
+        Raises:
+            ValueError: When *rules* have no input for an attribute, or a fit
+                trusted has a negative slope (no move of the points keeps
+                them increasing).
+        """
+        from .rules import Rules  # noqa: PLC0415 - rules does not import this
+
+        assert isinstance(rules, Rules)
+        drift = self.drift(scenario=scenario, environment=environment, measured_at=measured_at)
+        by_attribute = {a["attribute"]: a for a in drift.get("attributes", [])}
+        when = date if date is not None else _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        # Each trusted correction, by the quantity its knob writes: several
+        # attributes may move the axes of one quantity, even of one part.
+        moves: dict[str, list[tuple[str, float, float, dict[str, Any]]]] = {}
+        for attribute, quantity in quantities.items():
+            a = by_attribute.get(attribute)
+            if a is None or (a.get("calibration") or {}).get("status") != "suggest":
+                continue
+            slope, intercept = float(a["fit"]["a"]), float(a["fit"]["b"])
+            if slope <= 0:
+                raise ValueError(f"{attribute}: the runs staged it with a negative slope ({slope})")
+            rule_input = _rule_input_of(rules, attribute)
+            fit = {
+                "attribute": attribute,
+                "rows": int(a["summary"]["runs"]),
+                "r2": float(a["fit"]["r2"]),
+                "residual_std": float(a["fit"]["residual_std"]),
+                "text": f"{attribute} was staged as {slope:.6g} x drawn + {intercept:.6g}: "
+                f"the points of {rule_input} moved so the measured value is the drawn one",
+            }
+            moves.setdefault(quantity, []).append((rule_input, slope, intercept, fit))
+        parts: list[str] = []
+        for quantity, moved in moves.items():
+            written = []
+            for part in rules.parts(quantity):
+                axes = rules.part_axes(quantity, part)
+                names = [n for n, _ in axes]
+                here = [m for m in moved if m[0] in names]
+                if not here:
+                    continue
+                by_input = {m[0]: m for m in here}
+                at = ", ".join(
+                    f"{json.dumps(n)}: "
+                    + json.dumps([by_input[n][1] * x + by_input[n][2] for x in pts] if n in by_input else pts)
+                    for n, pts in axes
+                )
+                fits = [m[3] for m in here]
+                basis: dict[str, Any] = {
+                    "kind": "fitted",
+                    "data": {"rows": min(f["rows"] for f in fits)},
+                    "calibration": {
+                        "r2": min(f["r2"] for f in fits),
+                        "residual_std": max(f["residual_std"] for f in fits),
+                    },
+                    "by": by,
+                    "text": "; ".join(f["text"] for f in fits),
+                }
+                if when:
+                    basis["date"] = when
+                written.append(f"      {json.dumps(part)}:\n        at: {{{at}}}\n        basis: {json.dumps(basis)}\n")
+            if written:
+                parts.append(f"  {json.dumps(quantity)}:\n    parts:\n" + "".join(written))
+        if not parts:
+            return ""
+        head = "version: 2\n" + (f"extends: {json.dumps(extends)}\n" if extends else "")
+        return head + "quantities:\n" + "".join(parts)
+
     def drift_html(
         self,
         *,
@@ -486,3 +582,15 @@ class CasePlot:
     def page(self, title: str = "Drawn cases", **query: Any) -> str:
         """A standalone page with the explorer (:meth:`explorer_html`)."""
         return page(title, self.explorer_html(**query))
+
+
+def _rule_input_of(rules: "Rules", attribute: str) -> str:
+    """The input of *rules* that stands for *attribute*: the one whose
+    ``concept`` it is, else one of its name."""
+    reads = set(rules.free_inputs)
+    for name, (concept, _unit) in rules.input_concepts.items():
+        if concept == attribute and name in reads:
+            return name
+    if attribute in reads:
+        return attribute
+    raise ValueError(f"no input of the rules stands for {attribute} (give one concept: {attribute})")

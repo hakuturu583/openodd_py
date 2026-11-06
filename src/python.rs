@@ -2424,6 +2424,18 @@ impl RuleSet {
             .collect())
     }
 
+    /// A part's inputs, in `at`'s order, each with its points.
+    fn part_axes(&self, quantity: &str, part: &str) -> PyResult<Vec<(String, Vec<f64>)>> {
+        let q = self.inner.quantity(quantity).map_err(err)?;
+        let p = q.parts.iter().find(|p| p.name == part).ok_or_else(|| {
+            PyValueError::new_err(format!("quantity '{quantity}' has no part '{part}'"))
+        })?;
+        Ok(p.axes
+            .iter()
+            .map(|a| (a.input.clone(), a.points.clone()))
+            .collect())
+    }
+
     /// A part's basis as JSON: its own, its quantity's or the file's;
     /// `{"kind": "unstated"}` when none says.
     fn basis(&self, quantity: &str, part: &str) -> PyResult<String> {

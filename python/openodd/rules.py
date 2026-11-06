@@ -255,6 +255,11 @@ class Rules:
         """*quantity*'s parts, in the order written."""
         return list(self._call(self._core.parts, quantity))
 
+    def part_axes(self, quantity: str, part: str) -> list[tuple[str, list[float]]]:
+        """*part*'s inputs, in the order its ``at`` writes them, each with
+        its points."""
+        return [(n, list(p)) for n, p in self._call(self._core.part_axes, quantity, part)]
+
     def basis(self, quantity: str, part: str) -> dict[str, Any]:
         """What *part* of *quantity* rests on: ``kind`` (``fitted``,
         ``expert``, ``literature``, or ``unstated`` when nothing says) and

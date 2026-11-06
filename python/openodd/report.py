@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import logging
 import sys
 from collections.abc import Iterable, Sequence
@@ -512,7 +513,17 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
     parser.add_argument("--knob", action="append", default=[], metavar="ATTRIBUTE=SCALE,OFFSET",
                         help="the knob that writes ATTRIBUTE (its current scale and offset): the "
                         "drift page then gives the corrected ones; repeat for more")
+    parser.add_argument("--drift-rules", type=Path, metavar="FILE",
+                        help="also write the corrections the drift suggests for knobs that take "
+                        "their value from the rules, as a rule file extending --rules, here")
+    parser.add_argument("--rules", metavar="FILE",
+                        help="the rule file those knobs' quantities are in (for --drift-rules)")
+    parser.add_argument("--knob-quantity", action="append", default=[], metavar="ATTRIBUTE=QUANTITY",
+                        help="the quantity of --rules the knob writing ATTRIBUTE takes its value "
+                        "from (for --drift-rules); repeat for more")
     args = parser.parse_args(argv)
+    if args.drift_rules is not None and args.rules is None:
+        parser.error("--drift-rules needs --rules")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     documents = load_coverage_files(args.paths)
     report = merge_coverage([doc for _, doc in documents])
@@ -569,6 +580,30 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
         args.drift_html.parent.mkdir(parents=True, exist_ok=True)
         args.drift_html.write_text(page("Scenario realisation", plot.drift_html(
             measured_at=args.measured_at, knobs=knobs)), encoding="utf-8")
+    if args.drift_rules is not None:
+        from .rules import Rules  # noqa: PLC0415 - rules imports nothing of the report
+        from .view import CasePlot  # noqa: PLC0415 - view imports nothing of the report
+
+        quantities = {}
+        for spec in args.knob_quantity:
+            name, _, quantity = spec.partition("=")
+            if not name or not quantity:
+                parser.error(f"--knob-quantity {spec}: expected ATTRIBUTE=QUANTITY")
+            quantities[name] = quantity
+        # What the file extends, from where it is written: a local path
+        # relative to its folder, a URL as given.
+        extends = args.rules
+        if not extends.startswith(("https://", "http://")):
+            # (with / on every platform: a rule file's paths are posix)
+            extends = Path(os.path.relpath(Path(extends).resolve(), args.drift_rules.parent.resolve())).as_posix()
+        text = CasePlot([doc for _, doc in documents]).drift_rules(
+            Rules.read(args.rules), quantities, extends=extends, measured_at=args.measured_at)
+        if text:
+            args.drift_rules.parent.mkdir(parents=True, exist_ok=True)
+            args.drift_rules.write_text(text, encoding="utf-8")
+        else:
+            logging.warning("coverage: the drift suggests no correction of %s; %s not written",
+                            ", ".join(quantities) or "any knob", args.drift_rules)
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")

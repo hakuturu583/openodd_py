@@ -341,3 +341,81 @@ def test_the_cli_writes_the_drift_page(tmp_path: Path) -> None:
                  "--markdown", str(tmp_path / "r.md")]) == 0
     assert "offset 9.100" in out.read_text(encoding="utf-8")
     assert "Placed by measured values" in cases.read_text(encoding="utf-8")
+
+
+def test_the_drift_writes_its_correction_as_a_rule_file() -> None:
+    """#55: a knob that takes its value from the rules is corrected in the rules."""
+    from openodd import Rules
+
+    rules = Rules.from_text(
+        "version: 2\nquantities:\n  scenario_gap:\n    parts:\n      set:\n"
+        "        at: {gap: [0, 50]}\n        uniform: {low: [0, 50], high: [1, 51]}\n"
+    )
+    plot = CasePlot(_staged_campaign())
+    text = plot.drift_rules(rules, {"gap": "scenario_gap", "rain": "nope"}, extends="gap.yaml", date="2026-11-06")
+    assert text.startswith('version: 2\nextends: "gap.yaml"\nquantities:\n')
+    fixed = rules.text_over(text.replace('extends: "gap.yaml"\n', ""))
+    b = GAP_OFFSET - 0.1
+    (name, points), = fixed.part_axes("scenario_gap", "set")
+    assert name == "gap" and points == pytest.approx([b, 50 + b], abs=1e-6)
+    # The value written for a drawn gap is now the one that stages it.
+    assert fixed.range("scenario_gap", {"gap": 20 + b}) == pytest.approx(rules.range("scenario_gap", {"gap": 20}))
+    basis = fixed.basis("scenario_gap", "set")
+    assert basis["kind"] == "fitted" and basis["data"]["rows"] == 20 and basis["date"] == "2026-11-06"
+    # Nothing to correct: nothing written.
+    assert plot.drift_rules(rules, {}) == ""
+    with pytest.raises(ValueError, match="no input of the rules stands for gap"):
+        plot.drift_rules(Rules.from_text(
+            "version: 2\nquantities:\n  q:\n    parts:\n      p:\n        at: {x: [0, 1]}\n        uniform: {low: 0, high: 1}\n"
+        ), {"gap": "q"})
+
+
+
+def test_the_cli_writes_the_drift_rules(tmp_path: Path) -> None:
+    for i, doc in enumerate(_staged_campaign()):
+        (tmp_path / f"r{i}_coverage.json").write_text(json.dumps(doc), encoding="utf-8")
+    (tmp_path / "gap.yaml").write_text(
+        "version: 2\nquantities:\n  scenario_gap:\n    parts:\n      set:\n"
+        "        at: {gap: [0, 50]}\n        uniform: {low: [0, 50], high: [1, 51]}\n"
+    )
+    out = tmp_path / "fixed.yaml"
+    assert main([str(tmp_path), "--drift-rules", str(out), "--rules", str(tmp_path / "gap.yaml"),
+                 "--knob-quantity", "gap=scenario_gap", "--markdown", str(tmp_path / "r.md")]) == 0
+    fixed = openodd.Rules.read(out)
+    assert fixed.basis("scenario_gap", "set")["kind"] == "fitted"
+    assert fixed.part_axes("scenario_gap", "set")[0][1][0] == pytest.approx(GAP_OFFSET - 0.1, abs=1e-6)
+
+
+def test_two_corrections_of_one_quantity_are_written_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openodd import Rules
+
+    rules = Rules.from_text(
+        "version: 2\nquantities:\n  q:\n    parts:\n      p:\n"
+        "        at: {x: [0, 10], y: [0, 1]}\n        uniform: {low: 0, high: 1}\n"
+    )
+
+    def fitted(attribute: str, a: float, b: float) -> dict[str, Any]:
+        return {"attribute": attribute, "summary": {"runs": 10}, "calibration": {"status": "suggest"},
+                "fit": {"a": a, "b": b, "r2": 0.99, "residual_std": 0.1}}
+
+    plot = CasePlot(_staged_campaign())
+    monkeypatch.setattr(plot, "drift", lambda **_: {"attributes": [fitted("x", 1.0, 2.0), fitted("y", 2.0, 0.5)]})
+    text = plot.drift_rules(rules, {"x": "q", "y": "q"}, date="")
+    assert text.count('"q":') == 1
+    fixed = rules.text_over(text)
+    assert dict(fixed.part_axes("q", "p")) == {"x": [2.0, 12.0], "y": [0.5, 2.5]}
+
+
+def test_the_cli_extends_the_rules_from_where_it_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for i, doc in enumerate(_staged_campaign()):
+        (tmp_path / f"r{i}_coverage.json").write_text(json.dumps(doc), encoding="utf-8")
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "gap.yaml").write_text(
+        "version: 2\nquantities:\n  scenario_gap:\n    parts:\n      set:\n"
+        "        at: {gap: [0, 50]}\n        uniform: {low: [0, 50], high: [1, 51]}\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--drift-rules", "reports/fixed.yaml", "--rules", "config/gap.yaml",
+                 "--knob-quantity", "gap=scenario_gap", "--markdown", "r.md"]) == 0
+    assert '"../config/gap.yaml"' in (tmp_path / "reports" / "fixed.yaml").read_text()
+    assert openodd.Rules.read(tmp_path / "reports" / "fixed.yaml").quantities == ["scenario_gap"]
