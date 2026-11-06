@@ -1013,6 +1013,16 @@ impl Taxonomy {
     /// The taxonomy of an OpenODD file's `text`.
     pub fn parse(text: &str, label: &str) -> Result<Self> {
         use crate::loader::{load_openodd, AnyProbe, Options, Source};
+        // One file: its IMPORTs would be read from the process's working
+        // directory, not from where the taxonomy was, and its SHA-256 would
+        // not cover them.
+        let docs = parse_all(text).map_err(|e| Error::value(format!("{label}: {e}")))?;
+        if docs.iter().any(|d| d.get("IMPORT").is_some()) {
+            return Err(Error::value(format!(
+                "{label}: a rule file's taxonomy is one OpenODD file, and this one IMPORTs \
+                 others; name a file that holds the whole taxonomy"
+            )));
+        }
         let loaded = load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe)
             .map_err(|e| Error::value(format!("{label}: {e}")))?;
         Ok(Taxonomy {
@@ -3693,5 +3703,21 @@ quantities:
         let set = RuleSet::parse(GRIP, "grip.yaml").unwrap();
         assert!(set.quantities["grip"].parts[0].basis.is_none());
         assert!(set.basis_of("grip", "water").is_none());
+    }
+
+    #[test]
+    fn a_taxonomy_that_imports_others_is_refused() {
+        let mut map = IndexMap::new();
+        map.insert(
+            TAXONOMY_URL.to_string(),
+            format!("IMPORT: [more.yaml]\n{ROAD_TAXONOMY}"),
+        );
+        let e = RuleSet::parse_with(V3, "x.yaml", &Origin::Text, &mut Given(map))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("is one OpenODD file, and this one IMPORTs others"),
+            "{e}"
+        );
     }
 }
