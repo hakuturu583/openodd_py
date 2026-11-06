@@ -414,3 +414,28 @@ def test_the_manifest_says_which_inputs_are_causes(tmp_path: Path) -> None:
     assert manifest["taxonomy"]["file"].endswith("taxonomy.yaml")
     plain = Backend(rules=Rules.from_text(GRIP), rule_inputs=["water"]).manifest()
     assert plain["rule_inputs"]["water"] == {} and "taxonomy" not in plain
+
+
+ROOT = """version: 2
+quantities:
+  gap:
+    parts:
+      base:
+        uniform: {low: 2, high: 30}
+"""
+
+
+def test_a_quantity_reading_no_input(tmp_path: Path) -> None:
+    """A part with no `at` reads no input: a root of the network, such as
+    what a scenario sets up (the gap to a vehicle ahead)."""
+    rules = Rules.from_text(ROOT)
+    assert rules.inputs("gap") == [] and rules.part_axes("gap", "base") == []
+    assert rules.range("gap", {}) == (2.0, 30.0)
+    assert rules.quantile("gap", {}, 0.25) == pytest.approx(9.0)
+    assert rules.sample({}, {"gap": 0.5}) == {"gap": pytest.approx(16.0)}
+    # A fit keeps it a root, and writes it so.
+    fit = rules.fit([{"gap": 5.0 + 0.5 * i} for i in range(40)])
+    fit.write(tmp_path / "fit.yaml")
+    again = Rules.read(tmp_path / "fit.yaml")
+    assert again.part_axes("gap", "base") == []
+    assert again.range("gap", {})[0] == pytest.approx(5.0, abs=1e-6)

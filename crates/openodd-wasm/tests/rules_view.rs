@@ -305,3 +305,34 @@ fn a_chain_is_ordered_sampled_and_its_quantity_inputs_flagged() {
         .unwrap();
     assert!(html.contains("visibility"));
 }
+
+#[wasm_bindgen_test]
+#[test]
+fn a_part_reading_no_input_is_drawn() {
+    // A root of the network (`gap`, no input at all) and a quantity with a
+    // part that reads no input beside one that does (`grip`).
+    let text = "version: 2\nquantities:\n  gap:\n    parts:\n      base:\n        uniform: {low: 2, high: 30}\n  grip:\n    combine: min\n    parts:\n      floor:\n        uniform: {low: 0.8, high: 1.0}\n      water:\n        at: {water: [0, 100]}\n        uniform: {low: [0.9, 0.4], high: [1.1, 0.6]}\n";
+    let v = RulesView::from_text(text, "root.yaml").expect("reads");
+    let html = v.rules_html_str(r#"{"quantity": "gap"}"#, "{}").unwrap();
+    assert!(html.contains("base"), "{html}");
+    assert!(!html.contains("oo-rules-response"), "no input, no response");
+    let data: Json =
+        serde_json::from_str(&v.rules_json_str(r#"{"quantity": "gap"}"#, "{}").unwrap()).unwrap();
+    assert!(data["response"]["x"].is_null());
+    assert!(close(data["outputs"]["median"].as_f64().unwrap(), 16.0));
+    let data: Json =
+        serde_json::from_str(&v.rules_json_str(r#"{"quantity": "grip"}"#, "{}").unwrap()).unwrap();
+    let floor = &data["parts"][0];
+    assert_eq!(floor["chart"]["x"], "water");
+    let lows: Vec<f64> = floor["chart"]["curves"]["low"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap())
+        .collect();
+    assert!(lows.iter().all(|x| close(*x, 0.8)), "flat: {lows:?}");
+    assert!(v
+        .rules_html_str(r#"{"quantity": "grip"}"#, "{}")
+        .unwrap()
+        .contains("oo-rules-response"));
+}

@@ -73,7 +73,7 @@ quantities:
 | `quantities` | Name → a quantity: `parts`, `combine` and an optional `text` |
 | `combine` | How the parts' values are joined: `min` (the default) or `max` |
 | `parts` | Name → a part: `at`, one distribution, an optional `text`, and an optional `fixed` |
-| `at` | Input → its points, increasing. The order of the inputs is the order of the values' nesting |
+| `at` | Input → its points, increasing. The order of the inputs is the order of the values' nesting. Left out (or `{}`), the part reads no input ([A part that reads no input](#a-part-that-reads-no-input)) |
 | `uniform` | `low`, `high` |
 | `triangular` | `low`, `mode`, `high` |
 | `normal` | `mean`, `sd`, truncated to `low`..`high` |
@@ -99,6 +99,28 @@ quantities:
 - `Rules.evaluate` gives `low`, `high`, `median` and `mean`; `Rules.range`
   `(low, high)`; `Rules.cdf` the share of the mass at or below a value;
   `Rules.distributions` each part's distribution at the inputs.
+
+### A part that reads no input
+
+A part with no `at` (or `at: {}`) is one distribution: a root of the
+network, with no cause among the ODD's conditions. What a scenario sets up --
+the gap to a vehicle about to cut in, how fast a pedestrian crosses -- is such
+an effect when nothing in the domain conditions it yet:
+
+```yaml
+quantities:
+  vehicle_ahead_gap:
+    parts:
+      staged:
+        uniform: {low: 2, high: 30}       # one number per parameter
+```
+
+Its parameters are one number each (a list needs points to put it at). It
+joins the other parts of its quantity as any part does, so a part that reads
+no input beside one that does bounds the quantity everywhere (`min` of a
+floor and the water's grip). A fit keeps it a root and writes `at: {}`. In a
+file that extends another, a part without `at` keeps the points there
+([How files merge](#extending-a-rule-file)); `at: {}` makes it read none.
 
 ## Inputs and the taxonomy
 

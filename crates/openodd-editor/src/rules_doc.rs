@@ -571,6 +571,16 @@ impl RulesDoc {
                 other => return Err(format!("unknown field '{other}'")),
             }
         }
+        // In a file that extends none, a part with a distribution and no
+        // `at` reads no input (in one that extends another, it keeps the
+        // points there).
+        if doc.extends.is_none() {
+            for p in doc.quantities.iter_mut().flat_map(|q| q.parts.iter_mut()) {
+                if p.axes.is_none() && p.dist.is_some() {
+                    p.axes = Some(Vec::new());
+                }
+            }
+        }
         Ok(doc)
     }
 
@@ -1126,6 +1136,25 @@ mod tests {
         assert!(yaml.contains("at: {fog: [0, 30, 70, 100]}"), "{yaml}");
         let set = check(&yaml, "a.yaml", &[]).unwrap();
         assert_eq!(set.upstream("sight_speed").unwrap(), ["sight"]);
+    }
+
+    #[test]
+    fn a_part_reading_no_input_is_edited_and_written() {
+        let text = "version: 2\nquantities:\n  gap:\n    parts:\n      base:\n        uniform: {low: 2, high: 30}\n";
+        let doc = RulesDoc::from_yaml(text).unwrap();
+        let part = &doc.quantities[0].parts[0];
+        assert_eq!(part.size(), 1);
+        let core = part.core().expect("a whole part");
+        assert!(core.axes.is_empty());
+        let written = doc.to_yaml().unwrap();
+        let again = RuleSet::parse(&written, "w.yaml").unwrap();
+        assert!(
+            again.quantities["gap"].parts[0].axes.is_empty(),
+            "{written}"
+        );
+        // In a file that extends another, a part without `at` keeps its points.
+        let over = RulesDoc::from_yaml(&format!("extends: base.yaml\n{text}")).unwrap();
+        assert!(over.quantities[0].parts[0].axes.is_none());
     }
 
     #[test]

@@ -2294,10 +2294,17 @@ fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
     let mut known = vec!["at", "text", "fixed", "basis"];
     known.extend(Family::ALL.iter().map(|f| f.name()));
     let map = mapping(node, at, &known)?;
-    // Its axes: the inputs `at` names, in order, and their points.
+    // Its axes: the inputs `at` names, in order, and their points. A part
+    // with no `at` (or `at: {}`) reads no input: one distribution, a root of
+    // the network.
     let axes_at = at.key("at");
     let mut axes = Vec::new();
-    for (input, raw) in required_mapping(map, "at", &axes_at)? {
+    let empty = crate::yaml::Mapping::new();
+    let inputs = match get(map, "at") {
+        None | Some(Node::Null) => &empty,
+        Some(node) => mapping(node, &axes_at, &[])?,
+    };
+    for (input, raw) in inputs {
         let input = node_name(input, &axes_at)?;
         let here = axes_at.key(&input);
         let points = match untag(raw) {
@@ -2348,6 +2355,13 @@ fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
         let Some(raw) = get(params, p) else {
             return Err(here.error("missing"));
         };
+        if axes.is_empty() && matches!(untag(raw), Node::Sequence(_)) {
+            return Err(here.error(format!(
+                "{} values, but the part has no `at:` points to put them at; a part with no \
+                 `at` reads no input and takes one number",
+                raw.py_repr()
+            )));
+        }
         values.push(read_grid(raw, &shape, size, &here)?);
     }
     let fixed = match get(map, "fixed") {
@@ -3303,6 +3317,46 @@ quantities:
     }
 
     #[test]
+    fn a_part_with_no_input_is_a_root_of_the_network() {
+        let text = "version: 2\nquantities:\n  gap:\n    parts:\n      base:\n        uniform: {low: 2, high: 30}\n  grip:\n    combine: min\n    parts:\n      floor:\n        at: {}\n        uniform: {low: 0.8, high: 1.0}\n      water:\n        at: {water: [0, 100]}\n        uniform: {low: [0.9, 0.4], high: [1.1, 0.6]}\n";
+        let rules = RuleSet::parse(text, "root.yaml").unwrap();
+        assert!(rules.quantities["gap"].parts[0].axes.is_empty());
+        assert!(close(at(&rules, "gap", &[]).unwrap(), (2.0, 30.0)));
+        // Combined with a part that reads an input: min of [0.8, 1.0] and the water's.
+        assert!(close(
+            at(&rules, "grip", &[("water", 100.0)]).unwrap(),
+            (0.4, 0.6)
+        ));
+        assert!(close(
+            at(&rules, "grip", &[("water", 0.0)]).unwrap(),
+            (0.8, 1.0)
+        ));
+        // A list of values needs points to put them at.
+        let e = RuleSet::parse(
+            &text.replace("low: 2, high: 30", "low: [2, 3], high: 30"),
+            "x.yaml",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("gap.parts.base.uniform.low") && e.contains("no `at:` points"),
+            "{e}"
+        );
+        // `at: {}` over a part that reads an input makes it read none.
+        let base = RuleSet::parse(GRIP, "base.yaml").unwrap();
+        let over = RuleSet::parse(
+            "version: 2\nquantities:\n  grip:\n    parts:\n      water:\n        at: {}\n        uniform: {low: 0.5, high: 0.7}\n",
+            "over.yaml",
+        )
+        .unwrap();
+        let merged = base.merged(&over).unwrap();
+        assert!(merged.quantities["grip"]
+            .parts
+            .iter()
+            .any(|p| p.name == "water" && p.axes.is_empty()));
+    }
+
+    #[test]
     fn a_file_naming_only_its_change_is_read_over_rules_in_hand() {
         let dir = tempfile::tempdir().unwrap();
         files(
@@ -3312,7 +3366,7 @@ quantities:
         let origin = Origin::File(dir.path().join("run.yaml"));
         // On its own it is no whole set: water has no points.
         let e = load(&dir.path().join("run.yaml")).unwrap_err().to_string();
-        assert!(e.contains("parts.water.at: missing"), "{e}");
+        assert!(e.contains("has no `at:` points"), "{e}");
         let base = RuleSet::parse(GRIP, "backend.yaml").unwrap();
         let rules = base.load_over(&origin, &mut Files { url: None }).unwrap();
         assert!(close(
