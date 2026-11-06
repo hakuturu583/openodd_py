@@ -227,6 +227,9 @@ pub struct Sampler {
     /// The values of the cases drawn so far from this ODD: by earlier
     /// samplers of the batch, then by this one with the weighted strategy.
     history: Vec<IndexMap<String, Value>>,
+    /// Free parameters: drawn in `[0, 1]` with each case, set by no knob and
+    /// read by no condition (a quantile the caller turns into a setting).
+    free: Vec<String>,
 }
 
 impl std::fmt::Debug for Sampler {
@@ -359,6 +362,7 @@ impl Sampler {
             derive: None,
             weights: Vec::new(),
             history: drawn.iter().map(|s| s.values.clone()).collect(),
+            free: Vec::new(),
         };
         if strategy == Strategy::Coverage {
             sampler.read_coverage(coverage);
@@ -498,8 +502,34 @@ impl Sampler {
         out
     }
 
-    /// What each drawn attribute can take, in the ODD's order.
+    /// The sampler with free parameters: each drawn in `[0, 1]` with every
+    /// case (its value under the name given), moved by the flaky search like
+    /// a numeric attribute, and set by no knob. A name must not be an
+    /// attribute's.
+    pub fn with_free(mut self, names: &[String]) -> Result<Self> {
+        for name in names {
+            if self.odd.attribute(name).is_some() || self.free.contains(name) {
+                return Err(Error::value(format!(
+                    "OddSampler: free parameter {name} is named like an attribute or twice"
+                )));
+            }
+            self.free.push(name.clone());
+        }
+        Ok(self)
+    }
+
+    /// What each drawn attribute can take, in the ODD's order, then each free
+    /// parameter (`[0, 1]`).
     pub fn domains(&self) -> Vec<(String, Domain)> {
+        let free = self.free.iter().map(|name| {
+            (
+                name.clone(),
+                Domain::Numeric {
+                    low: 0.0,
+                    high: 1.0,
+                },
+            )
+        });
         self.axes
             .iter()
             .map(|axis| {
@@ -515,6 +545,7 @@ impl Sampler {
                 }
                 (axis.attribute.clone(), Domain::Numeric { low, high })
             })
+            .chain(free)
             .collect()
     }
 
@@ -732,6 +763,11 @@ impl Sampler {
     pub fn moved(&self, sample: &Sample, changes: &[(String, f64)]) -> Option<Sample> {
         let mut out = sample.clone();
         for (attribute, target) in changes {
+            if self.free.contains(attribute) {
+                out.values
+                    .insert(attribute.clone(), Value::Float(target.clamp(0.0, 1.0)));
+                continue;
+            }
             let Axis {
                 item, knob, labels, ..
             } = self.axes.iter().find(|a| &a.attribute == attribute)?;
@@ -832,6 +868,9 @@ impl Sampler {
             }
             if !self.admits_values(&values, situation, true) {
                 continue;
+            }
+            for name in &self.free {
+                values.insert(name.clone(), Value::Float(self.rng.gen_range(0.0..1.0)));
             }
             let sample = Sample {
                 index,
@@ -1222,6 +1261,46 @@ mod tests {
             assert!(!(gap < 10.0 && case.buckets["rain"] == "heavy"), "{case:?}");
             assert_eq!(case.overrides.len(), 2);
         }
+    }
+
+    #[test]
+    fn free_parameters_are_drawn_in_the_unit_interval_and_moved() {
+        let o = odd();
+        let free = vec!["quantile(gap_staged)".to_string()];
+        let mut s = Sampler::new(&o, &knobs(), "1", Strategy::Uniform, None, 200, &[])
+            .unwrap()
+            .with_free(&free)
+            .unwrap();
+        let domains = s.domains();
+        assert_eq!(
+            domains.last().unwrap(),
+            &(
+                free[0].clone(),
+                Domain::Numeric {
+                    low: 0.0,
+                    high: 1.0
+                }
+            )
+        );
+        let cases = s.sample(50).unwrap();
+        let ps: Vec<f64> = cases
+            .iter()
+            .map(|c| c.values[&free[0]].as_float().unwrap())
+            .collect();
+        assert!(ps.iter().all(|p| (0.0..1.0).contains(p)));
+        assert!(ps.iter().any(|p| *p < 0.3) && ps.iter().any(|p| *p > 0.7));
+        // Set by no knob: the overrides are the attributes' alone.
+        assert!(cases.iter().all(|c| c.overrides.len() == 2));
+        // Moved like a numeric attribute, held to [0, 1].
+        let moved = s.moved(&cases[0], &[(free[0].clone(), 1.7)]).unwrap();
+        assert_eq!(moved.values[&free[0]], Value::Float(1.0));
+        // Not named like an attribute.
+        let e = Sampler::new(&o, &knobs(), "1", Strategy::Uniform, None, 200, &[])
+            .unwrap()
+            .with_free(&["gap".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("named like an attribute"), "{e}");
     }
 
     #[test]

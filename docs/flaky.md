@@ -37,8 +37,18 @@ or kind can be measured against each other:
 
 `FlakySearch` takes the space from the sampler. It covers the attributes the sampler
 draws: a numeric one over what its knob can bring about in its drawable buckets, and a
-categorical one over its drawable buckets. `FlakinessModel` takes any space, so runs
-described by parameters of your own can be modelled too:
+categorical one over its drawable buckets. It also covers each of the sampler's
+**effects** ([rules.md](rules.md#effects-a-scenario-sets)): what a scenario sets up, drawn
+from the rules. An effect's coordinate is its quantile, `quantile(q)` over `[0, 1]`, a
+parameter of the case. The value written is the rules' at that quantile, given what the
+case drew for the quantity's inputs, so a moved case stays inside the distribution. The
+ODD stays discrete: the conditions a system is designed for. The effects are continuous,
+and where an outcome flips on the gap to a vehicle ahead, the search moves that gap's
+quantile to the boundary. The value each case ran with is in `case.quantities`, which the
+[case plot](case_plot.md) places runs by.
+
+`FlakinessModel` takes any space, so runs described by parameters of your own can be
+modelled too:
 
 ```python
 space = openodd.ParameterSpace(

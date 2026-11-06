@@ -35,7 +35,7 @@ from .items import value_label
 from .model import OddDefinition, read_probe, to_core
 from .report import CoverageReport
 
-__all__ = ["OddDraws", "OddKnob", "OddSample", "OddSampler", "knobs_from_mapping"]
+__all__ = ["OddDraws", "OddKnob", "OddSample", "OddSampler", "knobs_from_mapping", "quantile_name"]
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,13 @@ def _rule_input(backend: Backend, attribute: str, knob: OddKnob) -> str:
     )
 
 
+def quantile_name(quantity: str) -> str:
+    """The case parameter that holds an effect's quantile: ``quantile(q)``,
+    in ``[0, 1]``. It is drawn with each case and moved by the flaky search
+    (:class:`~.flaky.FlakySearch`), and the effect is written at it."""
+    return f"quantile({quantity})"
+
+
 def _effect_inputs(
     backend: Backend, odd: OddDefinition, effects: Sequence[OddKnob]
 ) -> dict[str, tuple[str, str, str]]:
@@ -231,7 +238,8 @@ class OddSample:
         index: 0-based position in the batch.
         overrides: The settings that bring it about, ``key=value`` each.
         buckets: Attribute name -> the bucket label drawn for it.
-        values: Attribute name -> the value drawn, in the attribute's terms.
+        values: Attribute name -> the value drawn, in the attribute's terms;
+            and each effect's quantile, ``quantile(q)`` (:func:`quantile_name`).
         situation: The situation the case was aimed at, if any.
         flaky: Its flakiness, when :class:`~.flaky.FlakySearch` chose it for
             that (:class:`~.flaky.FlakyMetrics`); ``None`` for a case the
@@ -333,6 +341,9 @@ class OddSampler:
             its own, at the values drawn for the inputs that stand for the
             ODD's attributes, and writes it (:attr:`OddSample.quantities`). A
             control with a ``quantity`` that no attribute reads is one too.
+            The quantile is a parameter of the case, ``quantile(q)`` in its
+            ``values`` (:func:`quantile_name`): continuous, it is what the
+            flaky search moves.
     """
 
     def __init__(
@@ -403,6 +414,7 @@ class OddSampler:
             drawn=[s._core() for s in drawn],
             derive=derive if derived else None,
             weights=None if weights is None else [(str(k), float(v)) for k, v in weights.items()],
+            free=[quantile_name(q) for q in self.effects] or None,
         )
 
     @property
@@ -497,6 +509,12 @@ class OddSampler:
             quantiles = {
                 q: random.Random(f"{self._seed}:{case.index}:{q}").random() for q in self._rules.order
             }
+            # An effect's own quantile is a parameter of the case
+            # (quantile(q), drawn with it and moved by the flaky search).
+            for q in self.effects:
+                p = case.values.get(quantile_name(q))
+                if isinstance(p, (int, float)) and not isinstance(p, bool):
+                    quantiles[q] = min(max(float(p), 0.0), 1.0)
             for knob in self._effects:
                 q = str(knob.quantity)
                 y = self._rules.quantile(q, inputs, quantiles[q], quantiles)

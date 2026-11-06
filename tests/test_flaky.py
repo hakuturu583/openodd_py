@@ -265,3 +265,40 @@ def test_hiding_the_holes_keeps_the_flaky_cases() -> None:
     report = openodd.merge_coverage(_campaign(20))
     rows = [line for line in report.to_markdown(max_holes=0).splitlines() if "| cut_in |" in line]
     assert len(rows) == 20
+
+
+def test_the_search_moves_an_effects_quantile(tmp_path) -> None:
+    """The ODD is discrete, the effects continuous: an effect's quantile is a
+    parameter of the case, and the search moves it to where the outcome
+    flips -- here a gap of 12 m, which the ODD knows nothing of."""
+    from test_sampling import _effects_setup, _written
+
+    from openodd.sampler import quantile_name
+
+    _, b, o = _effects_setup(tmp_path)
+    rain = {"weather.rainfall_rate": OddKnob("env.rain_mm_h", range=(0, 10))}
+    effects = [OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap")]
+    sampler = OddSampler(o, rain, seed=2, backend=b, effects=effects)
+    s = FlakySearch(sampler, explore_fraction=0.5)
+    name = quantile_name("vehicle_ahead_gap")
+    assert s.space.numeric[name] == (0.0, 1.0)
+
+    def gap_passes(case) -> bool:
+        return _written(case, "scenario.npc_gap_m") > 12.0
+
+    first = sampler.sample(40)
+    for case in first:
+        # The gap written is the quantity at the case's own quantile.
+        assert case.quantities["vehicle_ahead_gap"] == pytest.approx(2 + 28 * case.values[name])
+        s.observe(case, gap_passes(case))
+    batch = s.sample(10)
+    own, explored = batch[:5], batch[5:]
+    assert all(c.flaky is not None for c in explored)
+
+    def spread(cases):
+        return sum(abs(c.quantities["vehicle_ahead_gap"] - 12.0) for c in cases) / len(cases)
+
+    assert spread(explored) < spread(own)
+    assert spread(explored) < 4.0
+    for c in explored:
+        assert c.quantities["vehicle_ahead_gap"] == _written(c, "scenario.npc_gap_m")

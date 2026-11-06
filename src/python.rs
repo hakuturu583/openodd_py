@@ -1974,7 +1974,7 @@ struct Sampler {
 #[pymethods]
 impl Sampler {
     #[new]
-    #[pyo3(signature = (odd, knobs, *, seed="0", strategy="uniform", coverage=None, max_tries=200, drawn=None, derive=None, weights=None))]
+    #[pyo3(signature = (odd, knobs, *, seed="0", strategy="uniform", coverage=None, max_tries=200, drawn=None, derive=None, weights=None, free=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -1987,6 +1987,7 @@ impl Sampler {
         drawn: Option<Vec<Py<Sample>>>,
         derive: Option<PyObject>,
         weights: Option<Vec<(String, f64)>>,
+        free: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let knobs: indexmap::IndexMap<String, crate::sampler::Knob> = knobs
             .into_iter()
@@ -2009,6 +2010,9 @@ impl Sampler {
             &drawn,
         )
         .map_err(err)?;
+        if let Some(free) = free {
+            inner = inner.with_free(&free).map_err(err)?;
+        }
         if strategy == crate::sampler::Strategy::Weighted || weights.is_some() {
             let weights: indexmap::IndexMap<String, f64> =
                 weights.unwrap_or_default().into_iter().collect();
