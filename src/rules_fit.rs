@@ -442,10 +442,16 @@ pub fn json_rows(text: &str) -> Result<(Vec<Row>, Option<String>)> {
     }
 }
 
-/// [`json_rows`] read as a fit reads them ([`observations`]).
-pub fn observations_from_json(text: &str, names: &[String]) -> Result<Observations> {
+/// [`json_rows`] read as a fit of `set` reads them ([`observations_labelled`]):
+/// the values `set` reads, a categorical input's as its label's index.
+pub fn observations_from_json(text: &str, set: &RuleSet) -> Result<Observations> {
     let (rows, weight) = json_rows(text)?;
-    observations(&rows, names, weight.as_deref())
+    observations_labelled(
+        &rows,
+        &set.data_names(),
+        weight.as_deref(),
+        &set.input_labels(),
+    )
 }
 
 /// A row's value of `name`, if it has a finite one.
@@ -2290,8 +2296,32 @@ quantities:
     }
 
     #[test]
+    fn json_data_reads_a_categorical_input_at_its_labels() {
+        let set = RuleSet::parse(
+            "version: 2\ninputs:\n  tod: {labels: [day, night]}\nquantities:\n  sun:\n    parts:\n      t:\n        at: {tod: [day, night]}\n        uniform: {low: [10, -30], high: [70, -6]}\n",
+            "s.yaml",
+        )
+        .unwrap();
+        let o = observations_from_json(
+            r#"[{"tod": "night", "sun": -10}, {"tod": "", "sun": 20}]"#,
+            &set,
+        )
+        .unwrap();
+        assert_eq!(o.rows[0]["tod"], 1.0);
+        assert!(!o.rows[1].contains_key("tod"));
+        let e = observations_from_json(r#"[{"tod": "noon", "sun": 1}]"#, &set)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not one of its labels day, night"), "{e}");
+    }
+
+    #[test]
     fn json_data_comes_as_rows_or_columns_and_may_have_holes() {
-        let names: Vec<String> = ["water", "grip"].iter().map(|s| s.to_string()).collect();
+        let names = RuleSet::parse(
+            "version: 2\nquantities:\n  grip:\n    parts:\n      w:\n        at: {water: [0, 100]}\n        uniform: {low: 0, high: 1}\n",
+            "g.yaml",
+        )
+        .unwrap();
         let rows = r#"{"rows": [
             {"time": "12:00", "water": 70, "grip": 0.62, "dt": 0.5},
             {"water": "20"},

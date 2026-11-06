@@ -47,7 +47,7 @@ pub fn run(job: &Job, progress: &mut dyn FnMut(&Progress)) -> Reply {
         Ok(s) => s,
         Err(e) => return Reply::Failed { error: e },
     };
-    match observations_from_json(&job.data, &set.data_names()) {
+    match observations_from_json(&job.data, &set) {
         Ok(obs) => run_parsed(&set, &obs, job.min_spread, progress),
         Err(e) => Reply::Failed {
             error: format!("the data: {e}"),
