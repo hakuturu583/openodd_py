@@ -362,11 +362,16 @@ class OddSampler:
         # Attribute -> (knob, the rule input reading it, the attribute's unit,
         # the input's unit): the value drawn is converted between them.
         self._from_rules: dict[str, tuple[OddKnob, str, str, str]] = {}
+        # The controls the ODD's attributes read, whichever knob is chosen
+        # (an explicit knob replaces one, and it is still the attribute's,
+        # not an effect).
         used: set[int] = set()
         for attribute in odd.attributes:
-            knob = knobs.get(attribute.name) or backend.knob(attribute, controls)
+            control = backend.knob(attribute, controls)
+            if control is not None:
+                used.add(id(control))
+            knob = knobs.get(attribute.name) or control
             if knob is not None:
-                used.add(id(knob))
                 # A knob that writes a quantity of the rules sets the attribute
                 # only through them: the core draws the attribute over its
                 # range alone, and limits and rounding act on the value

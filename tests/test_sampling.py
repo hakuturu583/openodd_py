@@ -520,3 +520,21 @@ def test_effects_alone_are_drawn(tmp_path: Path) -> None:
         assert case.values == {} and 2 <= _written(case, "scenario.npc_gap_m") <= 30
     with pytest.raises(ValueError, match="nothing of ODD .* can be drawn"):
         OddSampler(o, backend=b)
+
+
+def test_a_control_an_explicit_knob_replaces_is_no_effect(tmp_path: Path) -> None:
+    """A control the ODD's attribute reads stays the attribute's when an
+    explicit knob replaces it: it is not drawn as an effect besides."""
+    _, b, o = _effects_setup(tmp_path)
+    b.readers["measure"] = lambda k: ((lambda c, k=k: c.get(k)), "mm/h")
+    o = openodd.load_openodd(
+        RAIN_TAXONOMY,
+        bindings={"weather.rainfall_rate": {"measure": "rain_mm_h", "buckets": [0, 2.5, 10]}},
+        backend=b,
+    )
+    controls = {"rain_mm_h": OddKnob("env.from_control", quantity="vehicle_ahead_gap")}
+    explicit = {"weather.rainfall_rate": OddKnob("env.explicit", range=(0, 10))}
+    sampler = OddSampler(o, explicit, controls=controls, seed=1, backend=b)
+    assert sampler.effects == []
+    for case in sampler.sample(5):
+        assert not any(x.startswith("env.from_control=") for x in case.overrides)
