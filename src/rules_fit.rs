@@ -68,11 +68,21 @@ pub struct FitOptions {
     /// `quantity.part.param@input=point,...` or `quantity.part@input=point,...`
     /// ([`crate::rules::Hold`]).
     pub fixed: Vec<String>,
+    /// The data files the rows were read from, `(path or name, sha256)`:
+    /// what each fitted part's `basis:` names as its data.
+    pub data_files: Vec<(String, String)>,
+    /// Who fitted, for `basis.by` (by default this library and its version).
+    pub by: String,
+    /// When, for `basis.date`, as the caller writes it; empty: not written.
+    pub date: String,
 }
 
 impl Default for FitOptions {
     fn default() -> Self {
         FitOptions {
+            data_files: Vec::new(),
+            by: format!("openodd {}", env!("CARGO_PKG_VERSION")),
+            date: String::new(),
             quantities: None,
             max_iterations: 1000,
             tolerance: 1e-10,
@@ -741,7 +751,7 @@ impl RuleSet {
             reports.push(report);
             fitted.push((q, params));
         }
-        Ok((quantities_text(&fitted), reports))
+        Ok((quantities_text(&fitted, &reports, options), reports))
     }
 
     /// What a fit's `fixed` entry names: the quantity, the part (`None`:
@@ -1577,12 +1587,46 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 
 /// The fitted parts, a rule file's `quantities:` section: each fitted
 /// part's distribution, a parameter one number where it is one everywhere.
-fn quantities_text(fitted: &[(&Quantity, Vec<Vec<Vec<f64>>>)]) -> String {
+/// The `basis:` of a fitted part: the data it was fitted from, how well the
+/// fitted quantity matches it, who fitted and when.
+fn fitted_basis(report: &QuantityFit, options: &FitOptions) -> serde_json::Value {
+    let mut data = serde_json::Map::new();
+    data.insert("rows".into(), report.rows.into());
+    if !options.data_files.is_empty() {
+        data.insert(
+            "files".into(),
+            options
+                .data_files
+                .iter()
+                .map(|(file, sha256)| serde_json::json!({"file": file, "sha256": sha256}))
+                .collect(),
+        );
+    }
+    let c = &report.calibration;
+    let mut basis = serde_json::json!({
+        "kind": "fitted",
+        "data": data,
+        "calibration": {"in_band": c.in_band, "ks": c.ks, "outside": c.outside},
+    });
+    if !options.by.is_empty() {
+        basis["by"] = options.by.clone().into();
+    }
+    if !options.date.is_empty() {
+        basis["date"] = options.date.clone().into();
+    }
+    basis
+}
+
+fn quantities_text(
+    fitted: &[(&Quantity, Vec<Vec<Vec<f64>>>)],
+    reports: &[QuantityFit],
+    options: &FitOptions,
+) -> String {
     if fitted.is_empty() {
         return "quantities: {}\n".into();
     }
     let mut out = String::from("quantities:\n");
-    for (q, params) in fitted {
+    for ((q, params), report) in fitted.iter().zip(reports) {
         // Names quoted: a name such as `true` or `null` is a string.
         out.push_str(&format!("  {}:\n    parts:\n", quoted(&q.name)));
         for (part, p) in q.parts.iter().zip(params) {
@@ -1605,6 +1649,14 @@ fn quantities_text(fitted: &[(&Quantity, Vec<Vec<Vec<f64>>>)]) -> String {
                 at.join(", "),
                 part.family.name()
             ));
+            // After the distribution, so it reads as the part's: a part a
+            // fit moved now rests on the data. One it held whole keeps the
+            // basis it has.
+            let moved = report
+                .parts
+                .iter()
+                .find(|p| p.name == part.name)
+                .is_some_and(|p| p.estimated > 0);
             let shape: Vec<usize> = part.axes.iter().map(|a| a.points.len()).collect();
             for (k, column) in part.family.params().iter().zip(p) {
                 let written = if column.windows(2).all(|w| w[0] == w[1]) {
@@ -1613,6 +1665,12 @@ fn quantities_text(fitted: &[(&Quantity, Vec<Vec<Vec<f64>>>)]) -> String {
                     nested_list(column, &shape, &py_float_repr)
                 };
                 out.push_str(&format!("          {k}: {written}\n"));
+            }
+            if moved {
+                out.push_str(&format!(
+                    "        basis: {}\n",
+                    fitted_basis(report, options)
+                ));
             }
         }
     }
@@ -2528,5 +2586,51 @@ quantities:
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_fitted_part_rests_on_the_data() {
+        let truth = RuleSet::parse(NORMAL, "truth.yaml").unwrap();
+        let rows = draw(&truth, "grip", "water", (0.0, 100.0), 500, 9);
+        let two = format!(
+            "{NORMAL}      held:\n        at: {{water: [0, 100]}}\n        uniform: {{low: 0, high: 2}}\n        fixed: true\n        basis: {{kind: expert}}\n"
+        );
+        let start = RuleSet::parse(&two, "start.yaml").unwrap();
+        let options = FitOptions {
+            data_files: vec![("drives.csv".into(), "abc".into())],
+            by: "tests".into(),
+            date: "2026-11-06".into(),
+            ..FitOptions::default()
+        };
+        let fit = start.fit(&rows, None, &options).unwrap();
+        let b = fit.rules.basis_of("grip", "water").unwrap();
+        assert_eq!(b.kind, "fitted");
+        let json = b.to_json();
+        assert_eq!(json["data"]["rows"], 500);
+        assert_eq!(json["data"]["files"][0]["sha256"], "abc");
+        assert_eq!(json["by"], "tests");
+        assert_eq!(json["date"], "2026-11-06");
+        assert_eq!(
+            json["calibration"]["in_band"].as_f64().unwrap(),
+            fit.quantities[0].calibration.in_band
+        );
+        // The part it held keeps the basis written.
+        assert_eq!(fit.rules.basis_of("grip", "held").unwrap().kind, "expert");
+        // and the file says so, read back.
+        let text = fit.text(None);
+        let back = start
+            .parse_over(
+                &text,
+                "fit.yaml",
+                &Origin::Text,
+                &mut Given(IndexMap::new()),
+            )
+            .unwrap();
+        assert_eq!(back.basis_of("grip", "water").unwrap().kind, "fitted");
+        // By default, this library is who fitted, and no date is written.
+        let fit = start.fit(&rows, None, &FitOptions::default()).unwrap();
+        let json = fit.rules.basis_of("grip", "water").unwrap().to_json();
+        assert!(json["by"].as_str().unwrap().starts_with("openodd "));
+        assert!(json.get("date").is_none());
     }
 }

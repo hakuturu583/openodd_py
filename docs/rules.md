@@ -223,6 +223,14 @@ or from the shell:
 openodd-rules-fit weather.yaml drives/*.csv -o weather_fitted.yaml [-q grip] [--weight w]
 ```
 
+**What a fitted part rests on.** Each part a fit moves gets a `basis` of
+kind `fitted` ([The basis of a part](#the-basis-of-a-part)): the rows it
+was fitted from, the files they were read from with their SHA-256
+(`data_files=`; `openodd-rules-fit` names the files it reads), the
+calibration after the fit, who fitted (`by=`, `openodd <version>` by
+default) and when (`date=`, today by default). A part the fit holds whole
+keeps the basis it has.
+
 **What is estimated.** The rule file's own numbers: every parameter at every
 point a part writes. The families, the inputs and their points stay as
 written, so the fitted file is the same rules with other numbers, and a

@@ -4,9 +4,11 @@ openodd.Rules.fit, openodd-rules-fit)."""
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import random
+import re
 from pathlib import Path
 
 import pytest
@@ -305,9 +307,35 @@ class TestCommand:
         assert "in the central 90%:" in printed
         fitted = Rules.read(out)
         assert dict(fitted.distributions("grip", {"water": 100})[0][2])["sd"] == 0.3
+        # The fitted part rests on the logs it was fitted from.
+        basis = fitted.basis("grip", "water")
+        assert basis["kind"] == "fitted"
+        assert basis["data"]["rows"] == 3000
+        assert [f["file"] for f in basis["data"]["files"]] == [
+            str(tmp_path / "drive0.csv"),
+            str(tmp_path / "drive1.csv"),
+        ]
+        assert basis["data"]["files"][0]["sha256"] == hashlib.sha256(
+            (tmp_path / "drive0.csv").read_bytes()
+        ).hexdigest()
+        assert basis["by"].startswith("openodd-rules-fit ")
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", basis["date"])
 
     def test_an_error_is_reported(self, tmp_path: Path, capsys) -> None:
         (tmp_path / "weather.yaml").write_text(START)
         (tmp_path / "d.csv").write_text("water,grip\n1,wet\n")
         assert fit_main([str(tmp_path / "weather.yaml"), str(tmp_path / "d.csv"), "-o", str(tmp_path / "o.yaml")]) == 2
         assert 'grip is "wet", not a number' in capsys.readouterr().err
+
+
+def test_a_fit_says_what_it_rests_on(rows) -> None:
+    fit = Rules.from_text(START).fit(rows[:400], quantities=["grip"], by="me", date="2026-11-06")
+    basis = fit.rules.basis("grip", "water")
+    assert basis["kind"] == "fitted"
+    assert basis["by"] == "me" and basis["date"] == "2026-11-06"
+    assert basis["calibration"]["in_band"] == pytest.approx(fit.quantities["grip"].calibration.in_band)
+    assert "files" not in basis["data"]
+    assert "basis:" in fit.text()
+    assert "date" not in Rules.from_text(START).fit(rows[:400], quantities=["grip"], date="").rules.basis(
+        "grip", "water"
+    )
