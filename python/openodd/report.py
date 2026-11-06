@@ -364,6 +364,16 @@ class CoverageReport:
         merged. Empty when none did."""
         return [WeightedOutcome(**raw) for raw in json.loads(self._core.weighted_outcomes_json())]
 
+    @property
+    def assumptions(self) -> list[dict[str, Any]]:
+        """The rule parts the runs followed -- assumptions about how faithfully
+        they rendered their conditions, not part of the ODD -- each as
+        ``{"quantity", "part", "basis", "runs", "files"}``: what it rests on
+        (``basis["kind"]`` is ``unstated`` when nothing says), how many runs
+        followed it so, and the rule files it came from. Empty when no run
+        recorded its rules."""
+        return list(json.loads(self._core.assumptions_json()))
+
     def flaky_cells(self, min_runs: int = CELL_MIN_RUNS,
                     band: tuple[float, float] = CELL_BAND) -> list[tuple[CellFlakiness, CellRow]]:
         """Every flaky cell (:meth:`CellRow.status`), with its group."""

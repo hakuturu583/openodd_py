@@ -672,7 +672,7 @@ class CoverageCollector:
 
     def to_dict(self, scenario: str) -> dict[str, Any]:
         """One run's coverage, in the coverage-file format."""
-        return {
+        out = {
             "schema": COVERAGE_SCHEMA,
             "generator": generator(self._generator),
             "scenario": scenario,
@@ -682,6 +682,30 @@ class CoverageCollector:
             "case": self._case,
             "outcome": self._outcome(),
         }
+        rules = self._rules()
+        if rules is not None:
+            out["rules"] = rules
+        return out
+
+    def _rules(self) -> Optional[dict[str, Any]]:
+        """The rules the backend followed, and what each part rests on: the
+        run's fidelity assumptions (``None`` when it follows none)."""
+        try:
+            rules = self._backend.active_rules
+            if rules is None:
+                return None
+            return {
+                "version": rules.version,
+                "taxonomy": None if rules.taxonomy is None else list(rules.taxonomy),
+                "files": [list(f) for f in rules.files],
+                "parts": [
+                    {"quantity": q, "part": part, "basis": basis}
+                    for (q, part), basis in rules.bases().items()
+                ],
+            }
+        except Exception:
+            logger.warning("coverage: could not record the rules followed", exc_info=True)
+            return None
 
     def write(self, path: Path, scenario: str) -> None:
         """Write the coverage file; a failure is logged, never raised.

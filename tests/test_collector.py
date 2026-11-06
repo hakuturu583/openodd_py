@@ -384,3 +384,27 @@ class TestReviewRegressions:
         b = _item("b", values=["z"], event=SamplingEvent.TICK)
         with pytest.raises(ValueError, match="joins a cell's labels"):
             CrossItem("ab", [a, b])
+
+
+def test_a_run_records_the_rules_it_followed() -> None:
+    from openodd import Rules
+
+    rules = Rules.from_text(
+        "version: 2\nbasis: {kind: expert, by: me}\nquantities:\n  grip:\n    parts:\n"
+        "      water:\n        at: {water: [0, 100]}\n        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n"
+    )
+    collector = CoverageCollector([_item(values=["a"])], backend=Backend(rules=rules))
+    collector.start(_Context("a"), 0.0)
+    collector.end(_Context("a"), 1.0)
+    doc = collector.to_dict("s")
+    assert doc["rules"]["version"] == 2
+    assert doc["rules"]["parts"] == [
+        {"quantity": "grip", "part": "water", "basis": {"kind": "expert", "by": "me"}}
+    ]
+    report = merge_coverage([doc, doc])
+    assert [(a["quantity"], a["basis"]["kind"], a["runs"]) for a in report.assumptions] == [
+        ("grip", "expert", 2)
+    ]
+    # A backend without rules records none.
+    plain = CoverageCollector([_item(values=["a"])], backend=Backend())
+    assert "rules" not in plain.to_dict("s")
