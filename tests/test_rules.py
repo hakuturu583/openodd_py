@@ -439,3 +439,55 @@ def test_a_quantity_reading_no_input(tmp_path: Path) -> None:
     again = Rules.read(tmp_path / "fit.yaml")
     assert again.part_axes("gap", "base") == []
     assert again.range("gap", {})[0] == pytest.approx(5.0, abs=1e-6)
+
+
+# A scenario's own nodes: the gap a cut-in is staged at, longer in the wet
+# (it reads the shared network's grip), and a root.
+SCENARIO = """version: 2
+quantities:
+  vehicle_ahead_gap:
+    parts:
+      grip:
+        at: {grip: [0.45, 1.1]}
+        uniform: {low: [5, 2], high: [40, 30]}
+  npc_speed_offset:
+    parts:
+      base:
+        uniform: {low: -15, high: 15}
+"""
+
+
+def test_a_scenario_adds_nodes_to_the_shared_network(tmp_path: Path) -> None:
+    shared, added = Rules.from_text(GRIP), Rules.from_text(SCENARIO)
+    joined = shared.extended(added)
+    assert joined.quantities == ["grip", "vehicle_ahead_gap", "npc_speed_offset"]
+    assert joined.upstream("vehicle_ahead_gap") == ["grip"]
+    # The gap at the grip the water leaves: dry (1.1 at the top) or soaked.
+    assert joined.sample({"water": 0}, {"grip": 1.0, "vehicle_ahead_gap": 0.0})["vehicle_ahead_gap"] == pytest.approx(2.0)
+    assert joined.sample({"water": 100}, {"grip": 0.0, "vehicle_ahead_gap": 0.0})["vehicle_ahead_gap"] == pytest.approx(5.0)
+    # A shared node is not replaced: redefining one is refused.
+    with pytest.raises(RulesError, match="defines grip, which the rules it adds to define"):
+        shared.extended(Rules.from_text(GRIP.replace("0.90", "0.95")))
+    # Nor an input described otherwise.
+    with_default = "version: 2\ninputs:\n  water: {default: 10}\n" + GRIP.split("version: 2\n", 1)[1]
+    with pytest.raises(RulesError, match="describes input water otherwise"):
+        Rules.from_text(with_default).extended(
+            Rules.from_text("version: 2\ninputs:\n  water: {default: 20}\n" + SCENARIO.split("version: 2\n", 1)[1])
+        )
+
+
+def test_a_backend_holds_a_scenarios_nodes(tmp_path: Path) -> None:
+    (tmp_path / "cut_in.yaml").write_text(SCENARIO)
+    backend = Backend(rules=Rules.from_text(GRIP))
+    active = backend.add_rules(tmp_path / "cut_in.yaml")
+    assert active is backend.active_rules and "vehicle_ahead_gap" in active.quantities
+    assert backend.active_rules is active  # joined once
+    # A run's rules over the shared ones keep the scenario's nodes.
+    backend.use_rules(Rules.from_text(GRIP.replace("0.90", "0.95")))
+    assert "vehicle_ahead_gap" in backend.active_rules.quantities
+    assert backend.active_rules.range("grip", {"water": 0})[0] == pytest.approx(0.95)
+    # A scenario that redefines a shared node is refused when it is added.
+    (tmp_path / "bad.yaml").write_text(GRIP)
+    with pytest.raises(RulesError, match="defines grip"):
+        backend.add_rules(tmp_path / "bad.yaml")
+    assert backend.add_rules(None).quantities == ["grip"]

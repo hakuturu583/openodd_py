@@ -229,6 +229,41 @@ class Rules:
         """
         return Rules(self._call(self._core.merged, over._core))
 
+    def extended(self, added: "Rules") -> "Rules":
+        """These rules with *added*'s nodes added: the network these rules are
+        (a backend's, which every scenario shares) and the nodes a scenario
+        adds to it. An added node may read these rules' quantities and inputs.
+
+        Unlike :meth:`merged`, nothing is replaced.
+
+        Raises:
+            RulesError: When *added* defines a quantity these rules define,
+                describes an input otherwise (its ``default``, or its
+                ``concept`` and ``unit``), or draws on another taxonomy; or
+                when the joined rules are not well formed.
+        """
+        where = ", ".join(path for path, _ in added.files) or "<rules>"
+        clash = sorted(set(self.quantities) & set(added.quantities))
+        if clash:
+            raise RulesError(
+                f"{where}: defines {', '.join(clash)}, which the rules it adds to define: "
+                "a scenario adds nodes to the shared network, it does not replace them "
+                "(give its own name; to change the shared rules, merge a file over them)"
+            )
+        ours_d, theirs_d = self.input_defaults, added.input_defaults
+        ours_c, theirs_c = self.input_concepts, added.input_concepts
+        for name in sorted(set(ours_d) & set(theirs_d)):
+            if ours_d[name] != theirs_d[name] or ours_c.get(name) != theirs_c.get(name):
+                raise RulesError(
+                    f"{where}: describes input {name} otherwise than the rules it adds to"
+                )
+        if self.taxonomy and added.taxonomy and self.taxonomy[1] != added.taxonomy[1]:
+            raise RulesError(
+                f"{where}: draws on taxonomy {added.taxonomy[0]}, and the rules it adds to "
+                f"on {self.taxonomy[0]}: one network is in one vocabulary"
+            )
+        return self.merged(added)
+
     @property
     def version(self) -> int:
         """The format's version: the newest of the files read."""
