@@ -2379,6 +2379,34 @@ impl RuleSet {
         self.inner.unclassified_inputs()
     }
 
+    /// A quantity's parts, in the order written.
+    fn parts(&self, quantity: &str) -> PyResult<Vec<String>> {
+        Ok(self
+            .inner
+            .quantity(quantity)
+            .map_err(err)?
+            .parts
+            .iter()
+            .map(|p| p.name.clone())
+            .collect())
+    }
+
+    /// A part's basis as JSON: its own, its quantity's or the file's;
+    /// `{"kind": "unstated"}` when none says.
+    fn basis(&self, quantity: &str, part: &str) -> PyResult<String> {
+        let q = self.inner.quantity(quantity).map_err(err)?;
+        if !q.parts.iter().any(|p| p.name == part) {
+            return Err(PyValueError::new_err(format!(
+                "quantity '{quantity}' has no part '{part}'"
+            )));
+        }
+        Ok(match self.inner.basis_of(quantity, part) {
+            Some(b) => b.to_json(),
+            None => serde_json::json!({"kind": crate::rules::Basis::UNSTATED}),
+        }
+        .to_string())
+    }
+
     fn source(&self, quantity: &str) -> PyResult<String> {
         Ok(self.inner.quantity(quantity).map_err(err)?.source.clone())
     }

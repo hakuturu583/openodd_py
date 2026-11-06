@@ -239,6 +239,10 @@ fn part_doc(p: &openodd::rules::Part) -> PartDoc {
                     .collect(),
             )
         },
+        basis: p
+            .basis
+            .as_ref()
+            .and_then(|b| serde_norway::to_value(b.to_json()).ok()),
     }
 }
 
@@ -449,6 +453,7 @@ pub fn add_quantity() {
             combine: None,
             parts: vec![part],
             text: String::new(),
+            basis: None,
         };
         sel = Some(RSel::Part(q.id, q.parts[0].id));
         d.quantities.push(q);

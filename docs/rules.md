@@ -38,6 +38,7 @@ quantities:
 |---|---|
 | `version` | `2` or `3` ([Inputs and the taxonomy](#inputs-and-the-taxonomy)) |
 | `taxonomy` | Version 3: the OpenODD taxonomy the inputs are concepts of -- a path, URL or git source, as `extends` takes |
+| `basis` | What the parts' values rest on ([The basis of a part](#the-basis-of-a-part)); on the file, a quantity or a part; required for every part from version 3 |
 | `inputs` | Optional: name → `default` (the value read when none is given) and `text`; from version 3 also `concept` and `unit` |
 | `quantities` | Name → a quantity: `parts`, `combine` and an optional `text` |
 | `combine` | How the parts' values are joined: `min` (the default) or `max` |
@@ -81,6 +82,7 @@ taxonomy holds vocabulary and value ranges, not what follows from them.
 ```yaml
 version: 3
 taxonomy: {git: https://github.com/tier4/taxonomy, rev: <commit>, path: taxonomy_openodd.yaml}
+basis: {kind: expert, by: Safety Strategy, date: 2026-11-06}
 inputs:
   rainfall_rate:
     concept: environment_conditions.environment_conditions.weather.rain.rainfall_rate
@@ -113,6 +115,43 @@ Version 2 files are still read. Their inputs stand for nothing the rules can
 check (`Rules.unclassified_inputs`), and reading one warns
 (`UnclassifiedInputsWarning`). A version 2 file merged over a version 3 set --
 a fit's, say -- keeps the set's version and its taxonomy.
+
+## The basis of a part
+
+A rule is not part of an ODD. It is an assumption about how faithfully a run
+renders the conditions it is given -- what rain does to the grip in this
+simulator -- and an assumption says what it rests on. `basis:` says so for a
+part:
+
+```yaml
+basis: {kind: expert, by: Safety Strategy}           # the file's: parts that say nothing
+quantities:
+  tire_friction:
+    basis: {kind: literature, reference: "ISO 8349"}  # its parts' that say nothing
+    parts:
+      rain:
+        at: {rainfall_rate: [0, 2.5, 7.6]}
+        uniform: {low: [0.9, 0.7, 0.5], high: [1.1, 0.85, 0.65]}
+        basis:                                        # its own
+          kind: fitted
+          data: {file: drives_2026q3.csv, sha256: 3f9a..., rows: 18234}
+          calibration: {in_band: 0.88, ks: 0.021}
+          by: openodd-rules-fit
+          date: 2026-11-06
+```
+
+| Field | |
+|---|---|
+| `kind` | `fitted` (estimated from data), `expert` (set by someone who knows) or `literature` (taken from a published source) |
+| `data` | `file`, `sha256`, `rows`: the data a fit was made from |
+| `calibration` | Numbers saying how well the part matches data ([How well the rules match](#how-well-the-rules-match)) |
+| `by`, `date`, `reference`, `text` | Who set it, when, from where, and anything else |
+
+A part's basis is its own, else its quantity's, else the file's. From
+version 3 every part must have one; a version 2 part with none is
+`unstated`. A merged file's `basis` replaces the one there, field by field
+as `text` does. `Rules.basis(quantity, part)` gives it as a dict,
+`Rules.bases()` every part's.
 
 ## Chains
 

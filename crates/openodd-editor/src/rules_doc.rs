@@ -56,6 +56,8 @@ pub struct PartDoc {
     /// What a fit to data holds as written (`fixed:`), kept as the file
     /// writes it.
     pub fixed: FixedDoc,
+    /// What its values rest on (`basis:`), as written.
+    pub basis: Option<Value>,
 }
 
 /// A part's `fixed:`.
@@ -100,6 +102,7 @@ impl PartDoc {
             }),
             text: String::new(),
             fixed: FixedDoc::None,
+            basis: None,
         }
     }
 
@@ -144,6 +147,7 @@ impl PartDoc {
             values: dist.params.iter().map(|p| p.values.clone()).collect(),
             text: self.text.clone(),
             fixed,
+            basis: None,
         })
     }
 
@@ -400,6 +404,8 @@ pub struct QuantityDoc {
     pub combine: Option<String>,
     pub parts: Vec<PartDoc>,
     pub text: String,
+    /// The basis of its parts that write none, as written.
+    pub basis: Option<Value>,
 }
 
 /// An input the file describes.
@@ -423,6 +429,8 @@ pub struct RulesDoc {
     pub extends: Option<Value>,
     /// The taxonomy a version 3 file names, as written.
     pub taxonomy: Option<Value>,
+    /// The basis of the parts that, with their quantities, write none.
+    pub basis: Option<Value>,
     pub inputs: Vec<InputDoc>,
     pub quantities: Vec<QuantityDoc>,
 }
@@ -512,6 +520,7 @@ impl RulesDoc {
                 },
                 "extends" => doc.extends = Some(v.clone()),
                 "taxonomy" => doc.taxonomy = Some(v.clone()),
+                "basis" => doc.basis = Some(v.clone()),
                 "inputs" => {
                     for (n, i) in mapping(v, "inputs")? {
                         let n = key(n)?;
@@ -562,6 +571,7 @@ impl RulesDoc {
     pub fn to_yaml(&self) -> Result<String, String> {
         let mut out = format!("version: {}\n", self.version.unwrap_or(2));
         for (key, value) in [("extends", &self.extends), ("taxonomy", &self.taxonomy)] {
+            // (the basis is written after them, in flow style)
             if let Some(v) = value {
                 let mut m = Mapping::new();
                 m.insert(Value::String(key.into()), v.clone());
@@ -569,6 +579,9 @@ impl RulesDoc {
                     &serde_norway::to_string(&Value::Mapping(m)).map_err(|e| e.to_string())?,
                 );
             }
+        }
+        if let Some(b) = &self.basis {
+            out.push_str(&format!("basis: {}\n", flow(b)?));
         }
         if !self.inputs.is_empty() {
             out.push_str("inputs:\n");
@@ -606,6 +619,9 @@ impl RulesDoc {
             if let Some(c) = &q.combine {
                 out.push_str(&format!("    combine: {}\n", scalar(c)));
             }
+            if let Some(b) = &q.basis {
+                out.push_str(&format!("    basis: {}\n", flow(b)?));
+            }
             if q.parts.is_empty() {
                 out.push_str("    parts: {}\n");
                 continue;
@@ -617,6 +633,7 @@ impl RulesDoc {
                     && p.dist.is_none()
                     && p.text.is_empty()
                     && p.fixed == FixedDoc::None
+                    && p.basis.is_none()
                 {
                     out.push_str("        {}\n");
                 }
@@ -629,6 +646,9 @@ impl RulesDoc {
                         .map(|a| format!("{}: {}", scalar(&a.input), list(&a.points)))
                         .collect();
                     out.push_str(&format!("        at: {{{}}}\n", at.join(", ")));
+                }
+                if let Some(b) = &p.basis {
+                    out.push_str(&format!("        basis: {}\n", flow(b)?));
                 }
                 match &p.fixed {
                     FixedDoc::None => {}
@@ -690,11 +710,13 @@ fn read_quantity(name: &str, v: &Value) -> Result<QuantityDoc, String> {
         combine: None,
         parts: vec![],
         text: String::new(),
+        basis: None,
     };
     for (k, v) in mapping(v, &at)? {
         match key(k)?.as_str() {
             "combine" => q.combine = Some(text_of(v)),
             "text" => q.text = text_of(v),
+            "basis" => q.basis = Some(v.clone()),
             "parts" => {
                 for (pn, p) in mapping(v, &format!("{at}.parts"))? {
                     let pn = key(pn)?;
@@ -722,6 +744,7 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
         dist: None,
         text: String::new(),
         fixed: FixedDoc::None,
+        basis: None,
     };
     let mut raw_dist: Option<(Family, &Value)> = None;
     for (k, v) in m {
@@ -752,6 +775,7 @@ fn read_part(name: &str, v: &Value, at: &str) -> Result<PartDoc, String> {
                 p.axes = Some(axes);
             }
             "text" => p.text = text_of(v),
+            "basis" => p.basis = Some(v.clone()),
             "fixed" => {
                 p.fixed = match v {
                     Value::Bool(true) => FixedDoc::All,
@@ -1040,6 +1064,11 @@ pub fn values_at(set: &RuleSet, quantity: &str, probe: &[(String, f64)]) -> Inde
         out.insert(name, v);
     }
     out
+}
+
+/// A value on one line, as YAML's flow style (JSON is that).
+fn flow(v: &Value) -> Result<String, String> {
+    serde_json::to_string(v).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1493,6 +1522,7 @@ mod tests {
             combine: None,
             parts: vec![p],
             text: String::new(),
+            basis: None,
         });
         assert!(check(&doc.to_yaml().unwrap(), "q.yaml", &[]).is_ok());
     }
@@ -1537,6 +1567,25 @@ mod tests {
         );
         assert!(
             out.contains("rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}"),
+            "{out}"
+        );
+        assert_eq!(RulesDoc::from_yaml(&out).unwrap().to_yaml().unwrap(), out);
+    }
+
+    #[test]
+    fn bases_are_kept_where_they_are_written() {
+        let text = "version: 3\ntaxonomy: t.yaml\nbasis: {kind: expert, by: me}\nquantities:\n  grip:\n    basis: {kind: literature}\n    parts:\n      rain:\n        basis: {kind: fitted, data: {rows: 3}}\n        at: {r: [0, 10]}\n        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n";
+        let out = RulesDoc::from_yaml(text).unwrap().to_yaml().unwrap();
+        assert!(
+            out.contains("\nbasis: {\"kind\":\"expert\",\"by\":\"me\"}\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("    basis: {\"kind\":\"literature\"}\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("        basis: {\"kind\":\"fitted\",\"data\":{\"rows\":3}}\n"),
             "{out}"
         );
         assert_eq!(RulesDoc::from_yaml(&out).unwrap().to_yaml().unwrap(), out);
