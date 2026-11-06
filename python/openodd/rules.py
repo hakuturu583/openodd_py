@@ -290,12 +290,16 @@ class Rules:
         out: dict[str, float] = {}
         for k, v in inputs.items():
             name = str(k)
-            if name in labels and isinstance(v, str):
+            if name in labels and not (isinstance(v, (int, float)) and not isinstance(v, bool)):
+                from .items import value_label  # noqa: PLC0415 - items imports this module's peers
+
+                # A label as the core writes it: a bool in lowercase, an enum by name.
+                label = value_label(v)
                 try:
-                    out[name] = float(labels[name].index(v))
+                    out[name] = float(labels[name].index(label))
                 except ValueError:
                     raise RulesError(
-                        f"{name} is {v!r}, not one of its labels {', '.join(labels[name])}"
+                        f"{name} is {label!r}, not one of its labels {', '.join(labels[name])}"
                     ) from None
             else:
                 out[name] = float(v)

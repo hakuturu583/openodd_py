@@ -2743,8 +2743,9 @@ fn cell(v: &Bound<'_, PyAny>) -> crate::rules_fit::Cell {
     use crate::rules_fit::Cell;
     if v.is_none() {
         Cell::Missing
-    } else if v.is_instance_of::<pyo3::types::PyBool>() {
-        Cell::Other(v.to_string())
+    } else if let Ok(b) = v.downcast::<pyo3::types::PyBool>() {
+        // As the core writes a boolean literal (`true`), so it matches one.
+        Cell::Other(if b.is_true() { "true" } else { "false" }.into())
     } else if let Ok(s) = v.extract::<String>() {
         Cell::Text(s)
     } else if let Ok(x) = v.extract::<f64>() {

@@ -670,3 +670,17 @@ def test_a_backend_reads_a_categorical_input_at_its_label() -> None:
     backend = Backend(rules=Rules.from_text(SUN))
     assert backend.derived_range("sun_altitude", {"time_of_day": "night"}) == (-30.0, -6.0)
     assert backend.derived_at("sun_altitude", {"time_of_day": "dusk"}, 0.5) == pytest.approx(-3.0)
+
+
+def test_a_boolean_categorical_input_reads_python_booleans() -> None:
+    """Labels `[true, false]`: a Python bool is the literal the core writes."""
+    rules = Rules.from_text(
+        "version: 2\ninputs:\n  wet: {labels: [false, true]}\nquantities:\n  grip:\n    parts:\n"
+        "      p:\n        at: {wet: [false, true]}\n        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n"
+    )
+    assert rules.input_labels == {"wet": ["false", "true"]}
+    assert rules.range("grip", {"wet": True}) == (0.5, 0.7)
+    rows = [{"wet": False, "grip": 1.0 + 0.001 * i} for i in range(10)]
+    rows += [{"wet": True, "grip": 0.6 + 0.001 * i} for i in range(10)]
+    fit = rules.fit(rows)
+    assert fit.rules.range("grip", {"wet": False})[0] > 0.95
