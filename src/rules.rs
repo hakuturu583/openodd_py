@@ -1464,14 +1464,33 @@ impl RuleSet {
         Ok(set)
     }
 
-    /// The references a rule file's `text` extends, each as the origin it
-    /// names from `origin`: what a host fetches ahead ([`Given`]).
+    /// The files a rule file's `text` reads, each as the origin it names
+    /// from `origin`: what a host fetches ahead ([`Given`]) -- the rule
+    /// files it extends ([`RuleSet::extends_references`]), then its taxonomy
+    /// ([`RuleSet::taxonomy_reference`]).
     pub fn references(text: &str, source: &str, origin: &Origin) -> Result<Vec<Origin>> {
+        let mut refs = Self::extends_references(text, source, origin)?;
+        refs.extend(Self::taxonomy_reference(text, source, origin)?);
+        Ok(refs)
+    }
+
+    /// The rule files a rule file's `text` extends: each a rule file in
+    /// turn, whose own references a host follows.
+    pub fn extends_references(text: &str, source: &str, origin: &Origin) -> Result<Vec<Origin>> {
         let doc = document(text, source)?;
-        let at = Where::new(source);
-        let mut refs = extends_of(&doc, &at)?;
-        refs.extend(taxonomy_of(&doc, &at)?);
-        refs.iter().map(|r| origin.of(r)).collect()
+        extends_of(&doc, &Where::new(source))?
+            .iter()
+            .map(|r| origin.of(r))
+            .collect()
+    }
+
+    /// The taxonomy a rule file's `text` names: an OpenODD file, not a rule
+    /// file, so a host fetches it and goes no further.
+    pub fn taxonomy_reference(text: &str, source: &str, origin: &Origin) -> Result<Option<Origin>> {
+        let doc = document(text, source)?;
+        taxonomy_of(&doc, &Where::new(source))?
+            .map(|r| origin.of(&r))
+            .transpose()
     }
 
     fn from_doc(doc: Node, source: &str, taxonomy: Option<Taxonomy>) -> Result<Self> {
@@ -3607,6 +3626,16 @@ quantities:
         assert_eq!(
             refs.iter().map(Origin::label).collect::<Vec<_>>(),
             [TAXONOMY_URL]
+        );
+        // apart from the rule files extended, which a host follows in turn
+        assert!(RuleSet::extends_references(V3, "x.yaml", &Origin::Text)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            RuleSet::taxonomy_reference(V3, "x.yaml", &Origin::Text)
+                .unwrap()
+                .map(|o| o.label()),
+            Some(TAXONOMY_URL.to_string())
         );
     }
 

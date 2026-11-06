@@ -229,6 +229,20 @@ fn a_file_extending_others_reads_them_from_what_the_page_fetched() {
     let refs: Vec<String> =
         serde_json::from_str(&RulesView::references(child, source).unwrap()).unwrap();
     assert_eq!(refs, vec!["https://example.com/rules/sample_rules.yaml"]);
+    assert_eq!(
+        RulesView::taxonomy_reference(child, source).unwrap(),
+        "null"
+    );
+    // A version 3 file's taxonomy is fetched apart, and not followed as a rule file.
+    let v3 =
+        "version: 3\nextends: ../sample_rules.yaml\ntaxonomy: ../taxonomy.yaml\nquantities: {}\n";
+    let refs: Vec<String> =
+        serde_json::from_str(&RulesView::references(v3, source).unwrap()).unwrap();
+    assert_eq!(refs, vec!["https://example.com/rules/sample_rules.yaml"]);
+    assert_eq!(
+        RulesView::taxonomy_reference(v3, source).unwrap(),
+        "\"https://example.com/rules/taxonomy.yaml\""
+    );
     let files =
         serde_json::json!({ "https://example.com/rules/sample_rules.yaml": SAMPLE }).to_string();
     let v = RulesView::from_files(child, source, &files).unwrap();
