@@ -18,6 +18,7 @@ follows from them. They sit beside the ODD and its taxonomy, not in them:
 | **ODD** | Which values of that vocabulary a system is designed for | OpenODD modules over the taxonomy |
 | **Rules: causes** | The inputs the rules are given: conditions of the taxonomy, in its vocabulary and value ranges | `inputs:` with a `concept` ([Inputs and the taxonomy](#inputs-and-the-taxonomy)) |
 | **Rules: effects** | What the causes do -- the road's grip, how far drivers see -- and the simulator's own settings: never in the taxonomy | `quantities:` |
+| **Scenario parameters** | What a scenario sets up -- the gap to a vehicle about to cut in, how far ahead a pedestrian sets off: measured and covered, but no condition of the domain | a binding file's `parameters:` ([Scenario parameters](#scenario-parameters)) |
 | **Rules: distributions** | How the effects are spread given the causes: an **assumption about how faithfully the simulator renders the conditions**, not part of the ODD | each part, with its `basis` ([The basis of a part](#the-basis-of-a-part)) |
 
 Why so:
@@ -145,6 +146,34 @@ Version 2 files are still read. Their inputs stand for nothing the rules can
 check (`Rules.unclassified_inputs`), and reading one warns
 (`UnclassifiedInputsWarning`). A version 2 file merged over a version 3 set --
 a fit's, say -- keeps the set's version and its taxonomy.
+
+## Scenario parameters
+
+Some values a run measures are set up by the scenario, not given by the
+domain: the gap to a vehicle about to cut in, its speed relative to the
+ego, how far ahead a crossing pedestrian sets off. They are neither the
+taxonomy's vocabulary nor a condition an ODD restricts -- how they are
+spread is the scenario's, and the rules' -- yet a campaign still measures
+them, covers their buckets, and draws them. A binding file declares them
+under `parameters:`, each with its OpenODD `type` and how it is measured:
+
+```yaml
+openodd: [taxonomy.yaml]
+probes:
+  ...
+parameters:
+  scenario.vehicle_ahead_gap:
+    type: float length          # a number's type, boolean, or a list of literals
+    measure: vehicle_ahead_gap_m
+    buckets: [0, 10, 20, 30, 50, 100]
+    min_stay: 1
+```
+
+A parameter is an attribute like any other for probes, coverage, the sampler
+and knobs (`OddAttribute.parameter` is true). It stands for no concept:
+a name the taxonomy declares is refused, a module's condition naming one is
+refused, and `openodd-taxonomy-check` does not look for it in the reference.
+`load_openodd(..., parameters={...})` takes the same mapping.
 
 ## The basis of a part
 

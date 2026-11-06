@@ -117,8 +117,9 @@ class TaxonomyCheck:
 
 
 def _declared(odd: OddDefinition) -> dict[str, dict[str, Any]]:
-    """Concept -> what the taxonomy of *odd* declares it to be."""
-    return {a.name: a.concept for a in odd.attributes}
+    """Concept -> what the taxonomy of *odd* declares it to be (a scenario
+    parameter is no concept of it)."""
+    return {a.name: a.concept for a in odd.attributes if not a.parameter}
 
 
 def _compare(name: str, ours: Mapping[str, Any], theirs: Mapping[str, Any]) -> Optional[str]:

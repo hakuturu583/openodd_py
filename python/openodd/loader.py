@@ -102,6 +102,11 @@ def load_odd_binding(
             min_stay: 2                      # optional
         situations:
           close_cut_in: {target: 1}
+        parameters:                          # what a scenario sets up: no
+          scenario.lead_gap:                 # taxonomy concept, and no
+            type: float length               # condition may name it
+            measure: vehicle_ahead_gap_m
+            buckets: [0, 10, 20, 30]
     """
     backend = backend or default_backend()
     return _wrap(_core.load_binding(Path(path), backend), backend)
@@ -122,6 +127,7 @@ def load_openodd(
     name: Optional[str] = None,
     text: str = "",
     situations: Optional[Mapping[str, Any]] = None,
+    parameters: Optional[Mapping[str, Any]] = None,
     backend: Optional[Backend] = None,
 ) -> OddDefinition:
     """Read an ODD from OpenODD YAML files or text.
@@ -133,6 +139,9 @@ def load_openodd(
         name: The ODD's name; the first file's stem by default.
         text: A description for the report.
         situations: Module -> its criteria: the modules to cover as situations.
+        parameters: Scenario parameter -> its ``type`` and how to measure it
+            (a binding file's ``parameters``): attributes that stand for no
+            taxonomy concept.
         backend: Whose probes the bindings name (the default backend if none).
     """
     if not sources:
@@ -153,6 +162,7 @@ def load_openodd(
         name=name,
         text=text,
         situations=None if situations is None else json.dumps(_plain(situations)),
+        parameters=None if parameters is None else json.dumps(_plain(parameters)),
     )
     return _wrap(core, backend)
 
