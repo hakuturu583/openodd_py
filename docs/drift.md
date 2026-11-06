@@ -123,6 +123,18 @@ The fit is **not** trusted, and the view says why, when:
 
 In the last two cases, no constant offset and scale can fix the knob.
 
+**A knob that takes its value from the rules** (`OddKnob(quantity=...)`,
+[rules.md](rules.md#knobs-from-the-rules)) is corrected in the rules, not in
+its scale and offset: for a drawn `x` its quantity should now give what it
+gives at `(x − b) / a`, so each part reading the attribute's input has its
+points moved from `p` to `a·p + b`, its distributions as they are.
+`CasePlot.drift_rules(rules, {attribute: quantity})` writes that as a rule
+file over the rules, each moved part with a `basis` of kind `fitted` (the
+runs, R², σ); `openodd-coverage --drift-rules FILE --rules RULES
+--knob-quantity ATTRIBUTE=QUANTITY` writes it to `FILE`, extending `RULES`.
+Use it with `Backend.use_rules(FILE)`, or merge it in. Nothing is written
+when the fit suggests nothing, and a fit with a negative slope is refused.
+
 **Calibrated.** A fit that stays within `max(2σ, 5% of the bucket width)`
 of `measured = drawn` over the drawn range needs no correction
 (`NEGLIGIBLE`).
