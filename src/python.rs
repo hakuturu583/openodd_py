@@ -1086,6 +1086,14 @@ fn load_binding(path: PathBuf, resolver: PyObject) -> PyResult<Odd> {
         .map_err(err)
 }
 
+/// The ODD a file declares, measured by nothing (`loader::load_declared`).
+#[pyfunction]
+fn load_declared(path: PathBuf, resolver: PyObject) -> PyResult<Odd> {
+    loader::load_declared(&path, &PyResolver(resolver))
+        .map(Odd::from_loaded)
+        .map_err(err)
+}
+
 #[pyfunction]
 fn load_file(path: PathBuf, resolver: PyObject) -> PyResult<Odd> {
     loader::load_file(&path, &PyResolver(resolver))
@@ -2796,6 +2804,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(module_holds, m)?,
         wrap_pyfunction!(load_binding, m)?,
         wrap_pyfunction!(load_file, m)?,
+        wrap_pyfunction!(load_declared, m)?,
         wrap_pyfunction!(load_openodd, m)?,
         wrap_pyfunction!(load_archive, m)?,
         wrap_pyfunction!(archive_manifest, m)?,

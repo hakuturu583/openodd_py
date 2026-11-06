@@ -34,7 +34,7 @@ from typing import Any, Optional, Union
 
 from . import _core
 from .backend import Backend
-from .loader import load_odd_file, load_openodd
+from .loader import _wrap, load_openodd
 from .model import OddDefinition
 from .rules import Rules, RulesError, fetch_url
 
@@ -168,7 +168,10 @@ def check_taxonomy(
     theirs = _declared(ref)
     findings: list[Finding] = []
     for path in odds:
-        odd = load_odd_file(Path(path), backend=_AnyProbe(name="check"))
+        # What it declares, measured by nothing: a binding's units are its
+        # backend's to say, and no backend is here.
+        backend = _AnyProbe(name="check")
+        odd = _wrap(_core.load_declared(Path(path), backend), backend)
         for name, ours in _declared(odd).items():
             if ours.get("kind") == "other":
                 continue

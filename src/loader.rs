@@ -2251,6 +2251,26 @@ pub fn load_binding(path: &Path, resolver: &dyn Resolver) -> Result<Loaded> {
     load_file_with(&Files::Disk, path, resolver, true)
 }
 
+/// The ODD a `.yaml` file declares, measured by nothing: an OpenODD document
+/// on its own, or a binding file's OpenODD files without its probes -- what
+/// a check of its concepts reads, needing no backend to say the probes'
+/// units.
+pub fn load_declared(path: &Path, resolver: &dyn Resolver) -> Result<Loaded> {
+    let files = Files::Disk;
+    let path = files.resolve(path);
+    let data = files.read(&path)?;
+    let docs = parse_all(&String::from_utf8_lossy(&data))?;
+    if docs.len() == 1 && docs[0].is_mapping() && docs[0].has("openodd") {
+        let sources = binding_sources(&path, &docs[0])?;
+        let options = Options {
+            name: Some(stem(&path)),
+            ..Default::default()
+        };
+        return load_with(&files, &sources, &options, resolver, Some(file_name(&path)));
+    }
+    load_file_with(&files, &path, resolver, false)
+}
+
 /// Read a `.yaml` ODD file: a binding file, or an OpenODD document on its own
 /// (read with no probes, so nothing is measured).
 pub fn load_file(path: &Path, resolver: &dyn Resolver) -> Result<Loaded> {
