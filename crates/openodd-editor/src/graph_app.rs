@@ -468,6 +468,8 @@ fn add_input() {
             name: name.clone(),
             default: None,
             text: String::new(),
+            concept: None,
+            unit: String::new(),
         });
     });
     gctx().sel.set(Some(GSel::Node(NodeKey::Input(name))));
@@ -930,6 +932,8 @@ fn InputCard(name: String) -> impl IntoView {
                 name: n.to_string(),
                 default: None,
                 text: String::new(),
+                concept: None,
+                unit: String::new(),
             });
         }
     };

@@ -595,6 +595,8 @@ fn FileView() -> impl IntoView {
                 name: unique("input", &taken),
                 default: None,
                 text: String::new(),
+                concept: None,
+                unit: String::new(),
             });
         })
     };

@@ -71,6 +71,7 @@ import json
 import os
 import sys
 import urllib.request
+import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,6 +86,7 @@ __all__ = [
     "Rules",
     "RulesError",
     "RulesFit",
+    "UnclassifiedInputsWarning",
     "fetch_url",
     "read_data",
     "read_rows",
@@ -112,6 +114,11 @@ def fetch_url(url: str) -> str:
     if len(data) > MAX_URL_BYTES:
         raise RulesError(f"cannot read rules {url}: larger than {MAX_URL_BYTES} bytes")
     return data.decode("utf-8")
+
+
+class UnclassifiedInputsWarning(UserWarning):
+    """Rules read inputs that stand for no taxonomy concept (a version 2 file):
+    their causes cannot be traced to an ODD's vocabulary."""
 
 
 class RulesError(ValueError):
@@ -142,7 +149,7 @@ class Rules:
                 or are not well formed.
         """
         where = None if base is None else str(base)
-        return cls(cls._call(_core.RuleSet.parse, text, source, where, fetch or fetch_url))
+        return cls._read(cls._call(_core.RuleSet.parse, text, source, where, fetch or fetch_url))
 
     @classmethod
     def read(
@@ -161,7 +168,21 @@ class Rules:
         where = str(location)
         if not where.startswith(("https://", "http://")):
             where = str(Path(where))
-        return cls(cls._call(_core.RuleSet.load, where, fetch or fetch_url))
+        return cls._read(cls._call(_core.RuleSet.load, where, fetch or fetch_url))
+
+    @classmethod
+    def _read(cls, core: "_core.RuleSet") -> "Rules":
+        rules = cls(core)
+        unclassified = rules.unclassified_inputs
+        if unclassified:
+            warnings.warn(
+                f"{rules.files[-1][0] if rules.files else '<rules>'}: version {rules.version} rules "
+                f"read inputs that stand for no taxonomy concept ({', '.join(unclassified)}); "
+                "version 3 names each input's concept (docs/rules.md, \"Inputs and the taxonomy\")",
+                UnclassifiedInputsWarning,
+                stacklevel=3,
+            )
+        return rules
 
     def read_over(
         self,
@@ -205,6 +226,28 @@ class Rules:
             RulesError: When the merged rules are not well formed.
         """
         return Rules(self._call(self._core.merged, over._core))
+
+    @property
+    def version(self) -> int:
+        """The format's version: the newest of the files read."""
+        return self._core.version
+
+    @property
+    def taxonomy(self) -> Optional[tuple[str, str]]:
+        """``(path or URL, sha256)`` of the taxonomy a version 3 set names."""
+        return self._core.taxonomy
+
+    @property
+    def input_concepts(self) -> dict[str, tuple[str, str]]:
+        """Input -> ``(concept, unit)``: the taxonomy concept each input
+        stands for (version 3), and the unit its points are written in."""
+        return dict(self._core.input_concepts())
+
+    @property
+    def unclassified_inputs(self) -> list[str]:
+        """The inputs the parts read that stand for no taxonomy concept: those
+        of a version 2 set (version 3 refuses them)."""
+        return list(self._core.unclassified_inputs())
 
     @property
     def files(self) -> list[tuple[str, str]]:

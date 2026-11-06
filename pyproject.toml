@@ -41,3 +41,5 @@ exclude = [{ path = "examples/**", format = "sdist" }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Most tests read version 2 rules; tests/test_rules.py checks the warning itself.
+filterwarnings = ["ignore::openodd.rules.UnclassifiedInputsWarning"]

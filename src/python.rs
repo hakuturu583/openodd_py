@@ -2348,6 +2348,37 @@ impl RuleSet {
             .collect()
     }
 
+    #[getter]
+    fn version(&self) -> i64 {
+        self.inner.version
+    }
+
+    /// `(label, sha256)` of the taxonomy a version 3 set names.
+    #[getter]
+    fn taxonomy(&self) -> Option<(String, String)> {
+        self.inner
+            .taxonomy
+            .as_ref()
+            .map(|t| (t.label.clone(), t.sha256.clone()))
+    }
+
+    /// Input -> `(concept, unit)`, for the inputs that name a concept.
+    fn input_concepts(&self) -> indexmap::IndexMap<String, (String, String)> {
+        self.inner
+            .inputs
+            .iter()
+            .filter_map(|(n, i)| {
+                i.concept
+                    .as_ref()
+                    .map(|c| (n.clone(), (c.clone(), i.unit.clone())))
+            })
+            .collect()
+    }
+
+    fn unclassified_inputs(&self) -> Vec<String> {
+        self.inner.unclassified_inputs()
+    }
+
     fn source(&self, quantity: &str) -> PyResult<String> {
         Ok(self.inner.quantity(quantity).map_err(err)?.source.clone())
     }

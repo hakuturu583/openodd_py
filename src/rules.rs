@@ -50,8 +50,15 @@ use crate::sources::GitSource;
 use crate::value::py_float_repr;
 use crate::yaml::{parse_all, Node, NodeExt};
 
-/// The version of the rule file format this reads.
-pub const VERSION: i64 = 2;
+/// The newest version of the rule file format this reads.
+///
+/// Version 3 ties the rules to a taxonomy: each input a part reads stands for
+/// one of its concepts, and a quantity -- an effect the rules work out -- for
+/// none ([`RuleSet::from_doc`]). Version 2 files are still read; their
+/// inputs are unclassified ([`RuleSet::unclassified_inputs`]).
+pub const VERSION: i64 = 3;
+/// The oldest version read.
+pub const OLDEST_VERSION: i64 = 2;
 /// The deepest a chain of `extends` may go.
 pub const MAX_EXTENDS_DEPTH: usize = 32;
 /// The most points a part may write: the product of its inputs' points.
@@ -946,12 +953,47 @@ impl Combine {
     }
 }
 
-/// An input a rule file describes: the value it reads when none is given.
+/// An input a rule file describes: the value it reads when none is given,
+/// and, from version 3, the taxonomy concept it stands for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputInfo {
     pub name: String,
     pub default: Option<f64>,
     pub text: String,
+    /// The taxonomy concept whose value the input is (version 3).
+    pub concept: Option<String>,
+    /// The unit its points and its default are written in (`""`: the
+    /// concept's own).
+    pub unit: String,
+}
+
+/// The taxonomy a version 3 rule file names: the concepts its inputs may be.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Taxonomy {
+    /// Where it was read from.
+    pub label: String,
+    pub sha256: String,
+    /// Each concept the taxonomy declares, and what it is.
+    pub concepts: IndexMap<String, crate::model::ConceptKind>,
+}
+
+impl Taxonomy {
+    /// The taxonomy of an OpenODD file's `text`.
+    pub fn parse(text: &str, label: &str) -> Result<Self> {
+        use crate::loader::{load_openodd, AnyProbe, Options, Source};
+        let loaded = load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe)
+            .map_err(|e| Error::value(format!("{label}: {e}")))?;
+        Ok(Taxonomy {
+            label: label.to_string(),
+            sha256: hex::encode(Sha256::digest(text.as_bytes())),
+            concepts: loaded
+                .odd
+                .attributes
+                .iter()
+                .map(|a| (a.name.clone(), a.concept.clone()))
+                .collect(),
+        })
+    }
 }
 
 /// A quantity: parts whose values at one quantile `combine` joins.
@@ -1288,6 +1330,10 @@ pub struct RuleSet {
     pub inputs: IndexMap<String, InputInfo>,
     /// Every file read, the files extended before those extending them.
     pub files: Vec<FileRead>,
+    /// The format's version: the newest of the files read.
+    pub version: i64,
+    /// The taxonomy its inputs' concepts are in (version 3).
+    pub taxonomy: Option<Taxonomy>,
     /// The rules as one document, every `extends` worked in: what a later
     /// set merges over ([`RuleSet::merged`]).
     doc: Node,
@@ -1320,8 +1366,17 @@ impl RuleSet {
         fetch: &mut dyn Fetch,
     ) -> Result<Self> {
         let mut files = Vec::new();
-        let doc = compose(text, source, origin, fetch, &mut Vec::new(), &mut files)?;
-        let mut set = Self::from_doc(doc, source)?;
+        let mut taxonomy = None;
+        let doc = compose(
+            text,
+            source,
+            origin,
+            fetch,
+            &mut Vec::new(),
+            &mut files,
+            &mut taxonomy,
+        )?;
+        let mut set = Self::from_doc(doc, source, taxonomy)?;
         set.files = files;
         Ok(set)
     }
@@ -1344,7 +1399,16 @@ impl RuleSet {
         fetch: &mut dyn Fetch,
     ) -> Result<Self> {
         let mut files = Vec::new();
-        let over = compose(text, source, origin, fetch, &mut Vec::new(), &mut files)?;
+        let mut taxonomy = None;
+        let over = compose(
+            text,
+            source,
+            origin,
+            fetch,
+            &mut Vec::new(),
+            &mut files,
+            &mut taxonomy,
+        )?;
         let touched: Vec<String> = over
             .get("quantities")
             .and_then(Node::as_mapping)
@@ -1352,7 +1416,7 @@ impl RuleSet {
             .unwrap_or_default();
         let mut doc = self.doc.clone();
         merge_doc(&mut doc, &over);
-        let mut set = Self::from_doc(doc, source)?;
+        let mut set = Self::from_doc(doc, source, taxonomy.or_else(|| self.taxonomy.clone()))?;
         for (name, q) in &mut set.quantities {
             if !touched.contains(name) {
                 if let Some(mine) = self.quantities.get(name) {
@@ -1368,21 +1432,27 @@ impl RuleSet {
     /// names from `origin`: what a host fetches ahead ([`Given`]).
     pub fn references(text: &str, source: &str, origin: &Origin) -> Result<Vec<Origin>> {
         let doc = document(text, source)?;
-        extends_of(&doc, &Where::new(source))?
-            .iter()
-            .map(|r| origin.of(r))
-            .collect()
+        let at = Where::new(source);
+        let mut refs = extends_of(&doc, &at)?;
+        refs.extend(taxonomy_of(&doc, &at)?);
+        refs.iter().map(|r| origin.of(r)).collect()
     }
 
-    fn from_doc(doc: Node, source: &str) -> Result<Self> {
+    fn from_doc(doc: Node, source: &str, taxonomy: Option<Taxonomy>) -> Result<Self> {
         let at = Where::new(source);
         let map = mapping(&doc, &at, &["version", "inputs", "quantities"])?;
+        let version = get(map, "version")
+            .and_then(Node::as_i64)
+            .unwrap_or(OLDEST_VERSION);
         let mut inputs = IndexMap::new();
         if let Some(raw) = get(map, "inputs") {
             let at = at.key("inputs");
             for (name, entry) in mapping(raw, &at, &[])? {
                 let name = node_name(name, &at)?;
-                inputs.insert(name.clone(), read_input(&name, entry, &at.key(&name))?);
+                inputs.insert(
+                    name.clone(),
+                    read_input(&name, entry, version, &at.key(&name))?,
+                );
             }
         }
         let at = at.key("quantities");
@@ -1401,13 +1471,79 @@ impl RuleSet {
             }
         }
         let order = order_of(&out, &Where::new(source).key("quantities"))?;
-        Ok(RuleSet {
+        let set = RuleSet {
             quantities: out,
             inputs,
             files: Vec::new(),
+            version,
+            taxonomy,
             doc,
             order,
-        })
+        };
+        if version >= 3 {
+            set.check_concepts(source)?;
+        }
+        Ok(set)
+    }
+
+    /// Version 3's roles: every input a part reads stands for a concept of
+    /// the taxonomy -- a cause the rules are given -- and the quantities are
+    /// the effects they work out.
+    fn check_concepts(&self, source: &str) -> Result<()> {
+        let at = Where::new(source);
+        let Some(taxonomy) = &self.taxonomy else {
+            return Err(at.error(
+                "version 3 names the taxonomy its inputs are concepts of: taxonomy: <path, URL or git source>",
+            ));
+        };
+        for name in self.free_inputs() {
+            let concept = self.inputs.get(&name).and_then(|i| i.concept.as_deref());
+            let Some(concept) = concept else {
+                return Err(at.key("inputs").key(&name).error(format!(
+                    "'{name}' is read by a part but stands for no taxonomy concept: give it \
+                     `concept:` (and add the concept to the taxonomy if it has none), or make it \
+                     a quantity the rules work out"
+                )));
+            };
+            let at = at.key("inputs").key(&name).key("concept");
+            let Some(kind) = taxonomy.concepts.get(concept) else {
+                return Err(at.error(format!(
+                    "'{concept}' is not a concept of the taxonomy {}",
+                    taxonomy.label
+                )));
+            };
+            let crate::model::ConceptKind::Number { unit_type, .. } = kind else {
+                return Err(at.error(format!(
+                    "'{concept}' is not a number in {}: a part's points are numbers, so an input \
+                     stands for a numeric concept",
+                    taxonomy.label
+                )));
+            };
+            let unit = &self.inputs[&name].unit;
+            if !unit.is_empty() {
+                crate::units::Units::new()
+                    .check_type(unit, unit_type)
+                    .map_err(|e| {
+                        Where::new(source)
+                            .key("inputs")
+                            .key(&name)
+                            .key("unit")
+                            .error(e.to_string())
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The inputs the parts read that stand for no taxonomy concept: every
+    /// free input of a version 2 file, none of a version 3 one (it refuses
+    /// them).
+    pub fn unclassified_inputs(&self) -> Vec<String> {
+        if self.version >= 3 {
+            Vec::new()
+        } else {
+            self.free_inputs()
+        }
     }
 
     /// The quantities, each after the quantities its parts read.
@@ -1505,7 +1641,8 @@ impl RuleSet {
             .unwrap_or_else(|| "<rules>".into());
         let mut doc = self.doc.clone();
         merge_doc(&mut doc, &over.doc);
-        let mut set = Self::from_doc(doc, &source)?;
+        let taxonomy = over.taxonomy.clone().or_else(|| self.taxonomy.clone());
+        let mut set = Self::from_doc(doc, &source, taxonomy)?;
         // Quantities over did not touch keep where they came from.
         for (name, q) in &mut set.quantities {
             if !over.quantities.contains_key(name) {
@@ -1639,15 +1776,22 @@ fn document(text: &str, source: &str) -> Result<Node> {
     doc.apply_merge()
         .map_err(|e| Error::value(format!("{source}: {e}")))?;
     let at = Where::new(source);
-    let map = mapping(&doc, &at, &["version", "extends", "inputs", "quantities"])?;
+    let map = mapping(
+        &doc,
+        &at,
+        &["version", "extends", "taxonomy", "inputs", "quantities"],
+    )?;
     match get(map, "version").and_then(Node::as_i64) {
-        Some(VERSION) => Ok(doc),
+        Some(2) if get(map, "taxonomy").is_some() => Err(at.key("taxonomy").error(
+            "a taxonomy is named from version 3, which ties each input to one of its concepts",
+        )),
+        Some(OLDEST_VERSION..=VERSION) => Ok(doc),
         Some(1) => Err(at.error(
             "version 1 (fuzzy rules) is no longer read: write each rule base as a part, its rules as \
              the values at its inputs' points (docs/rules.md, \"From version 1\")",
         )),
         _ => Err(at.error(format!(
-            "version must be {VERSION}, got {}",
+            "version must be {OLDEST_VERSION} to {VERSION}, got {}",
             get(map, "version")
                 .map(NodeExt::py_repr)
                 .unwrap_or("None".into())
@@ -1667,8 +1811,24 @@ fn extends_of(doc: &Node, at: &Where) -> Result<Vec<Reference>> {
     };
     let mut out = Vec::new();
     for (k, item) in items.into_iter().enumerate() {
-        let at = at.index(k);
-        out.push(match untag(item) {
+        out.push(reference_of(item, &at.index(k))?);
+    }
+    Ok(out)
+}
+
+/// The taxonomy a document names, if it names one.
+fn taxonomy_of(doc: &Node, at: &Where) -> Result<Option<Reference>> {
+    doc.get("taxonomy")
+        .map(|raw| reference_of(raw, &at.key("taxonomy")))
+        .transpose()
+}
+
+/// One reference to another file: a path, an `https://` URL, `{url,
+/// sha256}` or `{git, rev, path}`.
+fn reference_of(item: &Node, at: &Where) -> Result<Reference> {
+    {
+        let at = at.clone();
+        Ok(match untag(item) {
             Node::String(s) if s.starts_with("https://") => Reference::Url {
                 url: s.clone(),
                 sha256: None,
@@ -1705,9 +1865,8 @@ fn extends_of(doc: &Node, at: &Where) -> Result<Vec<Reference>> {
                 other.py_repr()
             )))
             }
-        });
+        })
     }
-    Ok(out)
 }
 
 /// `text` with every file it extends merged in under it, as one document:
@@ -1719,6 +1878,7 @@ fn compose(
     fetch: &mut dyn Fetch,
     stack: &mut Vec<String>,
     files: &mut Vec<FileRead>,
+    taxonomy: &mut Option<Taxonomy>,
 ) -> Result<Node> {
     let mut doc = document(text, source)?;
     let at = Where::new(source);
@@ -1749,7 +1909,7 @@ fn compose(
             }
         }
         stack.push(origin.key());
-        let extended = compose(&text, &label, &next, fetch, stack, files)?;
+        let extended = compose(&text, &label, &next, fetch, stack, files, taxonomy)?;
         stack.pop();
         base = Some(match base {
             None => extended,
@@ -1759,8 +1919,27 @@ fn compose(
             }
         });
     }
+    // The taxonomy this file names, read from where it says, over any a file
+    // it extends named.
+    if let Some(reference) = taxonomy_of(&doc, &at)? {
+        let at = at.key("taxonomy");
+        let next = origin.of(&reference).map_err(|e| at.error(e))?;
+        let label = next.label();
+        let text = fetch.fetch(&next).map_err(|e| at.error(e))?;
+        if let Reference::Url {
+            sha256: Some(want), ..
+        } = &reference
+        {
+            let got = hex::encode(Sha256::digest(text.as_bytes()));
+            if &got != want {
+                return Err(at.error(format!("{label}: its SHA-256 is {got}, not {want}")));
+            }
+        }
+        *taxonomy = Some(Taxonomy::parse(&text, &label)?);
+    }
     if let Node::Mapping(map) = &mut doc {
         map.remove("extends");
+        map.remove("taxonomy");
     }
     files.push(FileRead {
         label: source.to_string(),
@@ -1784,6 +1963,17 @@ fn merge_doc(base: &mut Node, over: &Node) {
         match k.py_str().as_str() {
             "quantities" => merge_named(b, k, v, merge_quantity),
             "inputs" => merge_named(b, k, v, merge_fields),
+            // A set is of the newest version among its files: a version 2
+            // overlay (a fit's) keeps a version 3 set's roles.
+            "version" => {
+                let newest = match (b.get(k).and_then(Node::as_i64), v.as_i64()) {
+                    (Some(a), Some(c)) if a > c => b.get(k).cloned(),
+                    _ => Some(v.clone()),
+                };
+                if let Some(n) = newest {
+                    b.insert(k.clone(), n);
+                }
+            }
             _ => {
                 b.insert(k.clone(), v.clone());
             }
@@ -1864,8 +2054,13 @@ fn merge_fields(base: &mut Node, over: &Node) {
     }
 }
 
-fn read_input(name: &str, node: &Node, at: &Where) -> Result<InputInfo> {
-    let map = mapping(node, at, &["default", "text"])?;
+fn read_input(name: &str, node: &Node, version: i64, at: &Where) -> Result<InputInfo> {
+    let known: &[&str] = if version >= 3 {
+        &["default", "text", "concept", "unit"]
+    } else {
+        &["default", "text"]
+    };
+    let map = mapping(node, at, known)?;
     let default = get(map, "default")
         .map(|d| number(d, &at.key("default")))
         .transpose()?;
@@ -1873,10 +2068,18 @@ fn read_input(name: &str, node: &Node, at: &Where) -> Result<InputInfo> {
         name: name.to_string(),
         default,
         text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
+        concept: get(map, "concept").map(NodeExt::py_str),
+        unit: get(map, "unit").map(NodeExt::py_str).unwrap_or_default(),
     })
 }
 
 fn read_quantity(name: &str, node: &Node, source: &str, at: &Where) -> Result<Quantity> {
+    if node.get("concept").is_some() {
+        return Err(at.key("concept").error(
+            "a quantity is an effect the rules work out, and stands for no taxonomy concept: \
+             the concepts are the inputs' (inputs.<name>.concept)",
+        ));
+    }
     let map = mapping(node, at, &["combine", "parts", "text"])?;
     let combine = match get(map, "combine").map(NodeExt::py_str).as_deref() {
         None | Some("min") => Combine::Min,
@@ -2813,7 +3016,7 @@ quantities:
             (GRIP.replace("        uniform:\n          low: [0.90, 0.65, 0.45]\n          high: [1.10, 0.85, 0.65]\n", ""), "no distribution"),
             (GRIP.replace("uniform:", "triangular:"), "triangular.mode: missing"),
             (GRIP.replace("    parts:", "    combine: mean\n    parts:"), "expected min or max"),
-            (GRIP.replace("version: 2", "version: 3"), "version must be 2"),
+            (GRIP.replace("version: 2", "version: 4"), "version must be 2 to 3"),
             (GRIP.replace("version: 2", "version: 1"), "version 1 (fuzzy rules) is no longer read"),
             (GRIP.replace("water:\n        at", "1st:\n        at"), "is not a name"),
             (GRIP.replace("at: {water: [0, 50, 100]}", "at: {water: []}"), "no points"),
@@ -3161,5 +3364,101 @@ quantities:
             .unwrap_err()
             .to_string();
         assert!(e.contains("unknown input 'water'"), "{e}");
+    }
+
+    const TAXONOMY_URL: &str = "https://example.com/taxonomy.yaml";
+    const ROAD_TAXONOMY: &str = "TAXONOMY:\n  weather:\n    rainfall_rate: float precipitation_rate\n    rain: [none, some]\n  road:\n    friction: float\n";
+
+    fn with_taxonomy(text: &str) -> Result<RuleSet> {
+        let mut map = IndexMap::new();
+        map.insert(TAXONOMY_URL.to_string(), ROAD_TAXONOMY.to_string());
+        RuleSet::parse_with(text, "x.yaml", &Origin::Text, &mut Given(map))
+    }
+
+    const V3: &str = "version: 3\ntaxonomy: https://example.com/taxonomy.yaml\ninputs:\n  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}\nquantities:\n  grip:\n    parts:\n      rain:\n        at: {rainfall_rate: [0, 10]}\n        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n";
+
+    #[test]
+    fn version_3_inputs_stand_for_taxonomy_concepts() {
+        let set = with_taxonomy(V3).unwrap();
+        assert_eq!(set.version, 3);
+        let taxonomy = set.taxonomy.as_ref().unwrap();
+        assert_eq!(taxonomy.label, TAXONOMY_URL);
+        assert_eq!(
+            set.inputs["rainfall_rate"].concept.as_deref(),
+            Some("weather.rainfall_rate")
+        );
+        assert!(set.unclassified_inputs().is_empty());
+        let mut at = IndexMap::new();
+        at.insert("rainfall_rate".to_string(), 10.0);
+        assert_eq!(set.quantile("grip", &at, 0.0).unwrap(), 0.5);
+    }
+
+    #[test]
+    fn version_3_refuses_inputs_that_are_no_concept() {
+        let err = |text: &str| with_taxonomy(text).unwrap_err().to_string();
+        let no_concept = V3.replace(
+            "  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}\n",
+            "  rainfall_rate: {default: 0}\n",
+        );
+        let e = err(&no_concept);
+        assert!(e.contains("stands for no taxonomy concept"), "{e}");
+        let undeclared = V3.replace(
+            "inputs:\n  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}\n",
+            "",
+        );
+        assert!(err(&undeclared).contains("'rainfall_rate' is read by a part"));
+        let unknown = V3.replace("weather.rainfall_rate", "weather.rain_rate");
+        let e = err(&unknown);
+        assert!(
+            e.contains("'weather.rain_rate' is not a concept of the taxonomy"),
+            "{e}"
+        );
+        let categorical = V3.replace("weather.rainfall_rate", "weather.rain");
+        assert!(err(&categorical).contains("is not a number"));
+        let wrong_unit = V3.replace("unit: mm/h", "unit: km/h");
+        let e = err(&wrong_unit);
+        assert!(
+            e.contains("inputs.rainfall_rate.unit") && e.contains("measures velocity"),
+            "{e}"
+        );
+        let quantity_concept = V3.replace(
+            "  grip:\n    parts:",
+            "  grip:\n    concept: road.friction\n    parts:",
+        );
+        assert!(err(&quantity_concept).contains("a quantity is an effect"));
+        let no_taxonomy = V3.replace("taxonomy: https://example.com/taxonomy.yaml\n", "");
+        assert!(err(&no_taxonomy).contains("version 3 names the taxonomy"));
+    }
+
+    #[test]
+    fn version_2_inputs_are_unclassified() {
+        let set = RuleSet::parse(GRIP, "grip.yaml").unwrap();
+        assert_eq!(set.version, 2);
+        assert_eq!(set.unclassified_inputs(), ["water"]);
+        let e = with_taxonomy(&V3.replace("version: 3", "version: 2"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("a taxonomy is named from version 3"), "{e}");
+    }
+
+    #[test]
+    fn a_version_2_overlay_keeps_a_version_3_set() {
+        let set = with_taxonomy(V3).unwrap();
+        let over = "version: 2\nquantities:\n  grip:\n    parts:\n      rain:\n        uniform: {low: [0.8, 0.4], high: [1.0, 0.6]}\n";
+        let merged = set
+            .parse_over(over, "fit.yaml", &Origin::Text, &mut Given(IndexMap::new()))
+            .unwrap();
+        assert_eq!(merged.version, 3);
+        assert!(merged.taxonomy.is_some());
+        assert!(merged.unclassified_inputs().is_empty());
+    }
+
+    #[test]
+    fn the_taxonomy_is_fetched_ahead_too() {
+        let refs = RuleSet::references(V3, "x.yaml", &Origin::Text).unwrap();
+        assert_eq!(
+            refs.iter().map(Origin::label).collect::<Vec<_>>(),
+            [TAXONOMY_URL]
+        );
     }
 }

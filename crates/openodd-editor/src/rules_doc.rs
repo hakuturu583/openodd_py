@@ -409,12 +409,20 @@ pub struct InputDoc {
     pub name: String,
     pub default: Option<f64>,
     pub text: String,
+    /// The taxonomy concept it stands for (version 3).
+    pub concept: Option<String>,
+    /// The unit its points are written in.
+    pub unit: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct RulesDoc {
+    /// The format's version as written (`None`: 2).
+    pub version: Option<i64>,
     /// What the file `extends`, as written.
     pub extends: Option<Value>,
+    /// The taxonomy a version 3 file names, as written.
+    pub taxonomy: Option<Value>,
     pub inputs: Vec<InputDoc>,
     pub quantities: Vec<QuantityDoc>,
 }
@@ -491,7 +499,7 @@ impl RulesDoc {
         for (k, v) in &top {
             match key(k)?.as_str() {
                 "version" => match v.as_i64() {
-                    Some(2) => {}
+                    Some(n @ 2..=3) => doc.version = Some(n),
                     Some(1) => {
                         return Err(
                             "version 1 (fuzzy rules) is no longer read: write each rule \
@@ -500,9 +508,10 @@ impl RulesDoc {
                                 .into(),
                         )
                     }
-                    _ => return Err(format!("version: {} is not 2", text_of(v))),
+                    _ => return Err(format!("version: {} is not 2 or 3", text_of(v))),
                 },
                 "extends" => doc.extends = Some(v.clone()),
+                "taxonomy" => doc.taxonomy = Some(v.clone()),
                 "inputs" => {
                     for (n, i) in mapping(v, "inputs")? {
                         let n = key(n)?;
@@ -512,6 +521,8 @@ impl RulesDoc {
                             name: n,
                             default: None,
                             text: String::new(),
+                            concept: None,
+                            unit: String::new(),
                         };
                         for (f, x) in mapping(i, &at)? {
                             match key(f)?.as_str() {
@@ -522,6 +533,8 @@ impl RulesDoc {
                                     )
                                 }
                                 "text" => input.text = text_of(x),
+                                "concept" => input.concept = Some(text_of(x)),
+                                "unit" => input.unit = text_of(x),
                                 other => return Err(format!("{at}: unknown field '{other}'")),
                             }
                         }
@@ -547,11 +560,15 @@ impl RulesDoc {
     /// The file: block style down to a part, each parameter's values on one
     /// line, as rule files are written by hand.
     pub fn to_yaml(&self) -> Result<String, String> {
-        let mut out = String::from("version: 2\n");
-        if let Some(e) = &self.extends {
-            let mut m = Mapping::new();
-            m.insert(Value::String("extends".into()), e.clone());
-            out.push_str(&serde_norway::to_string(&Value::Mapping(m)).map_err(|e| e.to_string())?);
+        let mut out = format!("version: {}\n", self.version.unwrap_or(2));
+        for (key, value) in [("extends", &self.extends), ("taxonomy", &self.taxonomy)] {
+            if let Some(v) = value {
+                let mut m = Mapping::new();
+                m.insert(Value::String(key.into()), v.clone());
+                out.push_str(
+                    &serde_norway::to_string(&Value::Mapping(m)).map_err(|e| e.to_string())?,
+                );
+            }
         }
         if !self.inputs.is_empty() {
             out.push_str("inputs:\n");
@@ -562,6 +579,12 @@ impl RulesDoc {
                 }
                 if !i.text.is_empty() {
                     fields.push(format!("text: {}", scalar(&i.text)));
+                }
+                if let Some(c) = &i.concept {
+                    fields.push(format!("concept: {}", scalar(c)));
+                }
+                if !i.unit.is_empty() {
+                    fields.push(format!("unit: {}", scalar(&i.unit)));
                 }
                 out.push_str(&format!(
                     "  {}: {{{}}}\n",
@@ -1496,6 +1519,27 @@ mod tests {
                 .support(),
             (0.3, 0.5)
         );
+    }
+
+    #[test]
+    fn a_version_3_file_keeps_its_taxonomy_and_concepts() {
+        let text = "version: 3\ntaxonomy: https://example.com/taxonomy.yaml\ninputs:\n  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}\nquantities:\n  grip:\n    parts:\n      rain:\n        at: {rainfall_rate: [0, 10]}\n        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}\n";
+        let doc = RulesDoc::from_yaml(text).unwrap();
+        assert_eq!(doc.version, Some(3));
+        assert_eq!(
+            doc.inputs[0].concept.as_deref(),
+            Some("weather.rainfall_rate")
+        );
+        let out = doc.to_yaml().unwrap();
+        assert!(
+            out.starts_with("version: 3\ntaxonomy: https://example.com/taxonomy.yaml\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}"),
+            "{out}"
+        );
+        assert_eq!(RulesDoc::from_yaml(&out).unwrap().to_yaml().unwrap(), out);
     }
 
     #[test]
