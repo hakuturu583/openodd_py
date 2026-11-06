@@ -594,7 +594,8 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
         # relative to its folder, a URL as given.
         extends = args.rules
         if not extends.startswith(("https://", "http://")):
-            extends = os.path.relpath(Path(extends).resolve(), args.drift_rules.parent.resolve())
+            # (with / on every platform: a rule file's paths are posix)
+            extends = Path(os.path.relpath(Path(extends).resolve(), args.drift_rules.parent.resolve())).as_posix()
         text = CasePlot([doc for _, doc in documents]).drift_rules(
             Rules.read(args.rules), quantities, extends=extends, measured_at=args.measured_at)
         if text:
