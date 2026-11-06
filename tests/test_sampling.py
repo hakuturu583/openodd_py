@@ -258,3 +258,26 @@ def test_a_knob_from_the_rules_needs_an_input_for_its_attribute() -> None:
         OddSampler(o, knobs={"weather.rainfall_rate": OddKnob("k", quantity="p")}, backend=b)
     with pytest.raises(ValueError, match="no quantity 'nope'"):
         OddSampler(o, knobs={"weather.rainfall_rate": OddKnob("k", quantity="nope")}, backend=b)
+
+
+def test_a_rule_valued_knobs_limits_do_not_narrow_what_is_drawn(tmp_path: Path) -> None:
+    """#76: limits on the value written must not shrink the attribute's range."""
+    (tmp_path / "taxonomy.yaml").write_text(RAIN_TAXONOMY)
+    (tmp_path / "rules.yaml").write_text(PRECIPITATION_RULES.replace(
+        "uniform: {low: [0, 20, 60], high: [5, 40, 90]}", "uniform: {low: [0, 0.2, 0.6], high: [0.05, 0.4, 0.9]}"
+    ))
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    knob = OddKnob("env.wetness", quantity="carla_precipitation", limits=(0, 1), integer=False)
+    b = Backend(probes={"rain_mm_h": (lambda c: c.get("rain"), "mm/h")}, rules=rules)
+    o = openodd.load_openodd(
+        RAIN_TAXONOMY,
+        bindings={"weather.rainfall_rate": {"probe": "rain_mm_h", "buckets": [0, 2.5, 10]}},
+        backend=b,
+    )
+    cases = OddSampler(o, knobs={"weather.rainfall_rate": knob}, seed=7, backend=b).sample(30)
+    drawn = [c.values["weather.rainfall_rate"] for c in cases]
+    assert max(drawn) > 2.5  # the upper bucket is reached, though the setting stays within 0..1
+    assert {c.buckets["weather.rainfall_rate"] for c in cases} == {"[0, 2.5)", "[2.5, 10]"}
+    for c in cases:
+        (w,) = [x for x in c.overrides if x.startswith("env.wetness=")]
+        assert 0 <= float(w.split("=")[1]) <= 1
