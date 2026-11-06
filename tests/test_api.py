@@ -293,7 +293,7 @@ def test_the_bundled_default_odd() -> None:
     odd = openodd.bundled_odd(backend=backend)
     assert odd.name == "default" and odd.modules == [] and len(odd.attributes) == 15
     assert len(odd.revision) == 64 and odd.revision == openodd.bundled_odd(backend=backend).revision
-    speed = next(a for a in odd.attributes if a.name == "dynamic.ego_speed")
+    speed = next(a for a in odd.attributes if a.name == "ego_vehicle.ego_vehicle.velocity")
     assert (speed.unit, speed.cover_by, speed.min_stay) == ("km/h", "entries", 3.0)
     assert odd.evaluate(odd.sample({"ego_speed_kph": 200})).inside  # no modules, nothing is outside
     with pytest.raises(ValueError, match="no bundled ODD"):
