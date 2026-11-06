@@ -290,6 +290,17 @@ impl Observations {
 /// column `weight` names (1 where a row has none; a negative one is an
 /// error).
 pub fn observations(rows: &[Row], names: &[String], weight: Option<&str>) -> Result<Observations> {
+    observations_labelled(rows, names, weight, &IndexMap::new())
+}
+
+/// [`observations`], a categorical input's value read as its label's index
+/// in `labels` (input -> its labels: [`RuleSet::input_labels`]).
+pub fn observations_labelled(
+    rows: &[Row],
+    names: &[String],
+    weight: Option<&str>,
+    labels: &IndexMap<String, Vec<String>>,
+) -> Result<Observations> {
     let mut out = Observations {
         observed: names.iter().map(|n| (n.clone(), 0)).collect(),
         ..Observations::default()
@@ -298,12 +309,30 @@ pub fn observations(rows: &[Row], names: &[String], weight: Option<&str>) -> Res
     for (r, row) in rows.iter().enumerate() {
         let mut values = IndexMap::new();
         for name in names {
-            if let Some(x) = row
-                .get(name)
-                .map(|c| c.number(r, name))
-                .transpose()?
-                .flatten()
-            {
+            let read = |c: &Cell| -> Result<Option<f64>> {
+                let Some(l) = labels.get(name) else {
+                    return c.number(r, name);
+                };
+                match c {
+                    Cell::Missing => Ok(None),
+                    Cell::Text(t) | Cell::Other(t) => l
+                        .iter()
+                        .position(|x| x == t.trim())
+                        .map(|i| Some(i as f64))
+                        .ok_or_else(|| {
+                            Error::value(format!(
+                                "row {r}: {name} is {t:?}, not one of its labels {}",
+                                l.join(", ")
+                            ))
+                        }),
+                    Cell::Number(x) => Err(Error::value(format!(
+                        "row {r}: {name} is {}, not one of its labels {}",
+                        py_float_repr(*x),
+                        l.join(", ")
+                    ))),
+                }
+            };
+            if let Some(x) = row.get(name).map(read).transpose()?.flatten() {
                 values.insert(name.clone(), x);
                 out.observed[name] += 1;
             }
@@ -590,6 +619,15 @@ impl RuleSet {
 
     /// The names a row of data may give these rules: the quantities, and
     /// the inputs their parts read.
+    /// Each categorical input's labels: what a row gives it as.
+    pub fn input_labels(&self) -> IndexMap<String, Vec<String>> {
+        self.inputs
+            .iter()
+            .filter(|(_, i)| !i.labels.is_empty())
+            .map(|(n, i)| (n.clone(), i.labels.clone()))
+            .collect()
+    }
+
     pub fn data_names(&self) -> Vec<String> {
         self.order()
             .iter()
@@ -1636,6 +1674,10 @@ fn quantities_text(
                 .axes
                 .iter()
                 .map(|a| {
+                    if a.categorical() {
+                        let labels: Vec<String> = a.labels.iter().map(|l| quoted(l)).collect();
+                        return format!("{}: [{}]", quoted(&a.input), labels.join(", "));
+                    }
                     format!(
                         "{}: {}",
                         quoted(&a.input),

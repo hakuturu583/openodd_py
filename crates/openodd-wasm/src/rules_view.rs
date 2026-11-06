@@ -252,6 +252,10 @@ fn resolve<'a>(rules: &'a RuleSet, query: &Query) -> Result<Resolved<'a>, String
         let v = query.inputs.get(&s.name).copied().unwrap_or(s.value);
         // Beyond the outermost points every value holds: nothing changes.
         s.value = v.clamp(s.low, s.high);
+        if categorical(rules, &s.name) {
+            // A label's index: nothing lies between two.
+            s.value = s.value.round();
+        }
         inputs.insert(s.name.clone(), s.value);
     }
     let x = match &query.x {
@@ -375,6 +379,24 @@ struct View<'a> {
     part_responses: Vec<Curves>,
 }
 
+/// Whether `input` is a categorical input of `rules` (read at its labels).
+fn categorical(rules: &RuleSet, input: &str) -> bool {
+    rules
+        .inputs
+        .get(input)
+        .is_some_and(|i| !i.labels.is_empty())
+}
+
+/// The values along slider `s`: a grid of `samples`, or a categorical
+/// input's labels' indices.
+fn grid_of(rules: &RuleSet, s: &Slider, samples: usize) -> Vec<f64> {
+    if categorical(rules, &s.name) {
+        let (lo, hi) = (s.low.ceil() as i64, s.high.floor() as i64);
+        return (lo..=hi).map(|i| i as f64).collect();
+    }
+    grid(s.low, s.high, samples)
+}
+
 fn grid(low: f64, high: f64, n: usize) -> Vec<f64> {
     (0..n)
         .map(|k| low + (high - low) * k as f64 / (n - 1) as f64)
@@ -413,7 +435,12 @@ fn build<'a>(rules: &'a RuleSet, query: &Query, samples: usize) -> Result<View<'
             ),
             None => x_slider,
         };
-        let xs = s.map(|s| grid(s.low, s.high, samples)).unwrap_or_default();
+        let xs = match (axis, s) {
+            // Over a categorical input: at its labels, nothing between.
+            (Some(axis), _) if part.axes[axis].categorical() => part.axes[axis].points.clone(),
+            (_, Some(s)) => grid_of(rules, s, samples),
+            _ => Vec::new(),
+        };
         let at = |v: f64| match axis {
             Some(axis) => {
                 let mut vs = values.clone();
@@ -469,15 +496,21 @@ fn build<'a>(rules: &'a RuleSet, query: &Query, samples: usize) -> Result<View<'
     let mut response = Curves::default();
     let mut part_responses = vec![Curves::default(); q.parts.len()];
     let mut inputs = r.inputs.clone();
-    let (xs, x_name) = match r.sliders.get(r.x) {
-        Some(s) => (grid(s.low, s.high, samples), s.name.clone()),
+    let (grid_xs, x_name) = match r.sliders.get(r.x) {
+        Some(s) => (grid_of(rules, s, samples), s.name.clone()),
         None => (Vec::new(), String::new()),
     };
-    for x in &xs {
+    let x_categorical = categorical(rules, &x_name);
+    let mut xs = Vec::with_capacity(grid_xs.len());
+    for x in &grid_xs {
         inputs.insert(x_name.clone(), *x);
-        let j = q
-            .joined(&inputs, &rules.inputs)
-            .map_err(|e| e.to_string())?;
+        let j = match q.joined(&inputs, &rules.inputs) {
+            Ok(j) => j,
+            // A label a part is not written at: no response there.
+            Err(_) if x_categorical => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        xs.push(*x);
         let (lo, hi) = j.support();
         response.push(lo, hi, j.quantile(0.5), j.quantile(p));
         for (c, (_, d)) in part_responses.iter_mut().zip(&j.parts) {

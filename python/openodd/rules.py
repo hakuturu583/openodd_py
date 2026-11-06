@@ -276,6 +276,32 @@ class Rules:
         )
 
     @property
+    def input_labels(self) -> dict[str, list[str]]:
+        """Each categorical input's labels, in order: it is given as one (its
+        parts are written at labels, and nothing lies between two)."""
+        return dict(self._core.input_labels())
+
+    def _inputs(self, inputs: Optional[Mapping[str, Any]]) -> dict[str, float]:
+        """*inputs* as the core reads them: a categorical input's label as its
+        index."""
+        if not inputs:
+            return {}
+        labels = self._core.input_labels()
+        out: dict[str, float] = {}
+        for k, v in inputs.items():
+            name = str(k)
+            if name in labels and isinstance(v, str):
+                try:
+                    out[name] = float(labels[name].index(v))
+                except ValueError:
+                    raise RulesError(
+                        f"{name} is {v!r}, not one of its labels {', '.join(labels[name])}"
+                    ) from None
+            else:
+                out[name] = float(v)
+        return out
+
+    @property
     def version(self) -> int:
         """The format's version: the newest of the files read."""
         return self._core.version
@@ -366,7 +392,7 @@ class Rules:
     def evaluate(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> dict[str, float]:
         """``low``, ``high``, ``median`` and ``mean`` of *quantity* at
@@ -380,13 +406,13 @@ class Rules:
                 no default.
         """
         return self._call(
-            self._core.evaluate, quantity, _values(inputs), _values(quantiles)
+            self._core.evaluate, quantity, self._inputs(inputs), _values(quantiles)
         )
 
     def range(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> tuple[float, float]:
         """``(low, high)``: the least and greatest value *quantity* takes at
@@ -397,7 +423,7 @@ class Rules:
     def quantile(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         p: float,
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> float:
@@ -409,7 +435,7 @@ class Rules:
         return self._call(
             self._core.quantile,
             quantity,
-            _values(inputs),
+            self._inputs(inputs),
             float(p),
             _values(quantiles),
         )
@@ -417,19 +443,19 @@ class Rules:
     def cdf(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         x: float,
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> float:
         """The share of *quantity*'s mass at or below *x*, at *inputs*."""
         return self._call(
-            self._core.cdf, quantity, _values(inputs), float(x), _values(quantiles)
+            self._core.cdf, quantity, self._inputs(inputs), float(x), _values(quantiles)
         )
 
     def distributions(
         self,
         quantity: str,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> list[tuple[str, str, dict[str, float]]]:
         """Each part's distribution at *inputs*: ``(part, family, params)``."""
@@ -438,7 +464,7 @@ class Rules:
             for name, family, params in self._call(
                 self._core.distributions,
                 quantity,
-                _values(inputs),
+                self._inputs(inputs),
                 _values(quantiles),
             )
         ]
@@ -460,14 +486,14 @@ class Rules:
 
     def sample(
         self,
-        inputs: Mapping[str, float],
+        inputs: Mapping[str, Any],
         quantiles: Optional[Mapping[str, float]] = None,
     ) -> dict[str, float]:
         """Every quantity's value at *inputs*, each at its own quantile in
         *quantiles* (0.5 when not named), in :attr:`order`: what one run
         sets. A quantity given in *inputs* keeps the value given."""
         return dict(
-            self._call(self._core.sample, _values(inputs), _values(quantiles))
+            self._call(self._core.sample, self._inputs(inputs), _values(quantiles))
         )
 
     def check_inputs(self, allowed: Sequence[str]) -> None:

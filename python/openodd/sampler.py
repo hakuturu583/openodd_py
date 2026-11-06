@@ -499,10 +499,15 @@ class OddSampler:
         quantities = dict(case.quantities)
         # The inputs that stand for the ODD's attributes, at the values drawn
         # (in the attribute's unit; the rule's points are in the input's).
-        inputs: dict[str, float] = {}
+        inputs: dict[str, Any] = {}
+        labelled = self._rules.input_labels
         for rule_input, (attribute, unit, input_unit) in self._effect_inputs.items():
             x = case.values.get(attribute)
-            if isinstance(x, (int, float)) and not isinstance(x, bool):
+            if rule_input in labelled:
+                # A categorical cause: the label drawn (the rules read its index).
+                if x is not None:
+                    inputs[rule_input] = value_label(x)
+            elif isinstance(x, (int, float)) and not isinstance(x, bool):
                 inputs[rule_input] = _core.convert(float(x), unit, input_unit)
         # Each quantity at a quantile of its own per case, reproducible from
         # the seed: an effect's is the case's own parameter when it has one
@@ -514,9 +519,12 @@ class OddSampler:
         writers: dict[str, list[OddKnob]] = {}
         for name, (knob, rule_input, unit, input_unit) in self._from_rules.items():
             x = case.values.get(name)
-            if not isinstance(x, (int, float)) or isinstance(x, bool):
+            if rule_input in labelled and x is not None:
+                inputs[rule_input] = value_label(x)
+            elif isinstance(x, (int, float)) and not isinstance(x, bool):
+                inputs[rule_input] = _core.convert(float(x), unit, input_unit)
+            else:
                 continue
-            inputs[rule_input] = _core.convert(float(x), unit, input_unit)
             q = str(knob.quantity)
             if q not in writers:
                 quantiles[q] = random.Random(f"{self._seed}:{case.index}:{name}").random()

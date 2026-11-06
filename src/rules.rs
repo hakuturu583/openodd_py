@@ -657,8 +657,19 @@ fn inverse_phi(p: f64) -> f64 {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Axis {
     pub input: String,
-    /// Increasing.
+    /// Increasing. A categorical input's: the indices of its labels in the
+    /// input's ([`InputInfo::labels`]).
     pub points: Vec<f64>,
+    /// A categorical input's points, as written (empty for a number's): its
+    /// distributions are at each label, and nothing lies between them.
+    pub labels: Vec<String>,
+}
+
+impl Axis {
+    /// Whether it is over a categorical input's labels.
+    pub fn categorical(&self) -> bool {
+        !self.labels.is_empty()
+    }
 }
 
 /// A conditional distribution: given its inputs, a distribution's
@@ -803,35 +814,52 @@ pub fn point_coords(axes: &[Axis], k: usize) -> Vec<String> {
         .enumerate()
         .map(|(d, a)| {
             let i = k / strides[d] % a.points.len();
-            format!("{}={}", a.input, py_float_repr(a.points[i]))
+            match a.labels.get(i) {
+                Some(label) => format!("{}={label}", a.input),
+                None => format!("{}={}", a.input, py_float_repr(a.points[i])),
+            }
         })
         .collect()
 }
 
 /// The combination of `axes`' points `at` names (`input=point,...`, every
-/// input once, each value one of its points).
+/// input once, each value one of its points: a label on a categorical axis).
 pub fn point_of(axes: &[Axis], at: &str) -> std::result::Result<usize, String> {
-    let mut given: IndexMap<String, f64> = IndexMap::new();
+    let mut given: IndexMap<String, String> = IndexMap::new();
     for pair in at.split(',') {
         let Some((input, v)) = pair.split_once('=') else {
             return Err(format!("'{}' is not input=point", pair.trim()));
         };
         let input = input.trim();
-        let v = crate::value::parse_float(v.trim())
-            .ok_or_else(|| format!("{input}={}: not a number", v.trim()))?;
-        if given.insert(input.to_string(), v).is_some() {
+        if given
+            .insert(input.to_string(), v.trim().to_string())
+            .is_some()
+        {
             return Err(format!("{input} is named twice"));
         }
     }
     let strides = strides_of(axes);
     let mut index = 0;
     for (d, axis) in axes.iter().enumerate() {
-        let Some(v) = given.shift_remove(&axis.input) else {
+        let Some(raw) = given.shift_remove(&axis.input) else {
             return Err(format!(
                 "a point names every input the part reads: {} is missing",
                 axis.input
             ));
         };
+        if axis.categorical() {
+            let Some(i) = axis.labels.iter().position(|l| *l == raw) else {
+                return Err(format!(
+                    "{}={raw} is not one of its points ({})",
+                    axis.input,
+                    axis.labels.join(", ")
+                ));
+            };
+            index += i * strides[d];
+            continue;
+        }
+        let v = crate::value::parse_float(&raw)
+            .ok_or_else(|| format!("{}={raw}: not a number", axis.input))?;
         let Some(i) = axis.points.iter().position(|p| *p == v) else {
             return Err(format!(
                 "{}={} is not one of its points ({})",
@@ -900,7 +928,14 @@ impl Part {
             .axes
             .iter()
             .zip(values)
-            .map(|(axis, v)| segment(&axis.points, *v))
+            .map(|(axis, v)| {
+                if axis.categorical() {
+                    // No value between two labels: the nearest written one.
+                    (nearest(&axis.points, *v), 0.0)
+                } else {
+                    segment(&axis.points, *v)
+                }
+            })
             .collect();
         let strides = self.strides();
         for corner in 0..(1usize << cells.len()) {
@@ -928,6 +963,17 @@ impl Part {
     fn strides(&self) -> Vec<usize> {
         strides_of(&self.axes)
     }
+}
+
+/// The index of the point of `points` nearest `v`.
+fn nearest(points: &[f64], v: f64) -> usize {
+    let mut best = 0;
+    for (i, p) in points.iter().enumerate() {
+        if (p - v).abs() < (points[best] - v).abs() {
+            best = i;
+        }
+    }
+    best
 }
 
 /// The segment of `points` (increasing) that `v` falls in: its lower
@@ -997,6 +1043,13 @@ pub struct InputInfo {
     /// The unit its points and its default are written in (`""`: the
     /// concept's own).
     pub unit: String,
+    /// A categorical input's labels, in order (empty for a number's): the
+    /// file's `labels`, or a categorical concept's literals (version 3). It
+    /// is given, and its default written, as a label; the core reads it as
+    /// the label's index.
+    pub labels: Vec<String>,
+    /// A categorical input's default as written, until its labels are known.
+    default_label: Option<String>,
 }
 
 /// The taxonomy a version 3 rule file names: the concepts its inputs may be.
@@ -1149,7 +1202,26 @@ impl Quantity {
                 .get(&a.input)
                 .copied()
                 .or_else(|| known.get(&a.input).and_then(|i| i.default));
+            let labels = known
+                .get(&a.input)
+                .map(|i| i.labels.as_slice())
+                .unwrap_or(&[]);
             match given {
+                Some(v) if a.categorical() && !a.points.contains(&v) => {
+                    let label = labels
+                        .get(v as usize)
+                        .filter(|_| v >= 0.0 && v.fract() == 0.0)
+                        .cloned()
+                        .unwrap_or_else(|| py_float_repr(v));
+                    return Err(Error::value(format!(
+                        "{}: {}.{} writes no distribution at {}={label}: it is written at {}",
+                        self.source,
+                        self.name,
+                        part.name,
+                        a.input,
+                        a.labels.join(", ")
+                    )));
+                }
                 Some(v) if v.is_finite() => values.push(v),
                 Some(v) => {
                     return Err(Error::value(format!(
@@ -1656,12 +1728,14 @@ impl RuleSet {
                 );
             }
         }
+        resolve_input_labels(&mut inputs, version, taxonomy.as_ref(), &at.key("inputs"))?;
         let at = at.key("quantities");
         let quantities = required_mapping(map, "quantities", &at)?;
         let mut out = IndexMap::new();
         for (name, raw) in quantities {
             let name = node_name(name, &at)?;
-            let quantity = read_quantity(&name, raw, source, &at.key(&name))?;
+            let mut quantity = read_quantity(&name, raw, source, &at.key(&name))?;
+            resolve_axis_labels(&mut quantity, &inputs, &at.key(&name))?;
             out.insert(name, quantity);
         }
         for name in inputs.keys() {
@@ -1749,14 +1823,28 @@ impl RuleSet {
                     taxonomy.label
                 )));
             };
+            let unit = &self.inputs[&name].unit;
             let crate::model::ConceptKind::Number { unit_type, .. } = kind else {
+                if matches!(
+                    kind,
+                    crate::model::ConceptKind::Categorical | crate::model::ConceptKind::Derived
+                ) {
+                    // A categorical concept: read at its literals, no unit.
+                    if !unit.is_empty() {
+                        return Err(Where::new(source)
+                            .key("inputs")
+                            .key(&name)
+                            .key("unit")
+                            .error(format!("'{concept}' is categorical: it has no unit")));
+                    }
+                    continue;
+                }
                 return Err(at.error(format!(
-                    "'{concept}' is not a number in {}: a part's points are numbers, so an input \
-                     stands for a numeric concept",
+                    "'{concept}' is neither a number nor categorical in {}: an input stands for \
+                     a numeric concept (read at numbers) or a categorical one (read at labels)",
                     taxonomy.label
                 )));
             };
-            let unit = &self.inputs[&name].unit;
             if !unit.is_empty() {
                 crate::units::Units::new()
                     .check_type(unit, unit_type)
@@ -2321,22 +2409,144 @@ fn merge_fields(base: &mut Node, over: &Node) {
     }
 }
 
+/// A categorical input's labels, and its default as their index: the file's
+/// `labels`, else (version 3) its categorical concept's literals.
+fn resolve_input_labels(
+    inputs: &mut IndexMap<String, InputInfo>,
+    version: i64,
+    taxonomy: Option<&Taxonomy>,
+    at: &Where,
+) -> Result<()> {
+    for (name, input) in inputs.iter_mut() {
+        let at = at.key(name);
+        if input.labels.is_empty() && version >= 3 {
+            if let (Some(t), Some(concept)) = (taxonomy, input.concept.as_deref()) {
+                let categorical = matches!(
+                    t.concepts.get(concept),
+                    Some(
+                        crate::model::ConceptKind::Categorical | crate::model::ConceptKind::Derived
+                    )
+                );
+                if categorical {
+                    input.labels = t.literals.get(concept).cloned().unwrap_or_default();
+                }
+            }
+        }
+        if let Some(label) = input.default_label.take() {
+            let Some(i) = input.labels.iter().position(|l| *l == label) else {
+                return Err(at.key("default").error(if input.labels.is_empty() {
+                    format!("'{label}' is no number: a number's default is a number")
+                } else {
+                    format!(
+                        "'{label}' is not one of its labels {}",
+                        input.labels.join(", ")
+                    )
+                }));
+            };
+            input.default = Some(i as f64);
+        }
+    }
+    Ok(())
+}
+
+/// A categorical axis's points: its labels' indices in its input's labels.
+/// They are written in the input's order; an input with labels is read at
+/// labels, not numbers.
+fn resolve_axis_labels(
+    quantity: &mut Quantity,
+    inputs: &IndexMap<String, InputInfo>,
+    at: &Where,
+) -> Result<()> {
+    for part in &mut quantity.parts {
+        for axis in &mut part.axes {
+            let here = at.key("parts").key(&part.name).key("at").key(&axis.input);
+            let labels = inputs.get(&axis.input).map(|i| &i.labels);
+            match (axis.categorical(), labels) {
+                (false, Some(l)) if !l.is_empty() => {
+                    return Err(here.error(format!(
+                        "{} is categorical: write its points as labels ({})",
+                        axis.input,
+                        l.join(", ")
+                    )))
+                }
+                (false, _) => {}
+                (true, None) => {
+                    return Err(here.error(format!(
+                        "read at labels, and {} has none: give inputs.{}.labels (or, version 3, \
+                         a categorical concept)",
+                        axis.input, axis.input
+                    )))
+                }
+                (true, Some(l)) if l.is_empty() => {
+                    return Err(here.error(format!(
+                        "read at labels, and {} has none: give inputs.{}.labels (or, version 3, \
+                         a categorical concept)",
+                        axis.input, axis.input
+                    )))
+                }
+                (true, Some(l)) => {
+                    let mut points = Vec::with_capacity(axis.labels.len());
+                    for label in &axis.labels {
+                        let Some(i) = l.iter().position(|x| x == label) else {
+                            return Err(here.error(format!(
+                                "'{label}' is not one of {}'s labels {}",
+                                axis.input,
+                                l.join(", ")
+                            )));
+                        };
+                        points.push(i as f64);
+                    }
+                    if points.windows(2).any(|w| w[0] >= w[1]) {
+                        return Err(here.error(format!(
+                            "write the labels once each, in {}'s order: {}",
+                            axis.input,
+                            l.join(", ")
+                        )));
+                    }
+                    axis.points = points;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn read_input(name: &str, node: &Node, version: i64, at: &Where) -> Result<InputInfo> {
     let known: &[&str] = if version >= 3 {
-        &["default", "text", "concept", "unit"]
+        &["default", "text", "concept", "unit", "labels"]
     } else {
-        &["default", "text"]
+        &["default", "text", "labels"]
     };
     let map = mapping(node, at, known)?;
-    let default = get(map, "default")
-        .map(|d| number(d, &at.key("default")))
-        .transpose()?;
+    let labels: Vec<String> = match get(map, "labels") {
+        None => Vec::new(),
+        Some(raw) => {
+            let Node::Sequence(items) = untag(raw) else {
+                return Err(at.key("labels").error("expected a list of labels"));
+            };
+            let labels: Vec<String> = items.iter().map(NodeExt::literal).collect();
+            if labels.is_empty() {
+                return Err(at.key("labels").error("no labels"));
+            }
+            labels
+        }
+    };
+    // A categorical input's default is a label; a number's a number.
+    let (default, default_label) = match get(map, "default") {
+        None => (None, None),
+        Some(d) if matches!(untag(d), Node::Number(_)) => {
+            (Some(number(d, &at.key("default"))?), None)
+        }
+        Some(d) => (None, Some(d.literal())),
+    };
     Ok(InputInfo {
         name: name.to_string(),
         default,
         text: get(map, "text").map(NodeExt::py_str).unwrap_or_default(),
         concept: get(map, "concept").map(NodeExt::py_str),
         unit: get(map, "unit").map(NodeExt::py_str).unwrap_or_default(),
+        labels,
+        default_label,
     })
 }
 
@@ -2455,13 +2665,30 @@ fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
     for (input, raw) in inputs {
         let input = node_name(input, &axes_at)?;
         let here = axes_at.key(&input);
-        let points = match untag(raw) {
-            Node::Sequence(_) => numbers(raw, &here)?,
-            _ => vec![number(raw, &here)?],
+        let items: Vec<Node> = match untag(raw) {
+            Node::Sequence(items) => items.clone(),
+            other => vec![other.clone()],
         };
-        if points.is_empty() {
+        if items.is_empty() {
             return Err(here.error("no points"));
         }
+        // Labels (a categorical input's) or numbers, not both.
+        if items.iter().all(|n| !matches!(untag(n), Node::Number(_))) {
+            let labels: Vec<String> = items.iter().map(NodeExt::literal).collect();
+            // Placeholder points, until the input's labels give their indices
+            // (RuleSet::resolve_labels).
+            let points = (0..labels.len()).map(|i| i as f64).collect();
+            axes.push(Axis {
+                input,
+                points,
+                labels,
+            });
+            continue;
+        }
+        let points = items
+            .iter()
+            .map(|n| number(n, &here))
+            .collect::<Result<Vec<f64>>>()?;
         if let Some(w) = points.windows(2).find(|w| w[0] >= w[1]) {
             return Err(here.error(format!(
                 "points must increase: {} is not below {}",
@@ -2469,7 +2696,11 @@ fn read_part(name: &str, node: &Node, at: &Where) -> Result<Part> {
                 py_float_repr(w[1])
             )));
         }
-        axes.push(Axis { input, points });
+        axes.push(Axis {
+            input,
+            points,
+            labels: Vec::new(),
+        });
     }
     let size = axes
         .iter()
@@ -2692,13 +2923,6 @@ fn number(node: &Node, at: &Where) -> Result<f64> {
         },
         _ => Err(at.error(format!("expected a number, got {}", node.py_repr()))),
     }
-}
-
-fn numbers(node: &Node, at: &Where) -> Result<Vec<f64>> {
-    let Node::Sequence(items) = untag(node) else {
-        return Err(at.error(format!("expected a list, got {}", node.py_repr())));
-    };
-    items.iter().map(|n| number(n, at)).collect()
 }
 
 fn is_name(s: &str) -> bool {
@@ -3800,8 +4024,13 @@ quantities:
             e.contains("'weather.rain_rate' is not a concept of the taxonomy"),
             "{e}"
         );
+        // A categorical concept is read at labels, not numbers.
         let categorical = V3.replace("weather.rainfall_rate", "weather.rain");
-        assert!(err(&categorical).contains("is not a number"));
+        let e = err(&categorical);
+        assert!(
+            e.contains("is categorical: write its points as labels"),
+            "{e}"
+        );
         let wrong_unit = V3.replace("unit: mm/h", "unit: km/h");
         let e = err(&wrong_unit);
         assert!(

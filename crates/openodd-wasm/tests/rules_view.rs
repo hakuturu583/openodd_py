@@ -336,3 +336,36 @@ fn a_part_reading_no_input_is_drawn() {
         .unwrap()
         .contains("oo-rules-response"));
 }
+
+#[wasm_bindgen_test]
+#[test]
+fn a_categorical_input_is_drawn_at_its_labels() {
+    let text = "version: 2\ninputs:\n  time_of_day: {labels: [day, dusk, night, dawn], default: day}\nquantities:\n  sun:\n    parts:\n      time:\n        at: {time_of_day: [day, dusk, night, dawn]}\n        uniform: {low: [10, -6, -30, -6], high: [70, 0, -6, 0]}\n  sight:\n    parts:\n      light:\n        at: {time_of_day: [day, night]}\n        uniform: {low: [250, 50], high: [400, 150]}\n";
+    let v = RulesView::from_text(text, "sun.yaml").expect("reads");
+    let data: Json =
+        serde_json::from_str(&v.rules_json_str(r#"{"quantity": "sun"}"#, "{}").unwrap()).unwrap();
+    // The response at the four labels only.
+    assert_eq!(
+        data["response"]["xs"],
+        serde_json::json!([0.0, 1.0, 2.0, 3.0])
+    );
+    assert_eq!(
+        data["parts"][0]["chart"]["xs"],
+        serde_json::json!([0.0, 1.0, 2.0, 3.0])
+    );
+    // A slider between two labels reads the nearest.
+    let at: Json = serde_json::from_str(
+        &v.rules_json_str(
+            r#"{"quantity": "sun", "inputs": {"time_of_day": 1.2}}"#,
+            "{}",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(close(at["outputs"]["low"].as_f64().unwrap(), -6.0));
+    // A part written at two of them responds there alone.
+    let sight: Json =
+        serde_json::from_str(&v.rules_json_str(r#"{"quantity": "sight"}"#, "{}").unwrap()).unwrap();
+    assert_eq!(sight["response"]["xs"], serde_json::json!([0.0, 2.0]));
+    assert!(v.rules_html_str(r#"{"quantity": "sun"}"#, "{}").is_ok());
+}

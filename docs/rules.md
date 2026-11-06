@@ -69,7 +69,7 @@ quantities:
 | `version` | `2` or `3` ([Inputs and the taxonomy](#inputs-and-the-taxonomy)) |
 | `taxonomy` | Version 3: the OpenODD taxonomy the inputs are concepts of -- a path, URL or git source, as `extends` takes |
 | `basis` | What the parts' values rest on ([The basis of a part](#the-basis-of-a-part)); on the file, a quantity or a part; required for every part from version 3 |
-| `inputs` | Optional: name → `default` (the value read when none is given) and `text`; from version 3 also `concept` and `unit` |
+| `inputs` | Optional: name → `default` (the value read when none is given), `text` and `labels` (a categorical input's, in order); from version 3 also `concept` and `unit` |
 | `quantities` | Name → a quantity: `parts`, `combine` and an optional `text` |
 | `combine` | How the parts' values are joined: `min` (the default) or `max` |
 | `parts` | Name → a part: `at`, one distribution, an optional `text`, and an optional `fixed` |
@@ -99,6 +99,32 @@ quantities:
 - `Rules.evaluate` gives `low`, `high`, `median` and `mean`; `Rules.range`
   `(low, high)`; `Rules.cdf` the share of the mass at or below a value;
   `Rules.distributions` each part's distribution at the inputs.
+
+### A categorical input
+
+An input may be categorical: the time of day, a rain intensity. Its labels
+are the file's `labels` (in order), or, from version 3, its categorical
+concept's literals. A part reading it is written at its labels, in that
+order, and nothing lies between two of them; a number input beside it is
+interpolated as usual:
+
+```yaml
+inputs:
+  time_of_day: {labels: [day, dusk, night, dawn], default: day}
+quantities:
+  carla_sun_altitude:
+    parts:
+      time:
+        at: {time_of_day: [day, dusk, night, dawn]}
+        uniform: {low: [10, -6, -30, -6], high: [70, 0, -6, 0]}
+```
+
+It is given as a label (`rules.range("carla_sun_altitude", {"time_of_day":
+"dusk"})`); its `default` is one. A label the part is not written at is an
+error, not a value between two. A fit reads it as a label in its rows and
+writes the part's labels back; a sampler's knob or effect reads the label the
+case drew for the attribute it stands for. A categorical concept has no
+`unit`. `Rules.input_labels` gives each categorical input's labels.
 
 ### A part that reads no input
 
