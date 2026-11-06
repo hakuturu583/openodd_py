@@ -992,10 +992,12 @@ impl<'r> Reader<'r> {
     /// The concept `reference` names: its id, or a dotted tail of its path.
     fn concept(&self, reference: &str, where_: &str) -> Result<&Concept> {
         let suffix = format!(".{reference}");
+        // A scenario parameter answers to its full name only: one sharing a
+        // tail with a taxonomy concept leaves the concept's name unambiguous.
         let found: Vec<&Concept> = self
             .concepts
             .values()
-            .filter(|c| c.name() == reference || c.name().ends_with(&suffix))
+            .filter(|c| c.name() == reference || (!c.parameter && c.name().ends_with(&suffix)))
             .collect();
         match found.len() {
             0 => Err(Error::open_odd(format!(
@@ -1053,7 +1055,8 @@ impl<'r> Reader<'r> {
             .concepts
             .values()
             .filter(|c| {
-                (c.name() == reference || c.name().ends_with(&suffix))
+                !c.parameter
+                    && (c.name() == reference || c.name().ends_with(&suffix))
                     && c.path.get(..concept.path.len()) != Some(&concept.path[..])
             })
             .collect();
@@ -2580,6 +2583,18 @@ ODD:
         );
         let e = load_binding(&b, &Units1).unwrap_err().to_string();
         assert!(e.contains("is a scenario parameter"), "{e}");
+
+        // One sharing a tail with a concept leaves the concept's name as it
+        // was: `speed` and `gap` still name the taxonomy's.
+        let b = write(
+            dir.path(),
+            "b3.yaml",
+            "openodd: [odd.yaml]\nparameters:\n  scenario.speed: {type: float velocity}\n  \
+             scenario.gap: {type: float length}\nprobes:\n  speed: {probe: speed_kph}\n",
+        );
+        let odd = load_binding(&b, &Units1).unwrap().odd;
+        assert!(odd.attribute("scenario.speed").unwrap().parameter);
+        assert!(!odd.attribute("speed").unwrap().parameter);
     }
 
     #[test]
