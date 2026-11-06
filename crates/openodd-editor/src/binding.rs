@@ -78,6 +78,8 @@ pub struct RuleInputInfo {
     /// The key of the knob whose written value it is.
     pub knob: Option<String>,
     pub text: String,
+    /// The taxonomy concept it stands for: a cause (`None`: unclassified).
+    pub concept: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -132,6 +134,7 @@ impl Manifest {
                 name: text_of(&k),
                 knob: v.get("knob").map(text_of),
                 text: v.get("text").map(text_of).unwrap_or_default(),
+                concept: v.get("concept").map(text_of),
             });
         }
         if let Some(Value::Sequence(rs)) = top.get("rules") {
@@ -610,6 +613,17 @@ mod tests {
             .probe_unit("snow")
             .unwrap_err()
             .contains("unknown probe 'snow'"));
+    }
+
+    #[test]
+    fn a_manifest_says_which_rule_inputs_are_concepts() {
+        let text = "openodd_backend: 1\nname: X\nrule_inputs:\n  rate: {concept: weather.rainfall_rate, unit: mm/h}\n  water: {}\n";
+        let m = Manifest::from_text(text).unwrap();
+        assert_eq!(
+            m.rule_input("rate").unwrap().concept.as_deref(),
+            Some("weather.rainfall_rate")
+        );
+        assert_eq!(m.rule_input("water").unwrap().concept, None);
     }
 
     #[test]
