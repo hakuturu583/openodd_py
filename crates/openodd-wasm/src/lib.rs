@@ -756,22 +756,30 @@ impl RulesView {
             .map_err(js)
     }
 
-    /// The locations a rule file's `text`, read from `source`, extends: a
-    /// JSON array of the URLs (or paths) to fetch.
+    /// The rule files a rule file's `text`, read from `source`, extends: a
+    /// JSON array of the URLs (or paths) to fetch, each a rule file whose
+    /// own references are followed. The taxonomy a version 3 file names is
+    /// not among them ([`RulesView::taxonomy_reference`]).
     pub fn references(text: &str, source: &str) -> Result<String, JsError> {
-        let refs = openodd::rules::RuleSet::references(text, source, &rule_origin(source))
+        let refs = openodd::rules::RuleSet::extends_references(text, source, &rule_origin(source))
             .map_err(|e| js(e.to_string()))?;
         let mut out = Vec::new();
         for r in refs {
-            if let openodd::rules::Origin::Git(_) = r {
-                return Err(js(format!(
-                    "{source}: a git source ({}) cannot be read in the browser",
-                    r.label()
-                )));
-            }
-            out.push(r.label());
+            out.push(browser_label(&r, source)?);
         }
         Ok(Json::from(out).to_string())
+    }
+
+    /// The taxonomy a version 3 rule file's `text` names, as a URL (or path)
+    /// to fetch, or `null`: an OpenODD file, fetched but not followed.
+    pub fn taxonomy_reference(text: &str, source: &str) -> Result<String, JsError> {
+        let found = openodd::rules::RuleSet::taxonomy_reference(text, source, &rule_origin(source))
+            .map_err(|e| js(e.to_string()))?;
+        Ok(match found {
+            Some(r) => Json::from(browser_label(&r, source)?),
+            None => Json::Null,
+        }
+        .to_string())
     }
 
     /// `[{location, sha256}]` of every rule file read, as JSON.
@@ -847,4 +855,15 @@ pub fn styles() -> String {
 #[wasm_bindgen]
 pub fn script() -> String {
     format!("{}\n{}", html::script(), rules_view::script())
+}
+
+/// The label a browser fetches `origin` by; a git source cannot be read there.
+fn browser_label(origin: &openodd::rules::Origin, source: &str) -> Result<String, JsError> {
+    if let openodd::rules::Origin::Git(_) = origin {
+        return Err(js(format!(
+            "{source}: a git source ({}) cannot be read in the browser",
+            origin.label()
+        )));
+    }
+    Ok(origin.label())
 }
