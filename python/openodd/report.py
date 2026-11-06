@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import logging
 import sys
 from collections.abc import Iterable, Sequence
@@ -589,8 +590,13 @@ def main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-coverage"
             if not name or not quantity:
                 parser.error(f"--knob-quantity {spec}: expected ATTRIBUTE=QUANTITY")
             quantities[name] = quantity
+        # What the file extends, from where it is written: a local path
+        # relative to its folder, a URL as given.
+        extends = args.rules
+        if not extends.startswith(("https://", "http://")):
+            extends = os.path.relpath(Path(extends).resolve(), args.drift_rules.parent.resolve())
         text = CasePlot([doc for _, doc in documents]).drift_rules(
-            Rules.read(args.rules), quantities, extends=args.rules, measured_at=args.measured_at)
+            Rules.read(args.rules), quantities, extends=extends, measured_at=args.measured_at)
         if text:
             args.drift_rules.parent.mkdir(parents=True, exist_ok=True)
             args.drift_rules.write_text(text, encoding="utf-8")

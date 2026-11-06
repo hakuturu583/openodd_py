@@ -354,7 +354,9 @@ class CasePlot:
         drift = self.drift(scenario=scenario, environment=environment, measured_at=measured_at)
         by_attribute = {a["attribute"]: a for a in drift.get("attributes", [])}
         when = date if date is not None else _dt.datetime.now(_dt.timezone.utc).date().isoformat()
-        parts: list[str] = []
+        # Each trusted correction, by the quantity its knob writes: several
+        # attributes may move the axes of one quantity, even of one part.
+        moves: dict[str, list[tuple[str, float, float, dict[str, Any]]]] = {}
         for attribute, quantity in quantities.items():
             a = by_attribute.get(attribute)
             if a is None or (a.get("calibration") or {}).get("status") != "suggest":
@@ -363,25 +365,43 @@ class CasePlot:
             if slope <= 0:
                 raise ValueError(f"{attribute}: the runs staged it with a negative slope ({slope})")
             rule_input = _rule_input_of(rules, attribute)
-            basis = {
-                "kind": "fitted",
-                "data": {"rows": int(a["summary"]["runs"])},
-                "calibration": {"r2": float(a["fit"]["r2"]), "residual_std": float(a["fit"]["residual_std"])},
-                "by": by,
+            fit = {
+                "attribute": attribute,
+                "rows": int(a["summary"]["runs"]),
+                "r2": float(a["fit"]["r2"]),
+                "residual_std": float(a["fit"]["residual_std"]),
                 "text": f"{attribute} was staged as {slope:.6g} x drawn + {intercept:.6g}: "
                 f"the points of {rule_input} moved so the measured value is the drawn one",
             }
-            if when:
-                basis["date"] = when
+            moves.setdefault(quantity, []).append((rule_input, slope, intercept, fit))
+        parts: list[str] = []
+        for quantity, moved in moves.items():
             written = []
             for part in rules.parts(quantity):
                 axes = rules.part_axes(quantity, part)
-                if rule_input not in [n for n, _ in axes]:
+                names = [n for n, _ in axes]
+                here = [m for m in moved if m[0] in names]
+                if not here:
                     continue
+                by_input = {m[0]: m for m in here}
                 at = ", ".join(
-                    f"{json.dumps(n)}: {json.dumps([slope * x + intercept if n == rule_input else x for x in pts])}"
+                    f"{json.dumps(n)}: "
+                    + json.dumps([by_input[n][1] * x + by_input[n][2] for x in pts] if n in by_input else pts)
                     for n, pts in axes
                 )
+                fits = [m[3] for m in here]
+                basis: dict[str, Any] = {
+                    "kind": "fitted",
+                    "data": {"rows": min(f["rows"] for f in fits)},
+                    "calibration": {
+                        "r2": min(f["r2"] for f in fits),
+                        "residual_std": max(f["residual_std"] for f in fits),
+                    },
+                    "by": by,
+                    "text": "; ".join(f["text"] for f in fits),
+                }
+                if when:
+                    basis["date"] = when
                 written.append(f"      {json.dumps(part)}:\n        at: {{{at}}}\n        basis: {json.dumps(basis)}\n")
             if written:
                 parts.append(f"  {json.dumps(quantity)}:\n    parts:\n" + "".join(written))
