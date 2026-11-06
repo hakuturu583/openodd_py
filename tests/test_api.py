@@ -218,25 +218,6 @@ def test_an_unknown_probe_is_refused(tmp_path: Path) -> None:
         openodd.load_odd_binding(tmp_path / "b.yaml", backend=backend())
 
 
-def test_scenario_parameters(tmp_path: Path) -> None:
-    """#92: what a scenario sets up is measured and covered, but is no concept."""
-    odd = openodd.load_openodd(
-        "TAXONOMY: {speed: float velocity}\n",
-        parameters={"scenario.lead_gap": {"type": "float length", "measure": "gap_m", "buckets": [0, 10, 20]}},
-        backend=Backend(readers={"measure": lambda k: ((lambda c: c.get(k)), "m")}),
-    )
-    attrs = {a.name: a for a in odd.attributes}
-    gap = attrs["scenario.lead_gap"]
-    assert gap.parameter and not attrs["speed"].parameter
-    assert gap.unit == "m" and gap.item is not None and gap.item.labels == ["[0, 10)", "[10, 20]"]
-    assert gap.concept["kind"] == "number"
-    with pytest.raises(OpenOddError, match="is a scenario parameter"):
-        openodd.load_openodd(
-            "TAXONOMY: {speed: float velocity}\nMODULES:\n  m: {INCLUDE_AND: {scenario.lead_gap: '< 5 m'}}\n",
-            parameters={"scenario.lead_gap": {"type": "float length"}},
-        )
-
-
 def test_a_key_written_twice_is_refused() -> None:
     with pytest.raises(OpenOddError, match="written twice"):
         openodd.load_openodd("TAXONOMY: {flag: boolean}\nMODULES:\n  m: {INCLUDE_AND: {flag: true, flag: false}}\n")

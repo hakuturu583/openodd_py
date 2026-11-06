@@ -619,13 +619,6 @@ impl Attribute {
         concept_value(&self.inner.concept, &self.inner.literals).to_string()
     }
 
-    /// Whether it is a scenario parameter (a binding's `parameters`), not a
-    /// taxonomy concept.
-    #[getter]
-    fn parameter(&self) -> bool {
-        self.inner.parameter
-    }
-
     /// The attributes a derived attribute is worked out from (empty otherwise).
     #[getter]
     fn derived_from(&self) -> Vec<String> {
@@ -1115,11 +1108,9 @@ fn load_file(path: PathBuf, resolver: PyObject) -> PyResult<Odd> {
 }
 
 /// `sources`: paths (`str` or `os.PathLike`), YAML text, or `(url, rev, path)`
-/// for a file in git. `bindings`, `situations` and `parameters` as YAML (or
-/// JSON) text.
+/// for a file in git. `bindings` and `situations` as YAML (or JSON) text.
 #[pyfunction]
-#[pyo3(signature = (sources, resolver, *, bindings=None, name=None, text="", situations=None, parameters=None))]
-#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (sources, resolver, *, bindings=None, name=None, text="", situations=None))]
 fn load_openodd(
     sources: &Bound<'_, PyList>,
     resolver: PyObject,
@@ -1127,7 +1118,6 @@ fn load_openodd(
     name: Option<String>,
     text: &str,
     situations: Option<&str>,
-    parameters: Option<&str>,
 ) -> PyResult<Odd> {
     let mut srcs = Vec::new();
     for s in sources.iter() {
@@ -1144,7 +1134,6 @@ fn load_openodd(
         name,
         text: text.into(),
         situations: yaml_node(situations)?,
-        parameters: yaml_node(parameters)?,
     };
     loader::load_openodd(&srcs, &options, &PyResolver(resolver))
         .map(Odd::from_loaded)
