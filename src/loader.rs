@@ -1022,6 +1022,10 @@ impl<'r> Reader<'r> {
                     Kind::Categorical => {
                         let literals: Vec<String> = match value {
                             Node::Sequence(items) => items.iter().map(NodeExt::literal).collect(),
+                            Node::String(s) => match literal_list(s, target.ordered) {
+                                Some(items) => items,
+                                None => vec![value.literal()],
+                            },
                             other => vec![other.literal()],
                         };
                         if target.definitions.is_empty()
@@ -1893,6 +1897,24 @@ fn require_literals(concept: &Concept, literals: &[String], where_: &str) -> Res
     Ok(())
 }
 
+/// The literals a bracketed string lists (`"[a, b]"`), when that is the only
+/// way to read it.
+///
+/// tier4/taxonomy's export quotes every expression, lists of literals too. One
+/// item is never a range; several are one only on ordered literals, where
+/// `"[a, b]"` stays the range it means.
+fn literal_list(text: &str, ordered: bool) -> Option<Vec<String>> {
+    let inner = text.trim().strip_prefix('[')?.strip_suffix(']')?;
+    if inner.contains("..") {
+        return None;
+    }
+    let items: Vec<String> = inner.split(',').map(|x| x.trim().to_string()).collect();
+    if items.iter().any(|x| x.is_empty()) || (ordered && items.len() > 1) {
+        return None;
+    }
+    Some(items)
+}
+
 fn categorical(
     concept: &Concept,
     attribute: String,
@@ -1900,6 +1922,10 @@ fn categorical(
     where_: &str,
 ) -> Result<Condition> {
     let name = concept.name();
+    if let Some(items) = literal_list(text, concept.ordered) {
+        require_literals(concept, &items, where_)?;
+        return is_in(attribute, &items);
+    }
     let range = RANGE_RE.captures(text);
     let bound = BOUND_RE.captures(text);
     if range.is_some() || bound.is_some() {
@@ -2635,5 +2661,55 @@ MODULES:
         let err =
             load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe).unwrap_err();
         assert!(err.to_string().contains("holds for no value"), "{err}");
+    }
+
+    /// tier4/taxonomy's horizontal plane, its lists of literals quoted.
+    #[test]
+    fn a_list_of_literals_may_be_written_as_a_string() {
+        let text = r#"
+TAXONOMY:
+  lane_curvature: float
+  surface: [dry, wet, icy]
+  horizontal_plane_type:
+    straight: {horizontal_plane_detail_type: "[no_curved]"}
+    curve: {horizontal_plane_detail_type: "[curved_left, curved_right]"}
+  horizontal_plane_detail_type:
+    no_curved: {lane_curvature: "[-0.02 .. 0.02]"}
+    curved_left: {lane_curvature: "< -0.02"}
+    curved_right: {lane_curvature: "> 0.02"}
+MODULES:
+  grippy:
+    INCLUDE_AND:
+      surface: "[dry, wet]"
+"#;
+        let loaded = load_openodd(
+            &[Source::Text(text.into())],
+            &Options {
+                bindings: Some(
+                    parse_all("lane_curvature: {probe: k}\nsurface: {probe: s}")
+                        .unwrap()
+                        .remove(0),
+                ),
+                ..Default::default()
+            },
+            &AnyProbe,
+        )
+        .unwrap();
+        let odd = loaded.odd;
+        let at = |k: f64| {
+            let mut v = crate::model::Values::new();
+            v.insert("lane_curvature".into(), Value::Float(k));
+            v.insert("surface".into(), Value::Str("dry".into()));
+            odd.complete(&mut v);
+            v["horizontal_plane_type"].clone()
+        };
+        assert_eq!(at(0.0), Value::Str("straight".into()));
+        assert_eq!(at(0.05), Value::Str("curve".into()));
+        assert_eq!(at(-0.05), Value::Str("curve".into()));
+        assert_eq!(odd.outside_buckets("surface"), ["icy"]);
+        // On ordered literals, "[a, b]" is still the range from a to b.
+        assert_eq!(literal_list("[a, b]", true), None);
+        assert_eq!(literal_list("[a]", true), Some(vec!["a".to_string()]));
+        assert_eq!(literal_list("[1 .. 2]", false), None);
     }
 }
