@@ -68,3 +68,23 @@ def test_a_file_without_units_is_refused(tmp_path: Path, capsys: pytest.CaptureF
     (tmp_path / "empty.xml").write_text("<TAXONOMY/>")
     assert main([str(tmp_path / "empty.xml")]) == 1
     assert "no units found" in capsys.readouterr().err
+
+
+def test_a_known_unit_anchors_the_unknown_ones() -> None:
+    """#83: yd and furlong before m must still convert through m."""
+    from openodd.taxonomy_units import ModelUnit
+
+    units = [
+        ModelUnit("yd", "yd", 1 / 0.9144, 0.0, ("length",)),
+        ModelUnit("furlong", "furlong", 1 / 201.168, 0.0, ("length",)),
+        ModelUnit("m", "m", 1.0, 0.0, ("length",)),
+    ]
+    block = conversion_block(units)
+    assert list(block["length"]) == ["m"]
+    odd = openodd.load_openodd(
+        conversion_yaml(units) + "TAXONOMY:\n  d: float length\nMODULES:\n  near:\n    INCLUDE_AND:\n      d: \"< 1 yd\"\n",
+        bindings={"d": {"probe": "d"}},
+        backend=openodd.Backend(name="t", probes={"d": (lambda c: c.get("d"), "m")}),
+    )
+    assert odd.evaluate(odd.sample({"d": 0.9})).inside
+    assert not odd.evaluate(odd.sample({"d": 0.95})).inside  # 1 yd is 0.9144 m

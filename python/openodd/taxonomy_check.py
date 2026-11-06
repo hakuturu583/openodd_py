@@ -34,7 +34,7 @@ from typing import Any, Optional, Union
 
 from . import _core
 from .backend import Backend
-from .loader import load_odd_file, load_openodd
+from .loader import _wrap, load_openodd
 from .model import OddDefinition
 from .rules import Rules, RulesError
 
@@ -159,7 +159,10 @@ def check_taxonomy(
     theirs = _declared(ref)
     findings: list[Finding] = []
     for path in odds:
-        odd = load_odd_file(Path(path), backend=_AnyProbe(name="check"))
+        # What it declares, measured by nothing: a binding's units are its
+        # backend's to say, and no backend is here.
+        backend = _AnyProbe(name="check")
+        odd = _wrap(_core.load_declared(Path(path), backend), backend)
         for name, ours in _declared(odd).items():
             if ours.get("kind") == "other":
                 continue
@@ -177,13 +180,22 @@ def check_taxonomy(
                 "unclassified", name, f"{path} (input)",
                 "a rule input that stands for no taxonomy concept (version 2 rules)",
             ))
+        # What the rules' own taxonomy declares each concept to be: the
+        # declaration the rules were checked against when read, kept by the
+        # core (its label may be a git source, not a readable path).
+        own = rule_set.taxonomy_concepts
         for name, (concept, _unit) in rule_set.input_concepts.items():
+            ours = own.get(concept, {"kind": "number"})
+            where = f"{path} (input {name})"
             if concept not in theirs:
                 findings.append(Finding(
-                    "missing", concept, f"{path} (input {name})",
-                    "a rule input's concept the reference does not declare",
-                    {"kind": "number"},
+                    "missing", concept, where,
+                    "a rule input's concept the reference does not declare", ours,
                 ))
+                continue
+            differs = _compare(concept, ours, theirs[concept])
+            if differs:
+                findings.append(Finding("differs", concept, where, differs, ours))
     return TaxonomyCheck(reference=label, findings=findings)
 
 
