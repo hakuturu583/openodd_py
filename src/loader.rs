@@ -576,6 +576,16 @@ impl Concept {
     fn name(&self) -> String {
         self.path.join(".")
     }
+
+    /// The shortest name it answers to: a taxonomy concept's last segment, a
+    /// scenario parameter's full name (it answers to nothing shorter).
+    fn short_name(&self) -> String {
+        if self.parameter {
+            self.name()
+        } else {
+            self.path.last().cloned().unwrap_or_default()
+        }
+    }
 }
 
 fn is_type_spec(value: &Node) -> bool {
@@ -1761,7 +1771,7 @@ impl<'r> Reader<'r> {
                     "{where_}: a module's id must not contain 'unknown'"
                 )));
             }
-            if self.concepts.values().any(|c| c.path.last() == Some(&name)) {
+            if self.concepts.values().any(|c| c.short_name() == name) {
                 return Err(Error::open_odd(format!(
                     "{where_}: a module's id must not be a concept's"
                 )));
@@ -1893,11 +1903,7 @@ impl<'r> Reader<'r> {
         }
         self.mark_situations(&mut modules)?;
         self.threshold_buckets(&modules)?;
-        let tails: BTreeSet<String> = self
-            .concepts
-            .values()
-            .filter_map(|c| c.path.last().cloned())
-            .collect();
+        let tails: BTreeSet<String> = self.concepts.values().map(Concept::short_name).collect();
         let clash: Vec<String> = self.labels.intersection(&tails).cloned().collect();
         if !clash.is_empty() {
             return Err(Error::open_odd(format!(
@@ -2546,6 +2552,22 @@ ODD:
         assert!(side.parameter);
         assert_eq!(side.literals, ["left", "right"]);
         assert!(!odd.attribute("speed").unwrap().parameter);
+
+        // Nor does it take a module's label or id: `lead` and `side` stay theirs.
+        write(
+            dir.path(),
+            "odd4.yaml",
+            "TAXONOMY:\n  speed: float velocity\nMODULES:\n  side:\n    LABEL: lead\n    \
+             INCLUDE_AND:\n      speed: \"< 60 km/h\"\n  top:\n    INCLUDE_AND:\n      lead: true\n",
+        );
+        let b = write(
+            dir.path(),
+            "b4.yaml",
+            "openodd: [odd4.yaml]\nparameters:\n  scenario.lead: {type: float length}\n  \
+             scenario.side: {type: [left, right]}\n",
+        );
+        let odd = load_binding(&b, &Units1).unwrap().odd;
+        assert!(odd.attribute("scenario.lead").unwrap().parameter);
     }
 
     #[test]
