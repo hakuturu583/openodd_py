@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use openodd::loader::{BOUND_RE, IDENTIFIER, RANGE_RE};
+use openodd::loader::{range_ends, BOUND_RE, IDENTIFIER, RANGE_RE};
 use serde_norway::{Mapping, Value};
 
 /// A fresh id: what the UI keys rows by, so a row keeps its inputs as others
@@ -185,11 +185,13 @@ pub enum CondValue {
     Literals(Vec<String>),
     /// `<= 60 km/h`, `>= heavy`.
     Compare { op: String, operand: String },
-    /// `[low .. high] unit`.
+    /// `[low .. high] unit`; `(` or `)` leaves an end out.
     Range {
         low: String,
         high: String,
         unit: String,
+        include_low: bool,
+        include_high: bool,
     },
     /// Anything else, as YAML.
     Raw(String),
@@ -251,6 +253,8 @@ impl CondValue {
                 low: String::new(),
                 high: String::new(),
                 unit: String::new(),
+                include_low: true,
+                include_high: true,
             },
             ValueTag::Raw => CondValue::Raw(String::new()),
         }
@@ -511,6 +515,7 @@ pub fn read_value(v: &Value) -> CondValue {
         Value::String(s) => {
             let s = s.trim();
             if let Some(c) = RANGE_RE.captures(s) {
+                let (include_low, include_high) = range_ends(&c);
                 CondValue::Range {
                     low: c["low"].to_string(),
                     high: c["high"].to_string(),
@@ -518,6 +523,8 @@ pub fn read_value(v: &Value) -> CondValue {
                         .name("unit")
                         .map(|u| u.as_str().to_string())
                         .unwrap_or_default(),
+                    include_low,
+                    include_high,
                 }
             } else if let Some(c) = BOUND_RE.captures(s) {
                 CondValue::Compare {
@@ -1087,10 +1094,23 @@ impl CondValue {
             CondValue::Literals(l) if l.len() == 1 => literal_yaml(&l[0]),
             CondValue::Literals(l) => Value::Sequence(l.iter().map(|x| literal_yaml(x)).collect()),
             CondValue::Compare { op, operand } => Value::String(format!("{op} {}", operand.trim())),
-            CondValue::Range { low, high, unit } => Value::String(
-                format!("[{} .. {}] {}", low.trim(), high.trim(), unit.trim())
-                    .trim()
-                    .to_string(),
+            CondValue::Range {
+                low,
+                high,
+                unit,
+                include_low,
+                include_high,
+            } => Value::String(
+                format!(
+                    "{}{} .. {}{} {}",
+                    if *include_low { '[' } else { '(' },
+                    low.trim(),
+                    high.trim(),
+                    if *include_high { ']' } else { ')' },
+                    unit.trim()
+                )
+                .trim()
+                .to_string(),
             ),
             CondValue::Raw(text) => yaml_of(text),
         }
@@ -1401,9 +1421,24 @@ mod tests {
             CondValue::Range {
                 low: "0".into(),
                 high: "40".into(),
-                unit: "km/h".into()
+                unit: "km/h".into(),
+                include_low: true,
+                include_high: true,
             }
         );
+        let half_open = v("'[0.1 .. 2.5) mm/h'");
+        assert_eq!(
+            half_open,
+            CondValue::Range {
+                low: "0.1".into(),
+                high: "2.5".into(),
+                unit: "mm/h".into(),
+                include_low: true,
+                include_high: false,
+            }
+        );
+        assert_eq!(half_open.summary(), "[0.1 .. 2.5) mm/h");
+        assert_eq!(v("'(a .. c]'").summary(), "(a .. c]");
         assert_eq!(v("heavy"), CondValue::Literals(vec!["heavy".into()]));
         assert_eq!(
             v("[a, b]"),
