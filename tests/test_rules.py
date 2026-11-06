@@ -684,3 +684,15 @@ def test_a_boolean_categorical_input_reads_python_booleans() -> None:
     rows += [{"wet": True, "grip": 0.6 + 0.001 * i} for i in range(10)]
     fit = rules.fit(rows)
     assert fit.rules.range("grip", {"wet": False})[0] > 0.95
+
+
+def test_a_backend_reads_a_boolean_label_as_a_label() -> None:
+    backend = Backend(
+        rules=Rules.from_text(
+            # true first: a bool read as 1.0 would be the index of false.
+            "version: 2\ninputs:\n  wet: {labels: [true, false]}\nquantities:\n  grip:\n    parts:\n"
+            "      p:\n        at: {wet: [true, false]}\n        uniform: {low: [0.5, 0.9], high: [0.7, 1.1]}\n"
+        )
+    )
+    assert backend.derived_range("grip", {"wet": True}) == (0.5, 0.7)
+    assert backend.derived_range("grip", {"wet": False}) == (0.9, 1.1)

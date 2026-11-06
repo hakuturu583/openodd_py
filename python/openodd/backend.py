@@ -309,10 +309,13 @@ class Backend:
 
     def rule_values(self, values: Mapping[str, Any]) -> dict[str, Any]:
         """What the rules read of *values*, the inputs a caller has: by
-        default those -- a number as a float, a categorical input's label as
-        given. A backend whose rules read something derived from them (the
+        default those -- a number as a float, anything else (a categorical
+        input's label: a string, a bool, an enum) as given. A backend whose rules read something derived from them (the
         larger of two, say) overrides it."""
-        return {str(k): v if isinstance(v, str) else float(v) for k, v in values.items()}
+        return {
+            str(k): float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+            for k, v in values.items()
+        }
 
     def derived(self, quantity: str, values: Mapping[str, Any]) -> dict[str, float]:
         """``low``, ``high``, ``median`` and ``mean`` of *quantity* at
