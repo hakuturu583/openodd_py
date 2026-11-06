@@ -66,6 +66,8 @@ writes only what it changes over them::
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import hashlib
 import csv
 import json
 import os
@@ -463,6 +465,9 @@ class Rules:
         tolerance: float = 1e-10,
         min_spread: float = 1e-3,
         fixed: Sequence[str] = (),
+        data_files: Sequence[Union[str, "os.PathLike[str]"]] = (),
+        by: Optional[str] = None,
+        date: Optional[str] = None,
     ) -> "RulesFit":
         """The maximum-likelihood fit of these rules to *rows*: data
         measured in the real world -- each row the values seen together, by
@@ -505,6 +510,14 @@ class Rules:
                 input the part reads at one of its points) or
                 ``"grip.water@water=0"`` (every parameter there). A quantity
                 held whole is not fitted.
+            data_files: The files *rows* were read from: each fitted part's
+                ``basis`` names them with their SHA-256, besides the rows
+                and the calibration after the fit (docs/rules.md, "The basis
+                of a part"). A part held whole keeps the basis it has.
+            by: Who fitted, for ``basis.by``: ``openodd <version>`` if not
+                given.
+            date: When, for ``basis.date``: today (UTC) if not given; ``""``
+                writes none.
 
         Raises:
             RulesError: On data that is not numbers, a row outside a normal
@@ -524,6 +537,9 @@ class Rules:
             float(tolerance),
             float(min_spread),
             [str(f) for f in fixed],
+            [(str(f), _sha256_of(f)) for f in data_files],
+            by,
+            _dt.datetime.now(_dt.timezone.utc).date().isoformat() if date is None else date,
         )
         fitted = {
             q["name"]: QuantityFit(
@@ -716,6 +732,19 @@ def read_data(path: Union[str, "os.PathLike[str]"]) -> tuple[list[dict[str, Any]
     return rows, weight
 
 
+def _version() -> str:
+    from . import __version__  # noqa: PLC0415 - the package imports this module
+
+    return __version__
+
+
+def _sha256_of(path: Union[str, "os.PathLike[str]"]) -> str:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError as e:
+        raise RulesError(f"{path}: {e.strerror or e}") from None
+
+
 def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules-fit") -> int:
     """``openodd-rules-fit``: fit a rule file to data, by maximum likelihood."""
     parser = argparse.ArgumentParser(
@@ -760,6 +789,8 @@ def fit_main(argv: Optional[Sequence[str]] = None, *, prog: str = "openodd-rules
             max_iterations=args.max_iterations,
             min_spread=args.min_spread,
             fixed=args.fix,
+            data_files=args.data,
+            by=f"{prog} {_version()}",
         )
         fit.write(args.output, None if args.overlay else args.rules)
     except RulesError as e:

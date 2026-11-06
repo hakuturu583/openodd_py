@@ -2220,9 +2220,18 @@ fn read_basis(node: &Node, at: &Where) -> Result<Basis> {
     }
     if let Some(data) = get(map, "data") {
         let at = at.key("data");
-        let data = mapping(data, &at, &["file", "sha256", "rows"])?;
+        let data = mapping(data, &at, &["file", "sha256", "rows", "files"])?;
         if let Some(rows) = get(data, "rows") {
             number(rows, &at.key("rows"))?;
+        }
+        if let Some(files) = get(data, "files") {
+            let at = at.key("files");
+            let Node::Sequence(items) = untag(files) else {
+                return Err(at.error("a list of {file, sha256}"));
+            };
+            for (k, item) in items.iter().enumerate() {
+                mapping(item, &at.index(k), &["file", "sha256"])?;
+            }
         }
     }
     if let Some(c) = get(map, "calibration") {

@@ -2530,7 +2530,7 @@ impl RuleSet {
     /// The maximum-likelihood fit to `rows` (`crate::rules_fit`); `fixed`
     /// holds values besides the rules' own `fixed`.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (rows, weights=None, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3, fixed=Vec::new()))]
+    #[pyo3(signature = (rows, weights=None, quantities=None, max_iterations=1000, tolerance=1e-10, min_spread=1e-3, fixed=Vec::new(), data_files=Vec::new(), by=None, date=String::new()))]
     fn fit(
         &self,
         py: Python<'_>,
@@ -2541,13 +2541,20 @@ impl RuleSet {
         tolerance: f64,
         min_spread: f64,
         fixed: Vec<String>,
+        data_files: Vec<(String, String)>,
+        by: Option<String>,
+        date: String,
     ) -> PyResult<RuleFit> {
+        let defaults = crate::rules_fit::FitOptions::default();
         let options = crate::rules_fit::FitOptions {
             quantities,
             max_iterations,
             tolerance,
             min_spread,
             fixed,
+            data_files,
+            by: by.unwrap_or(defaults.by),
+            date,
         };
         let inner = py
             .allow_threads(|| self.inner.fit(&rows, weights.as_deref(), &options))

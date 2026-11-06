@@ -213,6 +213,9 @@ class RuleSet:
         tolerance: float = 1e-10,
         min_spread: float = 1e-3,
         fixed: list[str] = ...,
+        data_files: list[tuple[str, str]] = ...,
+        by: Optional[str] = None,
+        date: str = "",
     ) -> RuleFit: ...
     def calibration(
         self, rows: list[dict[str, float]], weights: Optional[list[float]] = None
