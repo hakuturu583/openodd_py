@@ -1046,6 +1046,9 @@ fn InputCard(name: String) -> impl IntoView {
     };
     // The taxonomy concept it stands for, and the unit of its points.
     let set_concept = move |ev: leptos::ev::Event| {
+        if !r.doc.with_untracked(RulesDoc::names_concepts) {
+            return;
+        }
         let c = event_target_value(&ev).trim().to_string();
         let n = current.get_untracked();
         r.doc.update(|d| {
@@ -1056,6 +1059,9 @@ fn InputCard(name: String) -> impl IntoView {
         });
     };
     let set_unit = move |ev: leptos::ev::Event| {
+        if !r.doc.with_untracked(RulesDoc::names_concepts) {
+            return;
+        }
         let u = event_target_value(&ev).trim().to_string();
         let n = current.get_untracked();
         r.doc.update(|d| {
@@ -1067,6 +1073,9 @@ fn InputCard(name: String) -> impl IntoView {
     };
     let is_cause =
         Memo::new(move |_| described.with(|i| i.as_ref().is_some_and(|i| i.concept.is_some())));
+    // Concepts are version 3's, with the taxonomy the file names: a version
+    // 2 file that wrote one could not be read.
+    let names_concepts = Memo::new(move |_| r.doc.with(RulesDoc::names_concepts));
     let remove = move |_| {
         let n = current.get_untracked();
         r.doc.update(|d| d.inputs.retain(|i| i.name != n));
@@ -1085,16 +1094,19 @@ fn InputCard(name: String) -> impl IntoView {
                 } else {
                     "Unclassified: it stands for no taxonomy concept. Version 3 rules refuse that -- name its concept, or make it a quantity."
                 }}</p>
+                <Show when=move || !names_concepts.get()>
+                    <p class="hint">"A taxonomy concept is written from version 3, which names its taxonomy (docs/rules.md, \"Inputs and the taxonomy\"); this file is version 2."</p>
+                </Show>
                 <div class="grid2">
                     <label class="field">
                         <span>"Taxonomy concept"</span>
-                        <input placeholder="none" class="mono"
+                        <input placeholder="none" class="mono" disabled=move || !names_concepts.get()
                             prop:value=move || described.with(|i| i.as_ref().and_then(|i| i.concept.clone()).unwrap_or_default())
                             on:change=set_concept/>
                     </label>
                     <label class="field">
                         <span>"Unit of its points"</span>
-                        <input placeholder="the concept's"
+                        <input placeholder="the concept's" disabled=move || !names_concepts.get()
                             prop:value=move || described.with(|i| i.as_ref().map(|i| i.unit.clone()).unwrap_or_default())
                             on:change=set_unit/>
                     </label>
