@@ -20,7 +20,7 @@ pub fn fresh_id() -> u64 {
 
 pub const PRIMITIVES: [&str; 4] = ["integer", "long", "float", "double"];
 /// Unit types the standard's unit table knows, offered when a number is edited.
-pub const UNIT_TYPES: [&str; 14] = [
+pub const UNIT_TYPES: [&str; 15] = [
     "velocity",
     "length",
     "time",
@@ -35,6 +35,7 @@ pub const UNIT_TYPES: [&str; 14] = [
     "frequency",
     "bandwidth",
     "percentage",
+    "traffic_rate",
 ];
 pub const OPERATORS: [&str; 4] = ["<", "<=", ">", ">="];
 

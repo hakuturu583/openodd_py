@@ -111,6 +111,48 @@ def test_a_derived_categorical_is_worked_out_from_its_number(binding: Path) -> N
     assert odd.sample({})["rain"] is None
 
 
+def test_tier4_taxonomy_unit_types() -> None:
+    # As tier4/taxonomy writes its traffic density and wind.
+    odd = openodd.load_openodd(
+        """
+TAXONOMY:
+  traffic_flow_rate: float traffic_rate
+  traffic_density_level:
+    low: {traffic_flow_rate: "< 100 veh/h"}
+    medium: {traffic_flow_rate: "[100 .. 300] veh/h"}
+    high: {traffic_flow_rate: "> 300 veh/h"}
+  wind_speed: float speed_km_per_h
+  wind_intensity:
+    calm: {wind_speed: "< 5 km/h"}
+    windy: {wind_speed: ">= 5 km/h"}
+  gradient_angle: float plane_angle_in_degrees
+MODULES:
+  gentle:
+    INCLUDE_AND:
+      gradient_angle: "<= 0.1 rad"
+      wind_speed: "<= 2 m/s"
+""",
+        bindings={
+            "traffic_flow_rate": {"probe": "flow", "unit": "veh/min"},
+            "wind_speed": {"probe": "wind"},
+            "gradient_angle": {"probe": "grade"},
+        },
+        backend=Backend(
+            name="test",
+            probes={
+                "flow": (lambda c: c.get("flow"), "veh/min"),
+                "wind": (lambda c: c.get("wind"), "km/h"),
+                "grade": (lambda c: c.get("grade"), "deg"),
+            },
+        ),
+    )
+    sample = odd.sample({"flow": 4, "wind": 7.0, "grade": 5.0})
+    assert sample["traffic_density_level"] == "medium"  # 240 veh/h
+    assert sample["wind_intensity"] == "windy"
+    assert odd.evaluate(sample).inside  # 7 km/h <= 2 m/s, 5 deg <= 0.1 rad
+    assert not odd.evaluate(odd.sample({"flow": 4, "wind": 7.5, "grade": 5.0})).inside
+
+
 def test_buckets_outside_the_odd(binding: Path) -> None:
     odd = openodd.load_odd_binding(binding, backend=backend())
     assert odd.outside_buckets("speed") == ["[50, 80]"]
