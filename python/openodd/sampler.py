@@ -394,6 +394,11 @@ class OddSampler:
             k for k in controls.values() if k.quantity is not None and id(k) not in used
         ]
         self._effect_inputs = _effect_inputs(backend, odd, self._effects, (n for n, _ in chosen))
+        if not chosen and not self._effects:
+            raise ValueError(
+                f"OddSampler: nothing of ODD {odd.name} can be drawn: no attribute is given a knob, "
+                "and there are no effects"
+            )
         self._rules = backend.active_rules if self._from_rules or self._effects else None
         self._seed = str(seed)
         if strategy is None:

@@ -315,12 +315,8 @@ impl Sampler {
                 labels,
             });
         }
-        if axes.is_empty() {
-            return Err(Error::value(format!(
-                "OddSampler: nothing of ODD {} can be drawn: no attribute is given a knob",
-                odd.name
-            )));
-        }
+        // No axes: nothing of the ODD is drawn, and a case is the ODD with
+        // every attribute open (what draws only effects from the rules has).
         let sampled: HashSet<&str> = axes.iter().map(|a| a.attribute.as_str()).collect();
         let mut decided = HashMap::new();
         let situations: Vec<String> = odd

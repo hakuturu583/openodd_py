@@ -507,3 +507,16 @@ def test_a_knob_on_an_attribute_reads_an_effect_at_the_value_written(tmp_path: P
     for case in OddSampler(o, knobs, seed=8, backend=b, effects=effects).sample(20):
         # rain_and_staged copies staged, whatever the rain: as written, rounded.
         assert _written(case, "env.copy") == pytest.approx(_written(case, "scenario.staged"))
+
+
+def test_effects_alone_are_drawn(tmp_path: Path) -> None:
+    """With only effects, each case leaves the ODD's attributes open and
+    writes the effects; with neither, there is nothing to draw."""
+    _, b, o = _effects_setup(tmp_path)
+    effects = [OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap")]
+    cases = OddSampler(o, seed=1, backend=b, effects=effects).sample(5)
+    assert [c.index for c in cases] == list(range(5))
+    for case in cases:
+        assert case.values == {} and 2 <= _written(case, "scenario.npc_gap_m") <= 30
+    with pytest.raises(ValueError, match="nothing of ODD .* can be drawn"):
+        OddSampler(o, backend=b)
