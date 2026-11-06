@@ -329,6 +329,11 @@ def test_the_case_keeps_what_the_rules_wrote_and_a_plot_places_it(tmp_path: Path
         doc = json.loads(json.dumps(collector.to_dict("rain")))
         assert doc["case"]["quantities"] == case.quantities
         docs.append(doc)
+    # An integer knob's case keeps the value it ran with: the rounded one.
+    whole = OddKnob("env.precipitation", quantity="carla_precipitation", limits=(0, 100), integer=True)
+    for case in OddSampler(o, knobs={"weather.rainfall_rate": whole}, seed=5, backend=b).sample(6):
+        (written,) = [x for x in case.overrides if x.startswith("env.precipitation=")]
+        assert case.quantities["carla_precipitation"] == int(written.split("=", 1)[1])
     plot = openodd.CasePlot(docs)
     assert "carla_precipitation" in plot.attributes
     data = plot.data(x="weather.rainfall_rate", y="carla_precipitation")

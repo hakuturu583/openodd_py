@@ -184,7 +184,7 @@ class OddSample:
             that (:class:`~.flaky.FlakyMetrics`); ``None`` for a case the
             sampler's own policy drew.
         quantities: Rules quantity -> the value a knob wrote from the rules
-            (``OddKnob(quantity=...)``), after its limits: the effects the
+            (``OddKnob(quantity=...)``), after its limits and rounding: the effects the
             case ran with, which are no attributes of the ODD.
     """
 
@@ -406,8 +406,9 @@ class OddSampler:
             y = self._rules.quantile(str(knob.quantity), {rule_input: float(x)}, p)
             if knob.limits is not None:
                 y = min(max(y, knob.limits[0]), knob.limits[1])
-            quantities[str(knob.quantity)] = float(y)
             written = str(int(round(y))) if knob.integer else repr(float(y))
+            # What the case ran with: the value written, rounded if it was.
+            quantities[str(knob.quantity)] = float(written)
             prefix = f"{knob.key}="
             overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
         return dataclasses.replace(case, overrides=overrides, quantities=quantities)
