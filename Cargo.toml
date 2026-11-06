@@ -1,6 +1,6 @@
 [package]
 name = "openodd"
-version = "0.31.6"
+version = "0.31.7"
 edition = "2021"
 rust-version = "1.87"
 description = "ASAM OpenODD 1.0: read, evaluate, version and sample Operational Design Domains"
