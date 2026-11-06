@@ -9,7 +9,7 @@ from statistics import NormalDist
 
 import pytest
 
-from openodd import Backend, Rules, RulesError
+from openodd import Backend, Rules, RulesError, UnclassifiedInputsWarning
 
 GRIP = """
 version: 2
@@ -327,3 +327,47 @@ class TestChains:
         )
         with pytest.raises(RulesError, match="cycle: a -> b -> a"):
             Rules.from_text(text)
+
+
+TAXONOMY = """
+TAXONOMY:
+  weather:
+    rainfall_rate: float precipitation_rate
+    rain: [none, some]
+"""
+
+GRIP_V3 = """
+version: 3
+taxonomy: taxonomy.yaml
+inputs:
+  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}
+quantities:
+  grip:
+    parts:
+      rain:
+        at: {rainfall_rate: [0, 10]}
+        uniform: {low: [0.9, 0.5], high: [1.1, 0.7]}
+"""
+
+
+class TestInputsAndTheTaxonomy:
+    def test_version_3_inputs_stand_for_taxonomy_concepts(self, tmp_path: Path) -> None:
+        (tmp_path / "taxonomy.yaml").write_text(TAXONOMY)
+        (tmp_path / "grip.yaml").write_text(GRIP_V3)
+        rules = Rules.read(tmp_path / "grip.yaml")
+        assert rules.version == 3
+        assert rules.taxonomy is not None and rules.taxonomy[0].endswith("taxonomy.yaml")
+        assert rules.input_concepts == {"rainfall_rate": ("weather.rainfall_rate", "mm/h")}
+        assert rules.unclassified_inputs == []
+
+    def test_version_3_refuses_an_input_that_is_no_concept(self, tmp_path: Path) -> None:
+        (tmp_path / "taxonomy.yaml").write_text(TAXONOMY)
+        (tmp_path / "grip.yaml").write_text(GRIP_V3.replace("weather.rainfall_rate", "weather.rain"))
+        with pytest.raises(RulesError, match="is not a number"):
+            Rules.read(tmp_path / "grip.yaml")
+
+    def test_version_2_inputs_are_unclassified(self) -> None:
+        with pytest.warns(UnclassifiedInputsWarning, match=r"version 2 rules read inputs .*\(water\)"):
+            rules = Rules.from_text(GRIP)
+        assert rules.version == 2
+        assert rules.unclassified_inputs == ["water"]

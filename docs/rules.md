@@ -36,8 +36,9 @@ quantities:
 
 | Key | Meaning |
 |---|---|
-| `version` | `2` |
-| `inputs` | Optional: name → `default` (the value read when none is given) and `text` |
+| `version` | `2` or `3` ([Inputs and the taxonomy](#inputs-and-the-taxonomy)) |
+| `taxonomy` | Version 3: the OpenODD taxonomy the inputs are concepts of -- a path, URL or git source, as `extends` takes |
+| `inputs` | Optional: name → `default` (the value read when none is given) and `text`; from version 3 also `concept` and `unit` |
 | `quantities` | Name → a quantity: `parts`, `combine` and an optional `text` |
 | `combine` | How the parts' values are joined: `min` (the default) or `max` |
 | `parts` | Name → a part: `at`, one distribution, an optional `text`, and an optional `fixed` |
@@ -67,6 +68,51 @@ quantities:
 - `Rules.evaluate` gives `low`, `high`, `median` and `mean`; `Rules.range`
   `(low, high)`; `Rules.cdf` the share of the mass at or below a value;
   `Rules.distributions` each part's distribution at the inputs.
+
+## Inputs and the taxonomy
+
+A rule's inputs are causes: the conditions a run is given. The taxonomy is
+the shared vocabulary those conditions are named in, so from version 3 every
+input a part reads stands for one of its concepts, and the rules name the
+taxonomy they draw on. The quantities are the effects the rules work out --
+the road's grip, the simulator's settings -- and stand for no concept: the
+taxonomy holds vocabulary and value ranges, not what follows from them.
+
+```yaml
+version: 3
+taxonomy: {git: https://github.com/tier4/taxonomy, rev: <commit>, path: taxonomy_openodd.yaml}
+inputs:
+  rainfall_rate:
+    concept: environment_conditions.environment_conditions.weather.rain.rainfall_rate
+    unit: mm/h                         # the unit the points are written in
+quantities:
+  tire_friction:
+    parts:
+      rain:
+        at: {rainfall_rate: [0, 2.5, 7.6]}
+        uniform: {low: [0.9, 0.7, 0.5], high: [1.1, 0.85, 0.65]}
+```
+
+Reading a version 3 file refuses:
+
+- an input a part reads that names no `concept` (a free input left out of
+  `inputs` too): add the concept to the taxonomy, or make the input a
+  quantity the rules work out;
+- a `concept` the taxonomy does not declare, or one that is not a number (a
+  part's points are numbers);
+- a `unit` of another dimension than the concept's unit type;
+- a quantity with a `concept`.
+
+The taxonomy is read from where the file that names it says, like
+`extends`; a file it extends may name it instead, and the nearest name wins.
+It is one OpenODD file, read on its own (its `IMPORT`s are not followed).
+`Rules.version`, `Rules.taxonomy` (`(path or URL, sha256)`) and
+`Rules.input_concepts` (input → `(concept, unit)`) say what was read.
+
+Version 2 files are still read. Their inputs stand for nothing the rules can
+check (`Rules.unclassified_inputs`), and reading one warns
+(`UnclassifiedInputsWarning`). A version 2 file merged over a version 3 set --
+a fit's, say -- keeps the set's version and its taxonomy.
 
 ## Chains
 
