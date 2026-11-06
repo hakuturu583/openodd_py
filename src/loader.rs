@@ -617,6 +617,74 @@ fn defines_literals(node: &Node, ids: &HashMap<String, usize>) -> bool {
         })
 }
 
+/// Why `node`, shaped as literal definitions, was not read as them.
+///
+/// Every value of `node` maps concepts to expressions (`"> 1600 m"`, `"[0.1 ..
+/// 2.5) mm/h"`), which only a literal's definition does. When such a node is
+/// not taken for definitions, the reader would go on to call each expression a
+/// type it cannot read; say instead which concept is unknown, or that there is
+/// a single literal.
+fn misread_definitions(
+    node: &Node,
+    prefix: &[String],
+    ids: &HashMap<String, usize>,
+) -> Option<Error> {
+    let pairs = node.as_mapping()?;
+    let is_expression = |x: &Node| {
+        let Node::String(s) = x else { return false };
+        // A bound or a range, open or closed: what no type starts with.
+        s.trim_start().starts_with(['<', '>', '[', '('])
+    };
+    let shaped = !pairs.is_empty()
+        && pairs.iter().all(|(_, v)| {
+            v.as_mapping().is_some_and(|inner| {
+                let mut fields = inner
+                    .iter()
+                    .filter(|(k, _)| k.py_str() != "METADATA")
+                    .peekable();
+                fields.peek().is_some() && fields.all(|(_, x)| is_expression(x))
+            })
+        });
+    if !shaped || defines_literals(node, ids) {
+        return None;
+    }
+    let mut own = HashMap::new();
+    count_keys(node, &mut own);
+    let name = prefix.join(".");
+    for (literal, definition) in pairs {
+        for (k, x) in definition.as_mapping().into_iter().flatten() {
+            let key = k.py_str();
+            let t = tail(&key);
+            if key == "METADATA"
+                || ids.get(t).copied().unwrap_or(0) > own.get(t).copied().unwrap_or(0)
+            {
+                continue;
+            }
+            let mut near: Vec<&str> = ids
+                .keys()
+                .map(String::as_str)
+                .filter(|id| *id != t && (id.ends_with(t) || t.ends_with(*id)))
+                .collect();
+            near.sort_unstable();
+            let hint = match near.as_slice() {
+                [] => String::new(),
+                [one] => format!("; did you mean '{one}'?"),
+                many => format!("; did you mean one of {}?", many.join(", ")),
+            };
+            return Some(Error::open_odd(format!(
+                "TAXONOMY {name}.{}: unknown concept '{key}' in '{key}: {}'{hint}",
+                literal.py_str(),
+                x.py_str().trim()
+            )));
+        }
+    }
+    (pairs.len() < 2).then(|| {
+        Error::open_odd(format!(
+            "TAXONOMY {name}: a categorical defined by expressions needs at least two literals"
+        ))
+    })
+}
+
 fn flatten(
     node: &Node,
     prefix: &[String],
@@ -632,6 +700,11 @@ fn flatten(
             out.insert(path, c);
         }
         Node::Mapping(pairs) => {
+            if !records.contains(prefix) {
+                if let Some(err) = misread_definitions(node, prefix, ids) {
+                    return Err(err);
+                }
+            }
             if !records.contains(prefix) && defines_literals(node, ids) {
                 let mut c = Concept::new(prefix.to_vec(), Kind::Categorical);
                 c.literals = pairs.iter().map(|(k, _)| k.literal()).collect();
@@ -2381,5 +2454,40 @@ MODULES:
         assert_eq!(v["level"], Value::Str("heavy".into()));
         assert!(!odd.evaluate(&v).inside);
         assert_eq!(odd.outside_buckets("level"), ["heavy"]);
+    }
+
+    #[test]
+    fn a_definition_naming_an_unknown_concept_says_so() {
+        // tier4/taxonomy's fog_level, which names `visibility_range`.
+        let text = r#"
+TAXONOMY:
+  fog:
+    fog_visibility_range: float length
+    fog_level:
+      clear: {visibility_range: "> 1600 m"}
+      mist: {visibility_range: "[50 .. 1600] m"}
+      thick: {visibility_range: "< 50 m"}
+"#;
+        let err = load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("TAXONOMY fog.fog_level.clear: unknown concept 'visibility_range'"),
+            "{err}"
+        );
+        assert!(
+            err.contains("did you mean 'fog_visibility_range'?"),
+            "{err}"
+        );
+        assert!(!err.contains("cannot read the type"), "{err}");
+    }
+
+    #[test]
+    fn a_single_literal_defined_by_an_expression_says_so() {
+        let text = "TAXONOMY:\n  rate: float precipitation_rate\n  level:\n    dry: {rate: \"< 0.1 mm/h\"}\n";
+        let err = load_openodd(&[Source::Text(text.into())], &Options::default(), &AnyProbe)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs at least two literals"), "{err}");
     }
 }
