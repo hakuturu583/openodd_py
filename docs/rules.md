@@ -238,6 +238,23 @@ same seed. `limits` and `integer` apply to the value written; `values`,
 `scale` and `offset` are not used. A knob in config takes `quantity:` too
 (`knobs_from_mapping`), and `Backend.manifest()` writes it.
 
+**Fitting a knob's quantity.** A setting's quantity is fitted like any
+other ([Fitting to data](#fitting-to-data)), from rows that pair the real
+condition with the setting that reproduces it -- the rainfall rate a rain
+gauge measured, and the CARLA precipitation whose camera and LiDAR images
+matched the drive's:
+
+```python
+rows = [{"rainfall_rate": 2.1, "carla_precipitation": 21.0}, ...]
+fit = rules.fit(rows, data_files=["matched.csv"], by="sensor matching")
+fit.write("rules_fitted.yaml", extends="rules.yaml")   # basis: fitted
+```
+
+The fitted setting then rests on data rather than on a table in code, and a
+campaign's report says so ([What a campaign assumed](#what-a-campaign-assumed)).
+How the pairs are made -- which sensor output is compared, by what
+measure -- is the backend's to say.
+
 ## Chains
 
 A part may read another quantity of the same rules, so a quantity can derive

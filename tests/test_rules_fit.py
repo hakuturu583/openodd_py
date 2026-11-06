@@ -339,3 +339,34 @@ def test_a_fit_says_what_it_rests_on(rows) -> None:
     assert "date" not in Rules.from_text(START).fit(rows[:400], quantities=["grip"], date="").rules.basis(
         "grip", "water"
     )
+
+def test_a_knob_quantity_is_fitted_from_paired_runs(tmp_path: Path) -> None:
+    """#54: the setting that reproduces a real condition, fitted from pairs of
+    the condition measured and the setting that matched it."""
+    (tmp_path / "taxonomy.yaml").write_text(
+        "TAXONOMY:\n  weather:\n    rainfall_rate: float precipitation_rate\n"
+    )
+    guess = (
+        "version: 3\ntaxonomy: taxonomy.yaml\nbasis: {kind: expert}\n"
+        "inputs:\n  rainfall_rate: {concept: weather.rainfall_rate, unit: mm/h}\n"
+        "quantities:\n  carla_precipitation:\n    parts:\n      rain:\n"
+        "        at: {rainfall_rate: [0, 10]}\n"
+        "        normal: {mean: [10, 50], sd: [10, 10], low: 0, high: 100}\n"
+    )
+    (tmp_path / "rules.yaml").write_text(guess)
+    rules = Rules.read(tmp_path / "rules.yaml")
+    # The truth: 3 + 7 * rate, give or take 2 -- what matching the sensors found.
+    rng = random.Random(54)
+    rows = []
+    for _ in range(800):
+        rate = rng.uniform(0, 10)
+        rows.append({"rainfall_rate": rate, "carla_precipitation": min(100.0, max(0.0, rng.gauss(3 + 7 * rate, 2)))})
+    fit = rules.fit(rows, by="sensor matching", date="2026-11-06")
+    fitted = fit.rules
+    assert fitted.evaluate("carla_precipitation", {"rainfall_rate": 0})["mean"] == pytest.approx(3, abs=0.6)
+    assert fitted.evaluate("carla_precipitation", {"rainfall_rate": 10})["mean"] == pytest.approx(73, abs=0.6)
+    assert fitted.basis("carla_precipitation", "rain")["kind"] == "fitted"
+    # The fitted file merges over the guess and keeps its taxonomy and roles.
+    fit.write(tmp_path / "fitted.yaml", extends=tmp_path / "rules.yaml")
+    again = Rules.read(tmp_path / "fitted.yaml")
+    assert again.version == 3 and again.input_concepts["rainfall_rate"][0] == "weather.rainfall_rate"
