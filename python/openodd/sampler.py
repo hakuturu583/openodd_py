@@ -294,7 +294,9 @@ class OddSampler:
         unknown = sorted(set(knobs) - names)
         if unknown:
             raise ValueError(f"OddSampler: ODD {odd.name} has no attributes {unknown}")
-        self._from_rules: dict[str, tuple[OddKnob, str]] = {}
+        # Attribute -> (knob, the rule input reading it, the attribute's unit,
+        # the input's unit): the value drawn is converted between them.
+        self._from_rules: dict[str, tuple[OddKnob, str, str, str]] = {}
         for attribute in odd.attributes:
             knob = knobs.get(attribute.name) or backend.knob(attribute, controls)
             if knob is not None:
@@ -305,7 +307,10 @@ class OddSampler:
                 core = knob if knob.quantity is None else OddKnob(knob.key, range=knob.range)
                 chosen.append((attribute.name, core._core()))
                 if knob.quantity is not None:
-                    self._from_rules[attribute.name] = (knob, _rule_input(backend, attribute.name, knob))
+                    rule_input = _rule_input(backend, attribute.name, knob)
+                    rules = backend.active_rules
+                    input_unit = rules.input_concepts.get(rule_input, ("", ""))[1] if rules else ""
+                    self._from_rules[attribute.name] = (knob, rule_input, attribute.unit, input_unit)
         self._rules = backend.active_rules if self._from_rules else None
         self._seed = str(seed)
         if strategy is None:
@@ -384,10 +389,13 @@ class OddSampler:
         if not self._from_rules or self._rules is None:
             return case
         overrides = list(case.overrides)
-        for name, (knob, rule_input) in self._from_rules.items():
+        for name, (knob, rule_input, unit, input_unit) in self._from_rules.items():
             x = case.values.get(name)
             if not isinstance(x, (int, float)) or isinstance(x, bool):
                 continue
+            # The value drawn is in the attribute's unit; the rule's points
+            # are in its input's.
+            x = _core.convert(float(x), unit, input_unit)
             # A quantile of its own per case and knob: reproducible from the seed.
             p = random.Random(f"{self._seed}:{case.index}:{name}").random()
             y = self._rules.quantile(str(knob.quantity), {rule_input: float(x)}, p)

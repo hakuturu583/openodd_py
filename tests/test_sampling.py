@@ -281,3 +281,26 @@ def test_a_rule_valued_knobs_limits_do_not_narrow_what_is_drawn(tmp_path: Path) 
     for c in cases:
         (w,) = [x for x in c.overrides if x.startswith("env.wetness=")]
         assert 0 <= float(w.split("=")[1]) <= 1
+
+
+def test_a_rule_valued_knob_reads_the_value_in_its_inputs_unit(tmp_path: Path) -> None:
+    """#77: drawn in m/s, read by a rule written in km/h."""
+    (tmp_path / "taxonomy.yaml").write_text("TAXONOMY:\n  ego:\n    speed: float velocity\n")
+    (tmp_path / "rules.yaml").write_text(
+        "version: 3\ntaxonomy: taxonomy.yaml\nbasis: {kind: expert}\n"
+        "inputs:\n  speed: {concept: ego.speed, unit: km/h}\n"
+        "quantities:\n  throttle:\n    parts:\n      p:\n"
+        "        at: {speed: [0, 100]}\n        uniform: {low: [0, 100], high: [0, 100]}\n"
+    )
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    b = Backend(probes={"v": (lambda c: c.get("v"), "m/s")}, rules=rules)
+    o = openodd.load_openodd(
+        "TAXONOMY:\n  ego:\n    speed: float velocity\n",
+        bindings={"ego.speed": {"probe": "v", "buckets": [0, 10, 20]}},
+        backend=b,
+    )
+    cases = OddSampler(o, knobs={"ego.speed": OddKnob("k", quantity="throttle")}, seed=3, backend=b).sample(10)
+    for c in cases:
+        (w,) = [x for x in c.overrides if x.startswith("k=")]
+        # the rule gives its input back: km/h of the m/s drawn
+        assert float(w.split("=")[1]) == pytest.approx(c.values["ego.speed"] * 3.6)
