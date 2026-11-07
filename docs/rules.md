@@ -344,7 +344,11 @@ quantities:
 
 Rule names are identifiers, so the knob's key and the attribute's name each
 become one with every character but a letter, a digit or `_` replaced by `_`
-(`openodd.sampler.table_rule_name`). The sampler draws the label, then
+(`openodd.sampler.table_rule_name`); an input whose name is one of the
+quantities' -- an attribute `rain` with a knob `rain` -- takes `_label` after
+it (`rain_label`). An `integer` knob writes one of the integers in a
+label's `[low, high)`, each as likely, as it always did. The sampler draws
+the label, then
 writes the quantity at it, at the case's own quantile of it: a parameter of
 the case, `quantile(environment_precipitation)`, drawn with it and moved by
 the [flaky search](flaky.md) like an effect's

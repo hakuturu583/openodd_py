@@ -669,3 +669,32 @@ def test_table_rule_names() -> None:
     assert table_rule_name("environment.precipitation") == "environment_precipitation"
     assert table_rule_name("a-b c") == "a_b_c"
     assert table_rule_name("3d") == "_3d"
+
+
+def test_a_table_whose_key_is_the_attributes_name() -> None:
+    """An attribute ``rain`` with a knob ``rain``: the input the rule reads
+    is kept apart from the quantity it writes."""
+    o = openodd.load_openodd(ODD, bindings={"rain": {"probe": "rain"}}, backend=backend())
+    knob = OddKnob("rain", values={"none": 0, "light": [1, 30], "heavy": 90})
+    sampler = OddSampler(o, {"rain": knob}, seed=1, backend=backend())
+    assert sampler.knob_rules.quantities == ["rain"]
+    assert sampler.knob_rules.range("rain", {"rain_label": "heavy"}) == (90.0, 90.0)
+    for case in sampler.sample(10):
+        if case.values["rain"] == "heavy":
+            assert _written(case, "rain") == 90
+
+
+def test_an_integer_table_draws_among_the_integers_of_its_range() -> None:
+    """``integer`` keeps the table's ranges half-open: ``[1, 3)`` writes 1 or
+    2, each as likely, never 3."""
+    knob = OddKnob("env.rain", values={"none": 0, "light": [1, 3], "heavy": [70, 71]}, integer=True)
+    sampler = OddSampler(odd(), {"rain": knob}, controls=CONTROLS, seed=2, backend=backend())
+    written: dict[str, list[int]] = {"none": [], "light": [], "heavy": []}
+    for case in sampler.sample(200):
+        (w,) = [o for o in case.overrides if o.startswith("env.rain=")]
+        assert w.split("=")[1].isdigit()
+        written[case.values["rain"]].append(int(w.split("=")[1]))
+    assert set(written["none"]) == {0}
+    assert set(written["light"]) == {1, 2}
+    assert 0.3 < written["light"].count(1) / len(written["light"]) < 0.7
+    assert set(written["heavy"]) == {70}

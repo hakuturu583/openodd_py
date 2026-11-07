@@ -168,16 +168,32 @@ def _knob_values_part(attribute: Any, knob: OddKnob) -> Optional[dict[str, Any]]
     return {
         "input": {"labels": list(item.labels)},
         "labels": labels,
-        "part": {
-            "at": {table_rule_name(attribute.name): labels},
-            "uniform": {"low": low, "high": high},
-        },
+        "uniform": {"low": low, "high": high},
     }
 
 
-def _knob_rules(parts: Mapping[str, tuple[str, dict[str, Any]]]) -> Optional[Any]:
+def table_inputs(attributes: Iterable[str], quantities: Iterable[str]) -> dict[str, str]:
+    """Attribute -> the input the rules of the knobs' values tables read it
+    by: its name as a rule name (``table_rule_name``), with ``_label``
+    appended while that names one of the tables' *quantities* -- an
+    attribute ``rain`` whose knob's key is ``rain`` too."""
+    taken = set(quantities)
+    out: dict[str, str] = {}
+    for attribute in attributes:
+        name = table_rule_name(attribute)
+        while name in taken:
+            name += "_label"
+        taken.add(name)
+        out[attribute] = name
+    return out
+
+
+def _knob_rules(
+    parts: Mapping[str, tuple[str, dict[str, Any]]], inputs: Mapping[str, str]
+) -> Optional[Any]:
     """The rules of the knobs' ``values`` tables: quantity (the knob's key)
-    -> (the attribute it reads, its part)."""
+    -> (the attribute it reads, its part), each attribute read by its input
+    in *inputs*."""
     import json  # noqa: PLC0415
     import warnings  # noqa: PLC0415
 
@@ -188,9 +204,12 @@ def _knob_rules(parts: Mapping[str, tuple[str, dict[str, Any]]]) -> Optional[Any
     doc = {
         "version": 2,
         "basis": {"kind": "expert", "by": "knob values", "text": "A knob's values table, as written."},
-        "inputs": {table_rule_name(a): spec["input"] for a, spec in parts.values()},
+        "inputs": {inputs[a]: spec["input"] for a, spec in parts.values()},
         "quantities": {
-            quantity: {"parts": {"values": spec["part"]}} for quantity, (_a, spec) in parts.items()
+            quantity: {
+                "parts": {"values": {"at": {inputs[a]: spec["labels"]}, "uniform": spec["uniform"]}}
+            }
+            for quantity, (a, spec) in parts.items()
         },
     }
     with warnings.catch_warnings():
@@ -504,7 +523,7 @@ class OddSampler:
                     resolved.append((attribute, knob))
                 else:
                     table_parts[quantity] = (attribute.name, part)
-                    self._tables[attribute.name] = (knob, table_rule_name(attribute.name))
+                    self._tables[attribute.name] = (knob, "")
                 continue
             # A knob that writes a quantity of the rules sets the attribute
             # only through them: the core draws the attribute over its
@@ -517,7 +536,9 @@ class OddSampler:
         #: The rules of the knobs' values tables (``None``: no table is one).
         #: Each reads only its attribute's label, so they are worked out
         #: apart from the backend's rules, before them.
-        self.knob_rules = _knob_rules(table_parts)
+        inputs_of = table_inputs(self._tables, table_parts)
+        self._tables = {a: (k, inputs_of[a]) for a, (k, _) in self._tables.items()}
+        self.knob_rules = _knob_rules(table_parts, inputs_of)
         for attribute, knob in resolved:
             rule_input = _rule_input(backend, attribute.name, knob, active)
             input_unit = active.input_concepts.get(rule_input, ("", ""))[1] if active else ""
@@ -646,7 +667,16 @@ class OddSampler:
                 at = min(max(float(p), 0.0), 1.0)
             else:
                 at = random.Random(f"{self._seed}:{case.index}:{name}").random()
-            y = self.knob_rules.quantile(q, {rule_input: value_label(label)}, at)
+            given = {rule_input: value_label(label)}
+            if knob.integer:
+                # Among the integers in [low, high), each as likely, as the
+                # core draws them.
+                low, high = self.knob_rules.range(q, given)
+                first = math.ceil(low)
+                last = first if low == high else math.ceil(high) - 1
+                y = float(first + min(int(at * (last - first + 1)), max(last - first, 0)))
+            else:
+                y = self.knob_rules.quantile(q, given, at)
             overrides = _write(knob, q, y, quantities, overrides)
         if (not self._from_rules and not self._effects) or self._rules is None:
             return dataclasses.replace(case, overrides=overrides, quantities=quantities)
