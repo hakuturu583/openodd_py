@@ -130,11 +130,14 @@ class OddKnob:
 
 def table_rule_name(name: str) -> str:
     """The name a knob's key, or the attribute its table reads, takes in the
-    rules of the knobs' values tables: every character but a letter, a digit
-    or ``_`` becomes ``_`` (``environment.precipitation`` ->
-    ``environment_precipitation``)."""
-    out = "".join(c if c.isalnum() or c == "_" else "_" for c in name)
-    return out if out and not out[0].isdigit() else f"_{out}"
+    rules of the knobs' values tables: every character but an ASCII letter,
+    a digit or ``_`` becomes ``_`` (``environment.precipitation`` ->
+    ``environment_precipitation``), and a word of the rules (``AND``, ``OR``,
+    ``NOT``, ``IS``) takes ``_`` after it."""
+    out = "".join(c if (c.isascii() and c.isalnum()) or c == "_" else "_" for c in name)
+    out = out if out and not out[0].isdigit() else f"_{out}"
+    # The rules' words are not names.
+    return f"{out}_" if out in ("AND", "OR", "NOT", "IS") else out
 
 
 def _knob_values_part(attribute: Any, knob: OddKnob) -> Optional[dict[str, Any]]:
@@ -684,6 +687,10 @@ class OddSampler:
                 y = float(first + min(int(at * (last - first + 1)), max(last - first, 0)))
             else:
                 y = self.knob_rules.quantile(q, given, at)
+                # [low, high): the top quantile stays below high.
+                low, high = self.knob_rules.range(q, given)
+                if high > low and y >= high:
+                    y = math.nextafter(high, low)
             overrides = _write(knob, q, y, quantities, overrides)
         if (not self._from_rules and not self._effects) or self._rules is None:
             return dataclasses.replace(case, overrides=overrides, quantities=quantities)

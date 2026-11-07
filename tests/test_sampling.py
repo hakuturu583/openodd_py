@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -717,3 +718,29 @@ def test_keys_that_read_the_same_keep_their_own_quantities() -> None:
     for case in sampler.sample(10):
         assert _written(case, "env.rain") == {"none": 0, "heavy": 90}[case.values["rain"]]
         assert _written(case, "env_rain") == {"none": 5, "heavy": 50}[case.values["fog"]]
+
+
+def test_table_rule_names_are_the_rules_names() -> None:
+    from openodd.sampler import table_rule_name
+
+    assert table_rule_name("environment.précipitation") == "environment_pr_cipitation"
+    assert table_rule_name("AND") == "AND_"
+    sampler = OddSampler(
+        odd(),
+        {"rain": OddKnob("AND", values={"none": 0, "light": [1, 30], "heavy": 90})},
+        controls=CONTROLS,
+        seed=1,
+        backend=backend(),
+    )
+    assert sampler.table_quantities == ["AND_"]
+
+
+def test_the_top_quantile_stays_inside_a_half_open_range() -> None:
+    """The flaky search may move a table's quantile to 1: ``[1, 30)`` still
+    writes less than 30."""
+    sampler = OddSampler(odd(), controls=CONTROLS, seed=1, backend=backend())
+    case = next(c for c in sampler.sample(30) if c.values["rain"] == "light")
+    moved = sampler._realize(
+        dataclasses.replace(case, values={**case.values, "quantile(env_rain)": 1.0}, quantities={})
+    )
+    assert 1 <= _written(moved, "env.rain") < 30

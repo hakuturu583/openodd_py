@@ -343,11 +343,13 @@ quantities:
 ```
 
 Rule names are identifiers, so the knob's key and the attribute's name each
-become one with every character but a letter, a digit or `_` replaced by `_`
+become one with every character but an ASCII letter, a digit or `_` replaced
+by `_`, and a word of the rules (`AND`, `OR`, `NOT`, `IS`) followed by `_`
 (`openodd.sampler.table_rule_name`); an input whose name is one of the
 quantities' -- an attribute `rain` with a knob `rain` -- takes `_label` after
 it (`rain_label`). Two keys that read the same (`env.rain`, `env_rain`) each keep a quantity:
-the second takes `_2` after it (`env_rain_2`). An `integer` knob writes one of the integers in a
+the second takes `_2` after it (`env_rain_2`). A range stays half-open: at the top quantile the value written is just
+below `high`. An `integer` knob writes one of the integers in a
 label's `[low, high)`, each as likely, as it always did. The sampler draws
 the label, then
 writes the quantity at it, at the case's own quantile of it: a parameter of
