@@ -169,7 +169,11 @@ fn table_samples(
                     x.get("name")
                         .and_then(Json::as_str)
                         .or(x.as_str())
-                        .map(|n| n.strip_prefix(QUANTITY_COLUMN_PREFIX).unwrap_or(n).to_string())
+                        .map(|n| {
+                            n.strip_prefix(QUANTITY_COLUMN_PREFIX)
+                                .unwrap_or(n)
+                                .to_string()
+                        })
                 })
                 .collect()
         })
