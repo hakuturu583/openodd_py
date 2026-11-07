@@ -68,7 +68,12 @@ from .loader import (
     read_archive_manifest,
 )
 from .cod import CodExport, export_cod, export_cods
-from .collector import CROSS_SEPARATOR, CoverageCollector
+from .collector import (
+    CROSS_SEPARATOR,
+    EFFECT_TABLES,
+    CoverageCollector,
+    move_effect_samples,
+)
 from .report import (
     CELL_BAND,
     CELL_MIN_RUNS,
@@ -146,6 +151,8 @@ __all__ = [
     "CasePlot",
     "CoverageView",
     "CoverageCollector",
+    "EFFECT_TABLES",
+    "move_effect_samples",
     "MISSING",
     "OddCells",
     "__version__",

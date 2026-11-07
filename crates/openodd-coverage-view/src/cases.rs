@@ -128,14 +128,40 @@ impl Basis {
     }
 }
 
-/// The rows of a document's `odd.samples` within [`MAX_WINDOW`], keeping
-/// `wanted` attributes with a value.
+/// The prefix a quantity's column takes in `odd.samples` when a run wrote
+/// what its effects measured there (`effects_table="odd"`), not in
+/// `effects.samples`.
+pub const QUANTITY_COLUMN_PREFIX: &str = "quantity:";
+
+/// What a run measured at its start, within [`MAX_WINDOW`], keeping `wanted`
+/// names with a value: the ODD's attributes (`odd.samples`) and the effects
+/// it measured (`effects.samples`, or `odd.samples` columns named
+/// `quantity:<name>`), in time order.
 fn start_samples(doc: &Json, wanted: &[&String]) -> Vec<(f64, IndexMap<String, Json>)> {
-    let Some(table) = doc.pointer("/odd/samples").filter(|t| t.is_object()) else {
+    let mut out = table_samples(doc.pointer("/odd/samples"), "attributes", 3, wanted);
+    let effects = table_samples(doc.pointer("/effects/samples"), "quantities", 1, wanted);
+    if !effects.is_empty() {
+        out.extend(effects);
+        // Stable: at one time, the ODD's row first.
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    out
+}
+
+/// The rows of a samples table within [`MAX_WINDOW`]: column 0 the time,
+/// the named columns from `first` on (their names in `key`, a string or
+/// `{name}` each), keeping `wanted` names with a value.
+fn table_samples(
+    table: Option<&Json>,
+    key: &str,
+    first: usize,
+    wanted: &[&String],
+) -> Vec<(f64, IndexMap<String, Json>)> {
+    let Some(table) = table.filter(|t| t.is_object()) else {
         return Vec::new();
     };
     let names: Vec<Option<String>> = table
-        .get("attributes")
+        .get(key)
         .and_then(Json::as_array)
         .map(|a| {
             a.iter()
@@ -143,19 +169,18 @@ fn start_samples(doc: &Json, wanted: &[&String]) -> Vec<(f64, IndexMap<String, J
                     x.get("name")
                         .and_then(Json::as_str)
                         .or(x.as_str())
-                        .map(String::from)
+                        .map(|n| n.strip_prefix(QUANTITY_COLUMN_PREFIX).unwrap_or(n).to_string())
                 })
                 .collect()
         })
         .unwrap_or_default();
-    // Columns: t, lat, lon, then one per attribute.
     let columns: Vec<(usize, String)> = names
         .iter()
         .enumerate()
         .filter_map(|(i, n)| {
             n.clone()
                 .filter(|n| wanted.contains(&n))
-                .map(|n| (i + 3, n))
+                .map(|n| (i + first, n))
         })
         .collect();
     let mut out = Vec::new();

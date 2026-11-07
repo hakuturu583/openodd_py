@@ -29,6 +29,39 @@ the most common measured label. Attributes that change quickly after the
 start, such as a closing gap, are measured one tick in. Keep the window
 short, so that the dynamics do not show up as drift.
 
+## Effects: what a scenario sets up
+
+What a scenario sets up -- the gap to a vehicle about to cut in, how fast a
+pedestrian crosses -- is no ODD attribute but an **effect**: a node of the
+rules the sampler draws with each case (rules.md, "Effects a scenario sets").
+The value drawn is the case's `quantities`. A run measures it with a probe
+per quantity, beside the ODD's attributes and not as one -- no cover item, no
+grade -- sampled on every tick of its first `EFFECT_WINDOW` (10) seconds:
+
+```python
+collector = openodd.CoverageCollector(
+    items, odd=odd, backend=backend,
+    effects={"vehicle_ahead_gap": gap_probe},   # quantity -> its probe
+    effects_table="separate",                   # or "odd"
+)
+```
+
+Where they are written is for the analysis to choose:
+
+| `effects_table` | Written as |
+|---|---|
+| `separate` (the default) | a table of their own, `effects.samples`: `quantities`, and rows `[t, value, ...]` |
+| `odd` | columns of the ODD's table, `odd.samples`, named `quantity:<name>` -- one table for a reader that wants it so |
+
+`openodd.move_effect_samples(document, "odd" or "separate")` moves them from
+one to the other in a file already written. The views read both: each effect
+measured is placed, and drifts, like an attribute -- drawn from
+`case.quantities`, measured from its column -- and its correction is the
+knob that wrote it (`scale`, `offset`) or its quantity's points
+(`drift_rules`). An effect no probe measured is left out of the drift view:
+a CARLA weather field the rules give, written as it is drawn, has nothing to
+drift.
+
 ## The case plot on either basis
 
 `CasePlot.html(basis="measured")` places the cases by their measured

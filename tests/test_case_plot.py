@@ -419,3 +419,81 @@ def test_the_cli_extends_the_rules_from_where_it_writes(tmp_path: Path, monkeypa
                  "--knob-quantity", "gap=scenario_gap", "--markdown", "r.md"]) == 0
     assert '"../config/gap.yaml"' in (tmp_path / "reports" / "fixed.yaml").read_text()
     assert openodd.Rules.read(tmp_path / "reports" / "fixed.yaml").quantities == ["scenario_gap"]
+
+
+def _effect_campaign(tmp_path: Path, table: str) -> list[dict[str, Any]]:
+    """Runs whose gap is an effect the rules drew (case.quantities), staged
+    GAP_OFFSET m further than drawn: measured by the effect's probe."""
+    from test_sampling import _effects_setup
+
+    _, b, o = _effects_setup(tmp_path)
+    effects = [openodd.OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap")]
+    rain = {"weather.rainfall_rate": openodd.OddKnob("env.rain_mm_h", range=(0, 10))}
+    sampler = openodd.OddSampler(o, rain, seed=3, backend=b, effects=effects)
+    docs = []
+    for case in sampler.sample(20):
+        staged = case.quantities["vehicle_ahead_gap"] + GAP_OFFSET
+        collector = openodd.CoverageCollector(
+            [], odd=o, backend=b,
+            effects={"vehicle_ahead_gap": lambda c: c["gap"]},
+            effects_table=table,
+        )
+        collector.record_case(case)
+        context = {"rain": case.values["weather.rainfall_rate"], "gap": staged}
+        collector.start(context, 0.0)
+        for t in (0.1, 0.2):
+            collector.tick(context, t)
+        collector.record_outcome(True)
+        docs.append(json.loads(json.dumps(collector.to_dict("cut_in"))))
+    return docs
+
+
+@pytest.mark.parametrize("table", ["separate", "odd"])
+def test_the_drift_sets_an_effect_against_what_it_measured(tmp_path: Path, table: str) -> None:
+    docs = _effect_campaign(tmp_path, table)
+    if table == "separate":
+        assert docs[0]["effects"]["samples"]["quantities"] == ["vehicle_ahead_gap"]
+        assert "quantity:vehicle_ahead_gap" not in json.dumps(docs[0]["odd"]["samples"])
+    else:
+        assert "effects" not in docs[0]
+        names = [a["name"] for a in docs[0]["odd"]["samples"]["attributes"]]
+        assert names[-1] == "quantity:vehicle_ahead_gap"
+    drift = {a["attribute"]: a for a in CasePlot(docs).drift()["attributes"]}
+    gap = drift["vehicle_ahead_gap"]
+    assert gap["summary"]["runs"] == 20
+    assert gap["fit"]["b"] == pytest.approx(GAP_OFFSET, abs=1e-6)
+    assert gap["fit"]["a"] == pytest.approx(1.0, abs=1e-6)
+    # The rainfall rate the run was set to reads back as drawn.
+    assert drift["weather.rainfall_rate"]["summary"]["bias"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_effect_samples_move_between_the_tables_without_changing_the_drift(
+    tmp_path: Path,
+) -> None:
+    separate = _effect_campaign(tmp_path, "separate")
+    to_odd = [openodd.move_effect_samples(d, "odd") for d in separate]
+    back = [openodd.move_effect_samples(d, "separate") for d in to_odd]
+    assert back[0]["effects"] == separate[0]["effects"]
+    assert back[0]["odd"]["samples"] == separate[0]["odd"]["samples"]
+    drift = lambda docs: CasePlot(docs).drift()["attributes"]  # noqa: E731
+    assert drift(to_odd) == drift(separate) == drift(back)
+    # Nothing to move: as it was.
+    plain = separate[0]
+    assert openodd.move_effect_samples(back[0], "separate") == back[0]
+    with pytest.raises(ValueError, match="effects table must be one of"):
+        openodd.move_effect_samples(plain, "both")
+
+
+def test_a_quantity_nothing_measured_is_not_in_the_drift(tmp_path: Path) -> None:
+    docs = _effect_campaign(tmp_path, "separate")
+    for d in docs:
+        del d["effects"]
+    names = [a["attribute"] for a in CasePlot(docs).drift()["attributes"]]
+    assert "vehicle_ahead_gap" not in names
+
+
+def test_effects_in_the_odds_table_need_an_odd() -> None:
+    with pytest.raises(ValueError, match="no ODD to put them beside"):
+        openodd.CoverageCollector([], effects={"q": lambda c: 1.0}, effects_table="odd")
+    with pytest.raises(ValueError, match="effects_table must be one of"):
+        openodd.CoverageCollector([], effects_table="both")

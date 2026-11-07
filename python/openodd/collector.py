@@ -39,6 +39,17 @@ space it was chosen in) and its outcome
 (:meth:`CoverageCollector.record_outcome`). The merged report then assesses
 the flakiness of every such run over all of them, and the next campaign's
 flaky search can start from them (:meth:`~.flaky.FlakySearch.observe_report`).
+A run can also measure its **effects** -- what the scenario sets up, which
+the rules drew (``case.quantities``): the gap to a vehicle about to cut in,
+say -- with a probe per quantity (``CoverageCollector(effects=...)``),
+sampled at its start (:data:`EFFECT_WINDOW`), beside the ODD's attributes
+and not as an attribute: no cover item, no grade. The drift view then sets
+each against the value drawn (docs/drift.md). They are written as a table of
+their own (``effects.samples``, the default) or as columns of the ODD's
+(``odd.samples``, named ``quantity:<name>``); :func:`move_effect_samples`
+moves them from one to the other in a file already written, so either
+analysis reads them where it wants them.
+
 An outcome can also say when the run failed and what it ran on (its
 environment): the report then counts, per ODD cell, the runs that drove
 through it, how many failed, and how many failed in it
@@ -82,15 +93,96 @@ if TYPE_CHECKING:
 __all__ = [
     "COVERAGE_SCHEMA",
     "CROSS_SEPARATOR",
+    "EFFECT_TABLES",
+    "EFFECT_WINDOW",
     "ODD_ARCHIVE_SUFFIX",
+    "QUANTITY_COLUMN_PREFIX",
     "CoverageCollector",
     "generator",
+    "move_effect_samples",
 ]
 
 logger = logging.getLogger(__name__)
 
 #: Beside a run's coverage file, the transmission archive of its ODD.
 ODD_ARCHIVE_SUFFIX = "_odd.tar.gz"
+
+#: How long from its start a run measures its effects, seconds: the longest
+#: measurement window the drift view takes (docs/drift.md).
+EFFECT_WINDOW = 10.0
+
+#: Where a run writes what its effects measured: ``separate``, a table of
+#: their own (``effects.samples``); ``odd``, columns of the ODD's
+#: (``odd.samples``), named with :data:`QUANTITY_COLUMN_PREFIX`.
+EFFECT_TABLES = ("separate", "odd")
+
+#: The prefix of a quantity's column in ``odd.samples``.
+QUANTITY_COLUMN_PREFIX = "quantity:"
+
+
+def move_effect_samples(document: Mapping[str, Any], table: str) -> dict[str, Any]:
+    """*document* (one run's coverage, as read from its file) with what its
+    effects measured moved to *table* (:data:`EFFECT_TABLES`): ``separate``
+    takes the ``quantity:`` columns out of ``odd.samples`` into
+    ``effects.samples``; ``odd`` puts ``effects.samples`` into
+    ``odd.samples``, each row at the ODD row of its time (a row of the ODD's
+    at no such time is left out). A document with nothing to move comes
+    back as it is (a copy).
+
+    Raises:
+        ValueError: On an unknown *table*, or ``odd`` for a run with no ODD.
+    """
+    if table not in EFFECT_TABLES:
+        raise ValueError(f"effects table must be one of {list(EFFECT_TABLES)}, got {table!r}")
+    out = json.loads(json.dumps(document))
+    odd = out.get("odd")
+    odd_samples = odd.get("samples") if isinstance(odd, dict) else None
+    if table == "separate":
+        if not isinstance(odd_samples, dict):
+            return out
+        attributes = list(odd_samples.get("attributes") or [])
+        moved = [
+            i for i, a in enumerate(attributes)
+            if str(a.get("name") if isinstance(a, dict) else a).startswith(QUANTITY_COLUMN_PREFIX)
+        ]
+        if not moved:
+            return out
+        names = [
+            str(attributes[i].get("name") if isinstance(attributes[i], dict) else attributes[i])
+            .removeprefix(QUANTITY_COLUMN_PREFIX)
+            for i in moved
+        ]
+        rows = []
+        for row in odd_samples.get("rows") or []:
+            values = [row[3 + i] if 3 + i < len(row) else None for i in moved]
+            if any(v is not None for v in values):
+                rows.append([row[0], *values])
+        keep = [i for i in range(len(attributes)) if i not in moved]
+        odd_samples["attributes"] = [attributes[i] for i in keep]
+        odd_samples["rows"] = [
+            row[:3] + [row[3 + i] for i in keep if 3 + i < len(row)]
+            for row in odd_samples.get("rows") or []
+        ]
+        out["effects"] = {"samples": {"quantities": names, "rows": rows}}
+        return out
+    effects = out.get("effects")
+    samples = effects.get("samples") if isinstance(effects, dict) else None
+    if not isinstance(samples, dict):
+        return out
+    if not isinstance(odd_samples, dict):
+        raise ValueError("effects table 'odd': the run measured no ODD to put them beside")
+    names = list(samples.get("quantities") or [])
+    by_time = {row[0]: row[1:] for row in samples.get("rows") or []}
+    odd_samples["attributes"] = [
+        *(odd_samples.get("attributes") or []),
+        *({"name": f"{QUANTITY_COLUMN_PREFIX}{n}", "quantity": n} for n in names),
+    ]
+    odd_samples["rows"] = [
+        [*row, *by_time.get(row[0], [None] * len(names))]
+        for row in odd_samples.get("rows") or []
+    ]
+    del out["effects"]
+    return out
 
 
 def generator(extra: Optional[Mapping[str, Optional[str]]] = None) -> dict[str, Optional[str]]:
@@ -460,6 +552,8 @@ class CoverageCollector:
         *,
         backend: Optional[Backend] = None,
         generator: Optional[Mapping[str, Optional[str]]] = None,
+        effects: Optional[Mapping[str, Any]] = None,
+        effects_table: str = "separate",
     ) -> None:
         """Collect *items* and *crosses*, and the attributes of *odd* if given.
 
@@ -467,7 +561,27 @@ class CoverageCollector:
         is also judged inside or outside it. *backend* says where the ego is
         (the default backend if none). *generator* names, besides this
         library, what wrote the file (an application and its version).
+        *effects* maps a quantity of the rules to the probe that measures it
+        (a callable of the context, or ``(callable, unit)``): sampled on every
+        tick of the run's first :data:`EFFECT_WINDOW` seconds and written in
+        *effects_table* (:data:`EFFECT_TABLES`), for the drift view.
+
+        Raises:
+            ValueError: On an unknown *effects_table*, or ``odd`` without an
+                *odd*.
         """
+        if effects_table not in EFFECT_TABLES:
+            raise ValueError(
+                f"effects_table must be one of {list(EFFECT_TABLES)}, got {effects_table!r}"
+            )
+        if effects and effects_table == "odd" and odd is None:
+            raise ValueError("effects_table 'odd': there is no ODD to put them beside")
+        self._effects = {
+            str(q): (p[0] if isinstance(p, tuple) else p) for q, p in (effects or {}).items()
+        }
+        self._effects_table = effects_table
+        self._effect_rows: list[list[Any]] = []
+        self._failed_effects: set[str] = set()
         self._backend = backend or default_backend()
         self._generator = dict(generator or {})
         self._odd = _OddMonitor(odd) if odd is not None else None
@@ -648,6 +762,8 @@ class CoverageCollector:
         step = self._step(context, elapsed)
         if self._odd is not None:
             self._odd.count(attributes, step.seconds, step.meters, elapsed)
+        if self._effects and elapsed <= EFFECT_WINDOW + 1e-9:
+            self._effect_rows.append([round(elapsed, 3), *self._measure_effects(context)])
         self._sample_event(context, SamplingEvent.TICK, values, step)
         for key, entry in self._conditions.items():
             condition, was_satisfied = entry
@@ -686,6 +802,30 @@ class CoverageCollector:
         rules = self._rules()
         if rules is not None:
             out["rules"] = rules
+        if self._effects:
+            out["effects"] = {
+                "samples": {"quantities": list(self._effects), "rows": self._effect_rows}
+            }
+            if self._effects_table == "odd":
+                out = move_effect_samples(out, "odd")
+        return out
+
+    def _measure_effects(self, context: Any) -> list[Any]:
+        """What each effect's probe reads now (``None`` when it raises, logged
+        once per quantity)."""
+        out: list[Any] = []
+        for quantity, probe in self._effects.items():
+            try:
+                out.append(_sample_value(probe(context)))
+            except Exception:
+                if quantity not in self._failed_effects:
+                    self._failed_effects.add(quantity)
+                    logger.warning(
+                        "coverage: the probe of effect %s raised (logged once)",
+                        quantity,
+                        exc_info=True,
+                    )
+                out.append(None)
         return out
 
     def _rules(self) -> Optional[dict[str, Any]]:
