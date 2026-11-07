@@ -437,6 +437,10 @@ pub struct CaseSet {
     /// a case but no outcome: neither is placed.
     pub without_case: usize,
     pub without_outcome: usize,
+    /// The axes that are only a rules quantity some case ran with (no
+    /// case drew them as an attribute): the default axes come after the
+    /// attributes.
+    pub quantity_axes: Vec<String>,
 }
 
 fn strings(v: Option<&Json>) -> Vec<String> {
@@ -572,6 +576,9 @@ impl CaseSet {
             }
             for name in &quantities {
                 declared.entry(name.clone()).or_insert(true);
+                if !set.quantity_axes.contains(name) {
+                    set.quantity_axes.push(name.clone());
+                }
             }
             set.read_items(doc);
             match index.get(&key) {
@@ -813,15 +820,20 @@ impl CaseSet {
     pub fn plot(&self, query: &CaseQuery) -> Plot {
         let mut q = query.clone();
         let free = self.free_attributes(&q);
-        // Numeric attributes make the better default axes.
+        // The attributes make the better default axes, the numeric ones
+        // first; then the rules quantities the cases ran with.
+        let attribute = |a: &&String| !self.quantity_axes.contains(*a);
         let mut preferred: Vec<&String> = free
             .iter()
+            .filter(attribute)
             .filter(|a| self.axes[*a].kind == AxisKind::Numeric)
             .collect();
         preferred.extend(
             free.iter()
+                .filter(attribute)
                 .filter(|a| self.axes[*a].kind != AxisKind::Numeric),
         );
+        preferred.extend(free.iter().filter(|a| !attribute(a)));
         let pick = |asked: &Option<String>, taken: Option<&String>| -> Option<String> {
             match asked {
                 Some(a) if free.contains(a) && Some(a) != taken => Some(a.clone()),
@@ -1153,6 +1165,11 @@ mod tests {
         assert_eq!(plot.x.as_ref().unwrap().name, "vehicle_ahead_gap");
         assert_eq!(plot.y.as_ref().unwrap().name, "relative_speed");
         assert_eq!(plot.counts()["pass"], 2);
+        // Unasked, the attributes are the axes before the quantities.
+        assert_eq!(set.quantity_axes, ["vehicle_ahead_gap", "relative_speed"]);
+        let plot = set.plot(&CaseQuery::default());
+        assert_eq!(plot.x.as_ref().unwrap().name, "rain");
+        assert_eq!(plot.y.as_ref().unwrap().name, "vehicle_ahead_gap");
     }
 
     #[test]

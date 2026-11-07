@@ -316,6 +316,50 @@ campaign's report says so ([What a campaign assumed](#what-a-campaign-assumed)).
 How the pairs are made -- which sensor output is compared, by what
 measure -- is the backend's to say.
 
+### A knob's values table is a rule
+
+A table that is still written in code is a rule all the same: the sampler
+turns it into one, so every setting of a run is an effect of the rules. For
+a categorical attribute whose knob gives each label a number or a
+`[low, high)` range and names no `quantity`, the table
+
+```python
+openodd.OddKnob("environment.precipitation", values={"none": 0, "light": [1, 30], "heavy": [70, 100]})
+```
+
+on the attribute `environment.rain` is the quantity
+
+```yaml
+version: 2
+basis: {kind: expert, by: knob values, text: "A knob's values table, as written."}
+inputs:
+  environment_rain: {labels: [none, light, heavy]}
+quantities:
+  environment_precipitation:
+    parts:
+      values:
+        at: {environment_rain: [none, light, heavy]}
+        uniform: {low: [0, 1, 70], high: [0, 30, 100]}
+```
+
+Rule names are identifiers, so the knob's key and the attribute's name each
+become one with every character but a letter, a digit or `_` replaced by `_`
+(`openodd.sampler.table_rule_name`). The sampler draws the label as it
+always did, then writes the quantity at it, at a quantile of its own per
+case (from the seed, the case and the attribute: the same for the same
+seed), and the case records it (`OddSample.quantities`) like any knob's
+quantity -- a [case plot](case_plot.md) offers it as an axis, after the
+attributes. These rules are `OddSampler.knob_rules`; each reads its
+attribute's label alone, so they are worked out apart from the backend's,
+before them.
+
+The table is followed until something better is known: a quantity of the
+same name (`environment_precipitation`) in the backend's rules -- fitted
+from data, say -- writes the setting instead, read through the input that
+stands for the attribute. Other tables are not rules: a numeric attribute's
+(ranges replacing the bucket's interval) and a table of labels (`{none: dry,
+light: wet}`), which writes no number.
+
 ### Effects a scenario sets
 
 Some settings are effects with no attribute of the ODD to set: what a

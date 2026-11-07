@@ -67,8 +67,10 @@ class OddKnob:
     Attributes:
         key: The setting the value is written to, e.g. ``environment.precipitation``.
         values: Per bucket label: for a categorical attribute, the value to
-            write, or ``[low, high)`` to draw it from; for a numeric one, a
-            range to draw from instead of the bucket's interval.
+            write, or ``[low, high)`` to draw it from -- a table of numbers
+            the sampler turns into a rule (docs/rules.md, "A knob's values
+            table is a rule"); for a numeric one, a range to draw from
+            instead of the bucket's interval.
         scale, offset: A numeric value, drawn in the attribute's unit, is
             written as ``value * scale + offset``.
         integer: Write an integer.
@@ -126,10 +128,82 @@ class OddKnob:
         return self._core().reach
 
 
-def _rule_input(backend: Backend, attribute: str, knob: OddKnob) -> str:
+def table_rule_name(name: str) -> str:
+    """The name a knob's key, or the attribute its table reads, takes in the
+    rules of the knobs' values tables: every character but a letter, a digit
+    or ``_`` becomes ``_`` (``environment.precipitation`` ->
+    ``environment_precipitation``)."""
+    out = "".join(c if c.isalnum() or c == "_" else "_" for c in name)
+    return out if out and not out[0].isdigit() else f"_{out}"
+
+
+def _knob_values_part(attribute: Any, knob: OddKnob) -> Optional[dict[str, Any]]:
+    """The rule a knob's ``values`` table is (docs/rules.md, "A knob's values
+    table is a rule"): for a categorical attribute whose table gives each
+    label a number or a ``[low, high)`` range, a part reading the attribute's
+    label, with a uniform distribution at each -- ``None`` for any other
+    knob (a numeric attribute's ranges replace the interval drawn; a table
+    of labels writes no number)."""
+    item = getattr(attribute, "item", None)
+    if knob.quantity is not None or not knob.values or item is None or item.values is None:
+        return None
+    low: list[float] = []
+    high: list[float] = []
+    labels: list[str] = []
+    for label in item.labels:
+        if label not in knob.values:
+            continue  # not drawn
+        v = knob.values[label]
+        if _is_range(v):
+            a, b = _range(v)
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            a = b = float(v)
+        else:
+            return None
+        labels.append(label)
+        low.append(a)
+        high.append(b)
+    if not labels:
+        return None
+    return {
+        "input": {"labels": list(item.labels)},
+        "labels": labels,
+        "part": {
+            "at": {table_rule_name(attribute.name): labels},
+            "uniform": {"low": low, "high": high},
+        },
+    }
+
+
+def _knob_rules(parts: Mapping[str, tuple[str, dict[str, Any]]]) -> Optional[Any]:
+    """The rules of the knobs' ``values`` tables: quantity (the knob's key)
+    -> (the attribute it reads, its part)."""
+    import json  # noqa: PLC0415
+    import warnings  # noqa: PLC0415
+
+    from .rules import Rules  # noqa: PLC0415
+
+    if not parts:
+        return None
+    doc = {
+        "version": 2,
+        "basis": {"kind": "expert", "by": "knob values", "text": "A knob's values table, as written."},
+        "inputs": {table_rule_name(a): spec["input"] for a, spec in parts.values()},
+        "quantities": {
+            quantity: {"parts": {"values": spec["part"]}} for quantity, (_a, spec) in parts.items()
+        },
+    }
+    with warnings.catch_warnings():
+        # Its inputs are the ODD's attributes, not a taxonomy's concepts: a
+        # table the backend wrote, not rules a reader has to classify.
+        warnings.simplefilter("ignore")
+        return Rules.from_text(json.dumps(doc), "knob values")
+
+
+def _rule_input(backend: Backend, attribute: str, knob: OddKnob, rules: Any = None) -> str:
     """The rule input through which *knob*'s quantity reads *attribute*: the
     one that stands for it (``concept:``), else one of its name."""
-    rules = backend.active_rules
+    rules = rules if rules is not None else backend.active_rules
     where = f"knob {knob.key} ({attribute})"
     if rules is None:
         raise ValueError(f"{where}: takes quantity {knob.quantity!r} from the rules, and the backend has none")
@@ -313,6 +387,26 @@ def _coverage_core(coverage: Any) -> Any:
     ])
 
 
+def _write(
+    knob: OddKnob, quantity: str, y: float, quantities: dict[str, Any], overrides: list[str]
+) -> list[str]:
+    """*overrides* with *knob* writing *quantity*'s value *y* (scaled, held
+    within its limits and rounded), in the place of the knob's own override
+    when the case has one; *quantities* records what the case ran with: the
+    quantity the value written stands for (the first knob's, when several
+    write it)."""
+    v = y * knob.scale + knob.offset
+    if knob.limits is not None:
+        v = min(max(v, knob.limits[0]), knob.limits[1])
+    written = str(int(round(v))) if knob.integer else repr(float(v))
+    ran = (float(written) - knob.offset) / knob.scale if knob.scale else y
+    quantities.setdefault(quantity, ran)
+    prefix = f"{knob.key}="
+    if not any(o.startswith(prefix) for o in overrides):
+        return [*overrides, prefix + written]
+    return [prefix + written if o.startswith(prefix) else o for o in overrides]
+
+
 class OddSampler:
     """Draws concrete cases inside an ODD.
 
@@ -380,23 +474,54 @@ class OddSampler:
         # (an explicit knob replaces one, and it is still the attribute's,
         # not an effect).
         used: set[int] = set()
+        active = backend.active_rules
+        # A knob's values table is a rule (_knob_values_part): quantity (the
+        # knob's key) -> (the attribute it reads, its part). A quantity of that
+        # name in the backend's rules -- a table measured, read over them --
+        # is the one followed instead.
+        table_parts: dict[str, tuple[str, dict[str, Any]]] = {}
+        # Attribute -> (the knob writing its table's quantity, the input the
+        # rule reads the label by), for the tables the knob rules follow.
+        self._tables: dict[str, tuple[OddKnob, str]] = {}
+        resolved: list[tuple[Any, OddKnob]] = []
         for attribute in odd.attributes:
             control = backend.knob(attribute, controls)
             if control is not None:
                 used.add(id(control))
             knob = knobs.get(attribute.name) or control
-            if knob is not None:
-                # A knob that writes a quantity of the rules sets the attribute
-                # only through them: the core draws the attribute over its
-                # range alone, and limits and rounding act on the value
-                # written (_realize), not on what is drawn.
-                core = knob if knob.quantity is None else OddKnob(knob.key, range=knob.range)
-                chosen.append((attribute.name, core._core()))
-                if knob.quantity is not None:
-                    rule_input = _rule_input(backend, attribute.name, knob)
-                    rules = backend.active_rules
-                    input_unit = rules.input_concepts.get(rule_input, ("", ""))[1] if rules else ""
-                    self._from_rules[attribute.name] = (knob, rule_input, attribute.unit, input_unit)
+            if knob is None:
+                continue
+            part = _knob_values_part(attribute, knob)
+            if part is not None:
+                quantity = table_rule_name(knob.key)
+                # The core draws the label among those the table gives (its
+                # draws as they always were); the rule writes the value.
+                chosen.append((attribute.name, knob._core()))
+                knob = dataclasses.replace(
+                    knob, values={}, scale=1.0, offset=0.0, quantity=quantity, range=None
+                )
+                if active is not None and quantity in active.quantities:
+                    resolved.append((attribute, knob))
+                else:
+                    table_parts[quantity] = (attribute.name, part)
+                    self._tables[attribute.name] = (knob, table_rule_name(attribute.name))
+                continue
+            # A knob that writes a quantity of the rules sets the attribute
+            # only through them: the core draws the attribute over its
+            # range alone, and limits and rounding act on the value
+            # written (_realize), not on what is drawn.
+            core = knob if knob.quantity is None else OddKnob(knob.key, range=knob.range)
+            chosen.append((attribute.name, core._core()))
+            if knob.quantity is not None:
+                resolved.append((attribute, knob))
+        #: The rules of the knobs' values tables (``None``: no table is one).
+        #: Each reads only its attribute's label, so they are worked out
+        #: apart from the backend's rules, before them.
+        self.knob_rules = _knob_rules(table_parts)
+        for attribute, knob in resolved:
+            rule_input = _rule_input(backend, attribute.name, knob, active)
+            input_unit = active.input_concepts.get(rule_input, ("", ""))[1] if active else ""
+            self._from_rules[attribute.name] = (knob, rule_input, attribute.unit, input_unit)
         # Effects: knobs that write a quantity and set no attribute.
         self._effects = list(effects) + [
             k for k in controls.values() if k.quantity is not None and id(k) not in used
@@ -407,7 +532,7 @@ class OddSampler:
                 f"OddSampler: nothing of ODD {odd.name} can be drawn: no attribute is given a knob, "
                 "and there are no effects"
             )
-        self._rules = backend.active_rules if self._from_rules or self._effects else None
+        self._rules = active if self._from_rules or self._effects else None
         self._seed = str(seed)
         if strategy is None:
             strategy = "weighted" if weights is not None else "uniform"
@@ -496,10 +621,22 @@ class OddSampler:
         knob's limits and rounding), whichever kind of knob wrote it. A
         quantity no knob writes is read at its own quantile, the same in
         every evaluation of the case."""
-        if (not self._from_rules and not self._effects) or self._rules is None:
+        if not self._tables and ((not self._from_rules and not self._effects) or self._rules is None):
             return case
         overrides = list(case.overrides)
         quantities = dict(case.quantities)
+        # The knobs' values tables first: each reads its attribute's label
+        # alone, at a quantile of its own (from the attribute's name).
+        for name, (knob, rule_input) in self._tables.items():
+            label = case.values.get(name)
+            if label is None or self.knob_rules is None:
+                continue
+            q = str(knob.quantity)
+            at = random.Random(f"{self._seed}:{case.index}:{name}").random()
+            y = self.knob_rules.quantile(q, {rule_input: value_label(label)}, at)
+            overrides = _write(knob, q, y, quantities, overrides)
+        if (not self._from_rules and not self._effects) or self._rules is None:
+            return dataclasses.replace(case, overrides=overrides, quantities=quantities)
         # The inputs that stand for the ODD's attributes, at the values drawn
         # (in the attribute's unit; the rule's points are in the input's).
         inputs: dict[str, Any] = {}
@@ -544,16 +681,6 @@ class OddSampler:
                 continue
             y = self._rules.quantile(q, inputs, quantiles[q], quantiles)
             for knob in writers[q]:
-                v = y * knob.scale + knob.offset
-                if knob.limits is not None:
-                    v = min(max(v, knob.limits[0]), knob.limits[1])
-                written = str(int(round(v))) if knob.integer else repr(float(v))
-                # What the case ran with: the quantity the value written
-                # stands for, held and rounded as it was (the first knob's,
-                # when several write it).
-                ran = (float(written) - knob.offset) / knob.scale if knob.scale else y
-                quantities.setdefault(q, ran)
-                prefix = f"{knob.key}="
-                overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
+                overrides = _write(knob, q, y, quantities, overrides)
             inputs[q] = quantities[q]
         return dataclasses.replace(case, overrides=overrides, quantities=quantities)

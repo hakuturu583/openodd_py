@@ -43,7 +43,9 @@ def _campaign() -> list[dict[str, Any]]:
 
 def test_the_cases_of_a_sweep() -> None:
     plot = CasePlot(_campaign())
-    assert plot.attributes == ["rain", "gap"]
+    # The rain knob's values table is a rule: what its quantity came to is an
+    # axis too.
+    assert plot.attributes == ["rain", "gap", "env_rain"]
     assert plot.cases == 20 and plot.runs == 23 and plot.skipped == (1, 0)
     data = plot.data()
     assert data["x"]["name"] == "gap" and data["x"]["kind"] == "numeric"
@@ -85,7 +87,7 @@ def test_the_table_and_the_explorer() -> None:
     assert table.count("<tr class=\"oo-row-") == 3
     assert table.index('<tr class="oo-row-') == table.index('<tr class="oo-row-flaky')
     explorer = plot.explorer_html(x="gap", y="rain", prediction=False)
-    assert explorer.count('<section class="oo-panel"') == 2  # gap x rain, rain x gap
+    assert explorer.count('<section class="oo-panel"') == 6  # each ordered pair of rain, gap, env_rain
     assert "data-oo-map=" in explorer
     page = plot.page("Cases", x="gap")
     assert page.startswith("<!doctype html>") and "oo-tips" in page and "openodd:axes" in page
