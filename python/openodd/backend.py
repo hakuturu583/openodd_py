@@ -48,13 +48,14 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 from .rules import Rules, RulesError, rule_value
 
 if TYPE_CHECKING:
-    from .model import OddAttribute
+    from .model import OddAttribute, OddDefinition
     from .sampler import OddKnob
 
 __all__ = [
     "MANIFEST_VERSION",
     "Backend",
     "Probe",
+    "UnsupportedConceptError",
     "default_backend",
     "import_callable",
     "set_default_backend",
@@ -87,6 +88,11 @@ def import_callable(spec: str) -> Callable[..., Any]:
     return found
 
 
+class UnsupportedConceptError(ValueError):
+    """An ODD asks for a concept its backend cannot bring about or measure
+    (:attr:`Backend.unsupported`)."""
+
+
 @dataclass
 class Backend:
     """The probes an application measures with, and how it sets attributes.
@@ -111,6 +117,12 @@ class Backend:
             attribute a knob sets reaches the rules (:meth:`manifest`).
         rule_input_text: Rule input -> a line saying what it is (``water``:
             the larger of ``wetness`` and ``precipitation_deposits``).
+        unsupported: Concept -> why the backend cannot bring it about or
+            measure it (a simulator with no snow: ``snowfall_rate``). An ODD
+            that measures one, or a module that restricts one (or a concept
+            derived from one), is refused (:meth:`check_supported`): it would
+            be covered, or bound, by runs that never rendered it. A taxonomy
+            may still declare it, unbound and unrestricted.
     """
 
     name: str = "default"
@@ -125,6 +137,7 @@ class Backend:
     rule_inputs: Sequence[str] = ()
     rule_input_knobs: Mapping[str, str] = field(default_factory=dict)
     rule_input_text: Mapping[str, str] = field(default_factory=dict)
+    unsupported: Mapping[str, str] = field(default_factory=dict)
     #: A run's rules over :attr:`rules` (:meth:`use_rules`).
     _rules_in_use: Optional[Rules] = field(
         default=None, init=False, repr=False, compare=False
@@ -306,6 +319,49 @@ class Backend:
             self._rules_joined = (followed, self._join(followed, self._rules_added))
         self._rules_in_use = followed
         return self._rules_in_use
+
+    def unsupported_uses(self, odd: "OddDefinition") -> list[str]:
+        """What of *odd* asks for a concept the backend cannot bring about
+        (:attr:`unsupported`), one line each: an attribute it measures, or a
+        module condition on one -- or on a concept derived from one (rain
+        intensity, from the rainfall rate). Empty when nothing does."""
+        if not self.unsupported:
+            return []
+        reasons: dict[str, str] = {}
+        for attribute in odd.attributes:
+            if attribute.name in self.unsupported:
+                reasons[attribute.name] = self.unsupported[attribute.name]
+        for attribute in odd.attributes:
+            if attribute.name in reasons:
+                continue
+            for source in attribute.defined_by:
+                if source in reasons:
+                    reasons[attribute.name] = f"derived from {source}: {reasons[source]}"
+                    break
+        problems: list[str] = []
+        for attribute in odd.attributes:
+            if attribute.name in reasons and not attribute.derived and attribute.source[0] != "missing":
+                problems.append(f"{attribute.name} is measured, but {reasons[attribute.name]}")
+        for module in odd.modules:
+            for condition in module.conditions():
+                for name in condition.attributes():
+                    if name in reasons:
+                        problems.append(f"module {module.name} restricts {name}, but {reasons[name]}")
+        return list(dict.fromkeys(problems))
+
+    def check_supported(self, odd: "OddDefinition") -> None:
+        """Refuse *odd* when it asks for a concept the backend cannot bring
+        about (:meth:`unsupported_uses`).
+
+        Raises:
+            UnsupportedConceptError: Naming each use and why.
+        """
+        problems = self.unsupported_uses(odd)
+        if problems:
+            raise UnsupportedConceptError(
+                f"ODD {odd.name}: the {self.name} backend cannot bring about what it asks for: "
+                + "; ".join(problems)
+            )
 
     def rule_values(self, values: Mapping[str, Any]) -> dict[str, Any]:
         """What the rules read of *values*, the inputs a caller has: by

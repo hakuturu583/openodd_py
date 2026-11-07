@@ -365,6 +365,7 @@ class OddSampler:
         effects: Sequence[OddKnob] = (),
     ) -> None:
         backend = backend or default_backend()
+        backend.check_supported(odd)
         knobs = dict(knobs or {})
         controls = dict(controls or {})
         chosen: list[tuple[str, Any]] = []

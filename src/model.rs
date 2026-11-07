@@ -482,6 +482,10 @@ pub struct Attribute {
     /// A categorical's literals, as the taxonomy lists them (empty for
     /// another concept, or one that names a type of the taxonomy).
     pub literals: Vec<String>,
+    /// The concepts a derived categorical's literals are defined by (rain
+    /// intensity: the rainfall rate), whether or not they are measured
+    /// (empty for another concept).
+    pub defined_by: Vec<String>,
 }
 
 impl Attribute {
@@ -507,6 +511,7 @@ impl Attribute {
             concept: ConceptKind::Other,
             written_unit: String::new(),
             literals: Vec::new(),
+            defined_by: Vec::new(),
         })
     }
 

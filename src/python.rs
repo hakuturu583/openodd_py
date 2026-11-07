@@ -619,6 +619,13 @@ impl Attribute {
         concept_value(&self.inner.concept, &self.inner.literals).to_string()
     }
 
+    /// The concepts a derived categorical is defined by, measured or not
+    /// (empty otherwise).
+    #[getter]
+    fn defined_by(&self) -> Vec<String> {
+        self.inner.defined_by.clone()
+    }
+
     /// The attributes a derived attribute is worked out from (empty otherwise).
     #[getter]
     fn derived_from(&self) -> Vec<String> {

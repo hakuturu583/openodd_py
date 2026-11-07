@@ -1232,6 +1232,7 @@ impl<'r> Reader<'r> {
         let concept = self.concepts[key].clone();
         let name = concept.name();
         let binding = self.binding(&name);
+        let mut defined_by: Vec<String> = Vec::new();
         let probe = if let Some(reader) = self.reader_key(&name, &binding)? {
             let value = binding
                 .get(&reader)
@@ -1255,7 +1256,9 @@ impl<'r> Reader<'r> {
                 spec,
             }
         } else if !concept.definitions.is_empty() {
-            self.derived_probe(key)?.unwrap_or(Probe::Missing)
+            let (probe, sources) = self.derived_probe(key)?;
+            defined_by = sources;
+            probe.unwrap_or(Probe::Missing)
         } else {
             Probe::Missing
         };
@@ -1346,6 +1349,7 @@ impl<'r> Reader<'r> {
             Kind::Categorical | Kind::Reference => ConceptKind::Categorical,
         };
         attribute.literals = concept.literals.clone();
+        attribute.defined_by = defined_by;
         if let Some(b) = buckets {
             attribute
                 .set_buckets(b)
@@ -1354,8 +1358,9 @@ impl<'r> Reader<'r> {
         Ok(attribute)
     }
 
-    /// A categorical defined by expressions; `None` when nothing it reads is measured.
-    fn derived_probe(&mut self, key: &str) -> Result<Option<Probe>> {
+    /// A categorical defined by expressions; `None` when nothing it reads is
+    /// measured. And the concepts its literals are defined by, either way.
+    fn derived_probe(&mut self, key: &str) -> Result<(Option<Probe>, Vec<String>)> {
         let concept = self.concepts[key].clone();
         let mut rules = Vec::new();
         for (literal, definition) in &concept.definitions {
@@ -1370,6 +1375,8 @@ impl<'r> Reader<'r> {
         for (_, c) in &rules {
             c.attributes(&mut sources);
         }
+        let mut seen = std::collections::HashSet::new();
+        sources.retain(|s| seen.insert(s.clone()));
         let all_missing = sources.iter().all(|s| {
             self.attributes
                 .iter()
@@ -1377,9 +1384,9 @@ impl<'r> Reader<'r> {
                 .is_none_or(|a| a.probe == Probe::Missing)
         });
         if all_missing {
-            return Ok(None);
+            return Ok((None, sources));
         }
-        Ok(Some(Probe::Derived(rules)))
+        Ok((Some(Probe::Derived(rules)), sources))
     }
 
     /// Give a measured number without buckets buckets at the thresholds tested,

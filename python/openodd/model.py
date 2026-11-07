@@ -217,6 +217,15 @@ class OddAttribute:
         return dict(json.loads(core()))
 
     @property
+    def defined_by(self) -> list[str]:
+        """The concepts a derived categorical of the taxonomy is defined by
+        (rain intensity: the rainfall rate), whether or not they are
+        measured; :attr:`derived_from` when it is worked out in code."""
+        if _code_derived(self.probe):
+            return self.derived_from
+        return list(self._core.defined_by)
+
+    @property
     def derived_from(self) -> list[str]:
         """The attributes a derived attribute is worked out from."""
         if _code_derived(self.probe):

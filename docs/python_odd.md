@@ -135,6 +135,21 @@ builder a spec names, or `None` for a bundled ODD or a file -- for an
 application that checks Python ODDs before it runs them. `odd_names()` lists
 the names an ODD can be picked by.
 
+### What a backend cannot bring about
+
+A backend says which concepts it cannot bring about or measure --
+a simulator that renders no snow, none that has a temperature -- with the
+reason (`Backend(unsupported={"...snowfall_rate": "it renders no snow"})`).
+An ODD that measures one, or whose modules restrict one or a concept
+defined by one (snow intensity, from the snowfall rate), is refused as it is
+read, and by a sampler, with `UnsupportedConceptError` naming each use: its
+coverage would count runs that never rendered the condition, and a module
+bounding it would bound nothing. A taxonomy may still declare the concept,
+unmeasured and unrestricted, so a shared taxonomy reads whole.
+`backend.unsupported_uses(odd)` lists the uses without raising.
+`OddAttribute.defined_by` gives the concepts a derived categorical is defined
+by, measured or not.
+
 ### Entry points
 
 A package that ships its ODD registers it through the `openodd.odds` entry

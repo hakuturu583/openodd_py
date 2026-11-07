@@ -75,7 +75,11 @@ def _probes(core: Any, backend: Backend) -> dict[str, Probe]:
 
 
 def _wrap(core: Any, backend: Backend) -> OddDefinition:
-    return OddDefinition._from_core(core, _probes(core, backend))
+    odd = OddDefinition._from_core(core, _probes(core, backend))
+    # Refused as it is read: what the backend cannot bring about would be
+    # covered, or bound, by runs that never rendered it.
+    backend.check_supported(odd)
+    return odd
 
 
 def load_odd_binding(
