@@ -497,3 +497,41 @@ def test_effects_in_the_odds_table_need_an_odd() -> None:
         openodd.CoverageCollector([], effects={"q": lambda c: 1.0}, effects_table="odd")
     with pytest.raises(ValueError, match="effects_table must be one of"):
         openodd.CoverageCollector([], effects_table="both")
+
+
+@pytest.mark.parametrize("table", ["separate", "odd"])
+def test_an_attributes_measurement_wins_over_an_effect_of_its_name(
+    tmp_path: Path, table: str
+) -> None:
+    """An effect named as an ODD attribute: the attribute's measurement is
+    the one set against what was drawn, whichever table the effect is in."""
+    from test_sampling import _effects_setup
+
+    _, b, o = _effects_setup(tmp_path)
+    rain = {"weather.rainfall_rate": openodd.OddKnob("env.rain_mm_h", range=(0, 10))}
+    effects = [openodd.OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap")]
+    docs = []
+    for case in openodd.OddSampler(o, rain, seed=5, backend=b, effects=effects).sample(10):
+        collector = openodd.CoverageCollector(
+            [], odd=o, backend=b, effects_table=table,
+            effects={"weather.rainfall_rate": lambda c: c["rain"] + 100.0},
+        )
+        collector.record_case(case)
+        context = {"rain": case.values["weather.rainfall_rate"]}
+        collector.start(context, 0.0)
+        collector.tick(context, 0.1)
+        collector.record_outcome(True)
+        docs.append(json.loads(json.dumps(collector.to_dict("cut_in"))))
+    drift = {a["attribute"]: a for a in CasePlot(docs).drift()["attributes"]}
+    assert drift["weather.rainfall_rate"]["summary"]["bias"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_effect_rows_at_one_time_keep_each_measurement_when_moved() -> None:
+    doc = {
+        "odd": {"samples": {"attributes": [{"name": "x"}], "rows": [[0.1, None, None, 1], [0.1, None, None, 2]]}},
+        "effects": {"samples": {"quantities": ["gap"], "rows": [[0.1, 10], [0.1, 20]]}},
+    }
+    moved = openodd.move_effect_samples(doc, "odd")
+    assert [row[-1] for row in moved["odd"]["samples"]["rows"]] == [10, 20]
+    back = openodd.move_effect_samples(moved, "separate")
+    assert back["effects"]["samples"]["rows"] == [[0.1, 10], [0.1, 20]]

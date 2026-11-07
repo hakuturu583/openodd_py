@@ -172,15 +172,20 @@ def move_effect_samples(document: Mapping[str, Any], table: str) -> dict[str, An
     if not isinstance(odd_samples, dict):
         raise ValueError("effects table 'odd': the run measured no ODD to put them beside")
     names = list(samples.get("quantities") or [])
-    by_time = {row[0]: row[1:] for row in samples.get("rows") or []}
+    # Each time's effect rows, in order: matched to the ODD's rows of that
+    # time one by one, so two ticks at one recorded time keep both.
+    by_time: dict[Any, list[list[Any]]] = {}
+    for row in samples.get("rows") or []:
+        by_time.setdefault(row[0], []).append(list(row[1:]))
+    rows = []
+    for row in odd_samples.get("rows") or []:
+        waiting = by_time.get(row[0])
+        rows.append([*row, *(waiting.pop(0) if waiting else [None] * len(names))])
     odd_samples["attributes"] = [
         *(odd_samples.get("attributes") or []),
         *({"name": f"{QUANTITY_COLUMN_PREFIX}{n}", "quantity": n} for n in names),
     ]
-    odd_samples["rows"] = [
-        [*row, *by_time.get(row[0], [None] * len(names))]
-        for row in odd_samples.get("rows") or []
-    ]
+    odd_samples["rows"] = rows
     del out["effects"]
     return out
 

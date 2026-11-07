@@ -138,8 +138,23 @@ pub const QUANTITY_COLUMN_PREFIX: &str = "quantity:";
 /// it measured (`effects.samples`, or `odd.samples` columns named
 /// `quantity:<name>`), in time order.
 fn start_samples(doc: &Json, wanted: &[&String]) -> Vec<(f64, IndexMap<String, Json>)> {
-    let mut out = table_samples(doc.pointer("/odd/samples"), "attributes", 3, wanted);
-    let effects = table_samples(doc.pointer("/effects/samples"), "quantities", 1, wanted);
+    let odd = doc.pointer("/odd/samples");
+    // An ODD attribute's measurement wins over an effect of the same name,
+    // whichever table the effect was written in (its drawn value wins too).
+    let attributes: Vec<String> = column_names(odd, "attributes")
+        .into_iter()
+        .flatten()
+        .filter(|n| !n.starts_with(QUANTITY_COLUMN_PREFIX))
+        .collect();
+    let mut out = table_samples(odd, "attributes", 3, false, &attributes, wanted);
+    let effects = table_samples(
+        doc.pointer("/effects/samples"),
+        "quantities",
+        1,
+        true,
+        &attributes,
+        wanted,
+    );
     if !effects.is_empty() {
         out.extend(effects);
         // Stable: at one time, the ODD's row first.
@@ -148,20 +163,12 @@ fn start_samples(doc: &Json, wanted: &[&String]) -> Vec<(f64, IndexMap<String, J
     out
 }
 
-/// The rows of a samples table within [`MAX_WINDOW`]: column 0 the time,
-/// the named columns from `first` on (their names in `key`, a string or
-/// `{name}` each), keeping `wanted` names with a value.
-fn table_samples(
-    table: Option<&Json>,
-    key: &str,
-    first: usize,
-    wanted: &[&String],
-) -> Vec<(f64, IndexMap<String, Json>)> {
-    let Some(table) = table.filter(|t| t.is_object()) else {
-        return Vec::new();
-    };
-    let names: Vec<Option<String>> = table
-        .get(key)
+/// A samples table's column names, as written (`key`: a string or `{name}`
+/// each).
+fn column_names(table: Option<&Json>, key: &str) -> Vec<Option<String>> {
+    table
+        .filter(|t| t.is_object())
+        .and_then(|t| t.get(key))
         .and_then(Json::as_array)
         .map(|a| {
             a.iter()
@@ -169,22 +176,42 @@ fn table_samples(
                     x.get("name")
                         .and_then(Json::as_str)
                         .or(x.as_str())
-                        .map(|n| {
-                            n.strip_prefix(QUANTITY_COLUMN_PREFIX)
-                                .unwrap_or(n)
-                                .to_string()
-                        })
+                        .map(String::from)
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    let columns: Vec<(usize, String)> = names
-        .iter()
+        .unwrap_or_default()
+}
+
+/// The rows of a samples table within [`MAX_WINDOW`]: column 0 the time,
+/// the named columns from `first` on, keeping `wanted` names with a value.
+/// A column is an effect's when the whole table is (`effects`) or its name
+/// has [`QUANTITY_COLUMN_PREFIX`]; an effect named as one of `attributes` is
+/// left out.
+fn table_samples(
+    table: Option<&Json>,
+    key: &str,
+    first: usize,
+    effects: bool,
+    attributes: &[String],
+    wanted: &[&String],
+) -> Vec<(f64, IndexMap<String, Json>)> {
+    let Some(table) = table.filter(|t| t.is_object()) else {
+        return Vec::new();
+    };
+    let columns: Vec<(usize, String)> = column_names(Some(table), key)
+        .into_iter()
         .enumerate()
         .filter_map(|(i, n)| {
-            n.clone()
-                .filter(|n| wanted.contains(&n))
-                .map(|n| (i + first, n))
+            let n = n?;
+            let (name, effect) = match n.strip_prefix(QUANTITY_COLUMN_PREFIX) {
+                Some(stripped) => (stripped.to_string(), true),
+                None => (n, effects),
+            };
+            if effect && attributes.contains(&name) {
+                return None;
+            }
+            wanted.contains(&&name).then_some((i + first, name))
         })
         .collect();
     let mut out = Vec::new();
