@@ -14,7 +14,9 @@ from openodd import (
     CoverItem,
     OddAttribute,
     OddDefinition,
+    OddKnob,
     OddModule,
+    OddSampler,
     OpenOddError,
     SamplingEvent,
     all_of,
@@ -308,3 +310,109 @@ def test_the_bundled_default_odd() -> None:
     assert odd.evaluate(odd.sample({"ego_speed_kph": 200})).inside  # no modules, nothing is outside
     with pytest.raises(ValueError, match="no bundled ODD"):
         openodd.bundled_odd("nope", backend=backend)
+
+
+_SNOWY = """TAXONOMY:
+  weather:
+    snowfall_rate: float precipitation_rate
+    snow_intensity:
+      no_snow:
+        snowfall_rate: "< 0.1 mm/h"
+      snow:
+        snowfall_rate: ">= 0.1 mm/h"
+    rain: [none, heavy]
+  speed: float velocity
+"""
+
+
+def _snowy(tmp_path: Path, modules: str = "") -> Path:
+    path = tmp_path / "snowy.yaml"
+    path.write_text(_SNOWY + modules)
+    return path
+
+
+def _no_snow_backend() -> Backend:
+    return Backend(
+        name="sim",
+        probes={
+            "speed": ((lambda c: c.get("speed")), "km/h"),
+            "snow": ((lambda c: c.get("snow")), "mm/h"),
+        },
+        unsupported={"weather.snowfall_rate": "it renders no snow"},
+    )
+
+
+def test_an_odd_that_asks_for_what_the_backend_cannot_bring_about_is_refused(
+    tmp_path: Path,
+) -> None:
+    backend = _no_snow_backend()
+    # Declared, unbound and unrestricted: read.
+    odd = openodd.load_openodd(_snowy(tmp_path), bindings={"speed": {"probe": "speed"}}, backend=backend)
+    assert backend.unsupported_uses(odd) == []
+    # Measured: refused.
+    with pytest.raises(openodd.UnsupportedConceptError, match=r"weather\.snowfall_rate is measured, but it renders no snow"):
+        openodd.load_openodd(
+            _snowy(tmp_path), bindings={"weather.snowfall_rate": {"probe": "snow"}}, backend=backend
+        )
+    # Restricted by a module, through a concept derived from it: refused.
+    modules = "MODULES:\n  dry:\n    EXCLUDE_OR:\n      weather.snow_intensity: snow\n"
+    with pytest.raises(
+        openodd.UnsupportedConceptError,
+        match=r"module dry restricts weather\.snow_intensity, but derived from weather\.snowfall_rate: it renders no snow",
+    ):
+        openodd.load_openodd(_snowy(tmp_path, modules), bindings={"speed": {"probe": "speed"}}, backend=backend)
+    # A module on what it can bring about is read.
+    ok = "MODULES:\n  dry:\n    EXCLUDE_OR:\n      weather.rain: heavy\n"
+    openodd.load_openodd(_snowy(tmp_path, ok), bindings={"speed": {"probe": "speed"}}, backend=backend)
+
+
+def test_a_sampler_refuses_an_odd_its_backend_cannot_bring_about() -> None:
+    backend = _no_snow_backend()
+    snow = OddAttribute("weather.snowfall_rate", lambda c: None, unit="mm/h", buckets=[0, 1, 10])
+    odd = OddDefinition("built", [snow])
+    with pytest.raises(openodd.UnsupportedConceptError, match="it renders no snow"):
+        OddSampler(odd, {"weather.snowfall_rate": OddKnob("env.snow", range=(0, 10))}, backend=backend)
+
+
+def test_what_a_derived_categorical_is_defined_by_holds_however_it_is_measured(
+    tmp_path: Path,
+) -> None:
+    """Measured through its rate, bound to a probe of its own, or not
+    measured at all: the taxonomy's definition is what it is defined by."""
+    path = _snowy(tmp_path)
+    backend = Backend(probes={"snow": ((lambda c: c.get("snow")), "mm/h"), "level": ((lambda c: None), "")})
+    for bindings in (
+        {"weather.snowfall_rate": {"probe": "snow"}},
+        {"weather.snow_intensity": {"probe": "level"}},
+        {},
+    ):
+        odd = openodd.load_openodd(path, bindings=bindings, backend=backend)
+        (intensity,) = [a for a in odd.attributes if a.name == "weather.snow_intensity"]
+        assert intensity.defined_by == ["weather.snowfall_rate"], bindings
+
+
+def test_a_derived_categorical_the_backend_cannot_bring_about_is_refused_however_measured(
+    tmp_path: Path,
+) -> None:
+    probes = {
+        "snow": ((lambda c: c.get("snow")), "mm/h"),
+        "level": ((lambda c: None), ""),
+        "speed": ((lambda c: None), "km/h"),
+    }
+    # A restriction on a categorical bound to a probe of its own, defined by
+    # what the backend cannot bring about.
+    rate_unsupported = Backend(name="sim", probes=probes, unsupported={"weather.snowfall_rate": "no snow"})
+    modules = "MODULES:\n  dry:\n    EXCLUDE_OR:\n      weather.snow_intensity: snow\n"
+    with pytest.raises(openodd.UnsupportedConceptError, match=r"module dry restricts weather\.snow_intensity"):
+        openodd.load_openodd(
+            _snowy(tmp_path, modules), bindings={"weather.snow_intensity": {"probe": "level"}},
+            backend=rate_unsupported,
+        )
+    # The categorical itself unsupported, worked out from a rate measured.
+    level_unsupported = Backend(name="sim", probes=probes, unsupported={"weather.snow_intensity": "no snow"})
+    with pytest.raises(openodd.UnsupportedConceptError, match=r"weather\.snow_intensity is measured, but no snow"):
+        openodd.load_openodd(
+            _snowy(tmp_path), bindings={"weather.snowfall_rate": {"probe": "snow"}}, backend=level_unsupported
+        )
+    # Neither measured nor restricted: read.
+    openodd.load_openodd(_snowy(tmp_path), bindings={"speed": {"probe": "speed"}}, backend=level_unsupported)

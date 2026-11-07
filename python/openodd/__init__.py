@@ -26,7 +26,14 @@ from importlib import metadata as _metadata
 
 from ._core import GitSourceError, OpenOddError, UnitError, Units, convert, normalize_unit
 from .cells import MISSING, OddCells
-from .backend import Backend, Probe, default_backend, import_callable, set_default_backend
+from .backend import (
+    Backend,
+    Probe,
+    UnsupportedConceptError,
+    default_backend,
+    import_callable,
+    set_default_backend,
+)
 from .rules import (
     Calibration,
     PartFit,
@@ -191,6 +198,7 @@ __all__ = [
     "OddModule",
     "OddVerdict",
     "OpenOddError",
+    "UnsupportedConceptError",
     "Probe",
     "SamplingEvent",
     "UnitError",
