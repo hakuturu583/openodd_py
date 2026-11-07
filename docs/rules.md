@@ -344,14 +344,17 @@ quantities:
 
 Rule names are identifiers, so the knob's key and the attribute's name each
 become one with every character but a letter, a digit or `_` replaced by `_`
-(`openodd.sampler.table_rule_name`). The sampler draws the label as it
-always did, then writes the quantity at it, at a quantile of its own per
-case (from the seed, the case and the attribute: the same for the same
-seed), and the case records it (`OddSample.quantities`) like any knob's
-quantity -- a [case plot](case_plot.md) offers it as an axis, after the
-attributes. These rules are `OddSampler.knob_rules`; each reads its
-attribute's label alone, so they are worked out apart from the backend's,
-before them.
+(`openodd.sampler.table_rule_name`). The sampler draws the label, then
+writes the quantity at it, at the case's own quantile of it: a parameter of
+the case, `quantile(environment_precipitation)`, drawn with it and moved by
+the [flaky search](flaky.md) like an effect's
+([Effects a scenario sets](#effects-a-scenario-sets)) -- so the search
+explores where in a label's range a run fails, not only which label. The
+case records the value (`OddSample.quantities`) like any knob's quantity,
+and a [case plot](case_plot.md) offers both as axes, after the attributes.
+These rules are `OddSampler.knob_rules` (their quantities
+`OddSampler.table_quantities`); each reads its attribute's label alone, so
+they are worked out apart from the backend's, before them.
 
 The table is followed until something better is known: a quantity of the
 same name (`environment_precipitation`) in the backend's rules -- fitted

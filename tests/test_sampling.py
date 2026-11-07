@@ -608,10 +608,16 @@ def test_a_values_table_is_a_rule() -> None:
         written = _written(case, "env.rain")
         assert low <= written <= high, (label, case.overrides)
         assert case.quantities["env_rain"] == written
-        # Written where the knob always was, and no new parameter is drawn.
+        # Written where the knob always was, at the case's own quantile: a
+        # parameter of the case, like an effect's.
         assert [o.split("=")[0] for o in case.overrides] == ["env.rain", "scenario.gap"]
-        assert set(case.values) == {"rain", "gap"}
+        assert set(case.values) == {"rain", "gap", "quantile(env_rain)"}
+        at = case.values["quantile(env_rain)"]
+        assert written == pytest.approx(low + at * (high - low))
     assert seen == {"none", "light", "heavy"}
+    assert sampler.table_quantities == ["env_rain"]
+    # The flaky search moves it: it is a dimension of the space.
+    assert openodd.ParameterSpace.of(sampler).numeric["quantile(env_rain)"] == (0.0, 1.0)
     # The same seed writes the same values.
     first = OddSampler(odd(), controls=CONTROLS, seed=5, backend=backend()).sample(10)
     again = OddSampler(odd(), controls=CONTROLS, seed=5, backend=backend()).sample(10)

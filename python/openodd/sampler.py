@@ -553,7 +553,7 @@ class OddSampler:
             drawn=[s._core() for s in drawn],
             derive=derive if derived else None,
             weights=None if weights is None else [(str(k), float(v)) for k, v in weights.items()],
-            free=[quantile_name(q) for q in self.effects] or None,
+            free=[quantile_name(q) for q in [*self.effects, *self.table_quantities]] or None,
         )
 
     @property
@@ -606,6 +606,13 @@ class OddSampler:
         return cases
 
     @property
+    def table_quantities(self) -> list[str]:
+        """The quantities of the knobs' values tables (``knob_rules``), in
+        the ODD's order: each drawn at a quantile of its own per case, a
+        parameter of the case (``quantile(q)``) like an effect's."""
+        return [str(k.quantity) for k, _ in self._tables.values()]
+
+    @property
     def effects(self) -> list[str]:
         """The quantities the sampler's effects write, in the rules' order."""
         wanted = {str(k.quantity) for k in self._effects}
@@ -632,7 +639,13 @@ class OddSampler:
             if label is None or self.knob_rules is None:
                 continue
             q = str(knob.quantity)
-            at = random.Random(f"{self._seed}:{case.index}:{name}").random()
+            # The case's own parameter (quantile(q), drawn with it and moved
+            # by the flaky search), else one from the seed.
+            p = case.values.get(quantile_name(q))
+            if isinstance(p, (int, float)) and not isinstance(p, bool):
+                at = min(max(float(p), 0.0), 1.0)
+            else:
+                at = random.Random(f"{self._seed}:{case.index}:{name}").random()
             y = self.knob_rules.quantile(q, {rule_input: value_label(label)}, at)
             overrides = _write(knob, q, y, quantities, overrides)
         if (not self._from_rules and not self._effects) or self._rules is None:
