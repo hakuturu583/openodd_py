@@ -283,14 +283,15 @@ def test_units() -> None:
 def test_the_bundled_default_odd() -> None:
     names = ["in_junction", "lanelet_location", "road_type", "drivable_area_type", "speed_limit_kph", "lane_count",
              "rainfall_rate_mm_h", "fog_visibility_range_m", "time_of_day", "ego_speed_kph",
-             "nearby_vehicle_count", "pedestrian_nearby"]
+             "nearby_vehicle_count", "pedestrian_nearby", "wind_speed_kmh", "cloud_cover",
+             "road_surface_condition"]
     units = {"speed_limit_kph": "km/h", "ego_speed_kph": "km/h", "rainfall_rate_mm_h": "mm/h",
-             "fog_visibility_range_m": "m"}
+             "fog_visibility_range_m": "m", "wind_speed_kmh": "km/h"}
     backend = Backend(
         probes={n: ((lambda c, n=n: c.get(n)), units.get(n, "")) for n in names},
     )
     odd = openodd.bundled_odd(backend=backend)
-    assert odd.name == "default" and odd.modules == [] and len(odd.attributes) == 14
+    assert odd.name == "default" and odd.modules == [] and len(odd.attributes) == 21
     assert len(odd.revision) == 64 and odd.revision == openodd.bundled_odd(backend=backend).revision
     speed = next(a for a in odd.attributes if a.name == "ego_vehicle.ego_vehicle.velocity")
     assert (speed.unit, speed.cover_by, speed.min_stay) == ("km/h", "entries", 3.0)
@@ -299,6 +300,11 @@ def test_the_bundled_default_odd() -> None:
     sample = odd.sample({"rainfall_rate_mm_h": 3.0, "fog_visibility_range_m": 600.0})
     assert sample[f"{weather}.rain.rain_intensity"] == "moderate_rain"
     assert sample[f"{weather}.fog.fog_level"] == "fog_medium"
+    assert odd.sample({"wind_speed_kmh": 30.0})[f"{weather}.wind.wind_intensity"] == "moderate_wind"
+    # Declared, and measured by no probe: a simulator may not bring them about.
+    sources = {a.name: a.source[0] for a in odd.attributes}
+    assert sources[f"{weather}.snow.snowfall_rate"] == "missing"
+    assert sources["environment_conditions.environment_conditions.temperature"] == "missing"
     assert odd.evaluate(odd.sample({"ego_speed_kph": 200})).inside  # no modules, nothing is outside
     with pytest.raises(ValueError, match="no bundled ODD"):
         openodd.bundled_odd("nope", backend=backend)

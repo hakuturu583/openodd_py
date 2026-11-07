@@ -4,6 +4,10 @@
 # speed one of 3 s (an ego accelerating from a stop to 60 km/h passes through
 # every bucket below, but has driven at none of those speeds).
 #
+# Snow and the temperature are declared by the taxonomy and measured by no
+# probe here: a backend that cannot bring them about says so
+# (Backend.unsupported).
+#
 # The weather and the time of day are what the run was set to (the causes the
 # rules sample, docs/rules.md), not what a sensor reads; the levels -- rain
 # intensity, fog level -- follow from them by the taxonomy's own definitions.
@@ -54,6 +58,20 @@ probes:
   environment_conditions.environment_conditions.weather.fog.fog_visibility_range:
     probe: fog_visibility_range_m
     text: Visibility through the fog the run was set to
+  environment_conditions.environment_conditions.weather.wind.wind_speed:
+    probe: wind_speed_kmh
+    text: Wind speed the run was set to
+  environment_conditions.environment_conditions.illumination.cloudiness:
+    probe: cloud_cover
+    text: How cloudy the sky is
+  scenery_elements.scenery_elements.scenery_element.drivable_area_surface.road_surface_condition:
+    probe: road_surface_condition
+    values: [dry, wet, standing_water]
+    cover_by: entries
+    min_stay: 2
+    # What a simulator renders of the road's surface: its water. Snow, ice,
+    # gravel and the rest are declared, and measured by none.
+    text: The road's surface under the ego (dry, wet, standing water)
   environment_conditions.environment_conditions.illumination.time_of_day:
     probe: time_of_day
     # dusk and dawn are the civil twilight (sun 6 degrees below the horizon
