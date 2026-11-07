@@ -59,9 +59,10 @@ def test_register_rejects_names_it_could_not_resolve() -> None:
 def _bundled_backend() -> openodd.Backend:
     names = ["in_junction", "lanelet_location", "road_type", "drivable_area_type", "speed_limit_kph", "lane_count",
              "rainfall_rate_mm_h", "fog_visibility_range_m", "time_of_day", "ego_speed_kph",
-             "nearby_vehicle_count", "pedestrian_nearby"]
+             "nearby_vehicle_count", "pedestrian_nearby", "wind_speed_kmh", "cloud_cover",
+             "road_surface_condition"]
     units = {"speed_limit_kph": "km/h", "ego_speed_kph": "km/h", "rainfall_rate_mm_h": "mm/h",
-             "fog_visibility_range_m": "m"}
+             "fog_visibility_range_m": "m", "wind_speed_kmh": "km/h"}
     return openodd.Backend(
         probes={n: ((lambda c, n=n: c.get(n)), units.get(n, "")) for n in names},
     )

@@ -9,6 +9,11 @@
 # are in pending_upstream.yaml. Rules name this file `taxonomy: {bundled:
 # default}`, so their cause nodes are among these concepts.
 #
+# Some concepts are declared and not measured by the default binding --
+# snow and temperature, which a simulator may not bring about: a backend that
+# cannot names them (Backend.unsupported), and an ODD that measures or
+# restricts them is refused there (docs/python_odd.md).
+#
 # Upstream's ids are kept as they are, typos included (`oppsing_lanes`,
 # `trrafic_flow_rate`, where they appear), so an id matches upstream's
 # exactly. One exception: upstream's `fog_level` tells its levels by
@@ -20,6 +25,7 @@ TAXONOMY:
       velocity: float speed
   environment_conditions:
     environment_conditions:
+      temperature: float temperature
       weather:
         rain:
           rainfall_rate: float precipitation_rate
@@ -32,6 +38,26 @@ TAXONOMY:
               rainfall_rate: "[2.5 .. 7.6] mm/h"
             heavy_rain:
               rainfall_rate: "> 7.6 mm/h"
+        snow:
+          snowfall_rate: float precipitation_rate
+          snow_intensity:
+            no_snow:
+              snowfall_rate: "< 0.1 mm/h"
+            light_snow:
+              snowfall_rate: "[0.1 .. 5.5] mm/h"
+            heavy_snow:
+              snowfall_rate: "> 5.5 mm/h"
+        wind:
+          wind_speed: float speed_km_per_h
+          wind_intensity:
+            no_wind:
+              wind_speed: "< 5 km/h"
+            light_wind:
+              wind_speed: "[5 .. 20) km/h"
+            moderate_wind:
+              wind_speed: "[20 .. 50] km/h"
+            strong_wind:
+              wind_speed: "> 50 km/h"
         fog:
           fog_visibility_range: float length
           fog_level:
@@ -47,6 +73,7 @@ TAXONOMY:
               fog_visibility_range: "< 50 m"
       illumination:
         time_of_day: [day, dusk, night, dawn]
+        cloudiness: [clear, partly_cloudy, overcast]
   scenery_elements:
     scenery_elements:
       scenery_element:
@@ -60,3 +87,17 @@ TAXONOMY:
         zones_and_areas:
           area:
             drivable_area_type: [lane, shoulder, parking_space, mixed_pedestrian_and_vehicular_traffic]
+        drivable_area_surface:
+          road_surface_condition:
+            - dry
+            - wet
+            - snow_covered
+            - black_ice
+            - gravel
+            - cobblestone
+            - standing_water
+            - icy
+            - puddle
+            - fallen_leaves
+            - road_heave
+            - road_pothole
