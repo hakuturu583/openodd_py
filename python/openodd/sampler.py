@@ -80,8 +80,10 @@ class OddKnob:
             condition drawn, given by the rules (docs/rules.md, "Knobs from
             the rules"). The quantity reads the attribute's value through the
             rule input that stands for it (``concept:``, version 3), and is
-            drawn at a quantile of its own per case. ``scale``, ``offset``
-            and ``values`` are then not used; ``integer`` and ``limits`` are.
+            drawn at a quantile of its own per case. It is written as
+            ``value * scale + offset`` (a relative speed written as the
+            absolute one, say), then held to ``limits`` and rounded by
+            ``integer``; ``values`` is not used.
             A knob with a quantity that sets no attribute -- one of the
             sampler's ``effects``, or a control no attribute reads -- writes
             the quantity at whatever of its inputs the case drew (docs/rules.md,
@@ -541,11 +543,15 @@ class OddSampler:
                 continue
             y = self._rules.quantile(q, inputs, quantiles[q], quantiles)
             for knob in writers[q]:
-                v = y if knob.limits is None else min(max(y, knob.limits[0]), knob.limits[1])
+                v = y * knob.scale + knob.offset
+                if knob.limits is not None:
+                    v = min(max(v, knob.limits[0]), knob.limits[1])
                 written = str(int(round(v))) if knob.integer else repr(float(v))
-                # What the case ran with: the value written, rounded if it
-                # was (the first knob's, when several write it).
-                quantities.setdefault(q, float(written))
+                # What the case ran with: the quantity the value written
+                # stands for, held and rounded as it was (the first knob's,
+                # when several write it).
+                ran = (float(written) - knob.offset) / knob.scale if knob.scale else y
+                quantities.setdefault(q, ran)
                 prefix = f"{knob.key}="
                 overrides = [o for o in overrides if not o.startswith(prefix)] + [prefix + written]
             inputs[q] = quantities[q]
