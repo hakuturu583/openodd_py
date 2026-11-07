@@ -694,7 +694,7 @@ class OddSampler:
                 low, _high = self.knob_rules.range(q, given)
                 held = low if knob.limits is None else min(max(low, knob.limits[0]), knob.limits[1])
                 overrides = _write(
-                    dataclasses.replace(knob, integer=float(held).is_integer()),
+                    dataclasses.replace(knob, integer=knob.integer or float(held).is_integer()),
                     q,
                     low,
                     quantities,

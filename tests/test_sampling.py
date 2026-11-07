@@ -820,3 +820,12 @@ def test_a_whole_number_held_to_a_fractional_limit_stays_inside_it() -> None:
     written = {c.values["rain"]: _written(c, "env.rain") for c in sampler.sample(40)}
     assert written["none"] == 0.5
     assert written["light"] == 5
+
+
+def test_an_integer_knob_rounds_a_whole_number_held_to_a_fractional_limit() -> None:
+    knob = OddKnob(
+        "env.rain", values={"none": 3, "light": 1, "heavy": 2}, limits=(0, 2.5), integer=True
+    )
+    sampler = OddSampler(odd(), {"rain": knob}, controls=CONTROLS, seed=1, backend=backend())
+    case = next(c for c in sampler.sample(40) if c.values["rain"] == "none")
+    assert "env.rain=2" in case.overrides
