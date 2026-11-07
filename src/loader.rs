@@ -1349,6 +1349,11 @@ impl<'r> Reader<'r> {
             Kind::Categorical | Kind::Reference => ConceptKind::Categorical,
         };
         attribute.literals = concept.literals.clone();
+        if defined_by.is_empty() && !concept.definitions.is_empty() {
+            // Bound to a probe of its own: what the taxonomy defines it by
+            // still is what it is defined by.
+            defined_by = self.derived_probe(key)?.1;
+        }
         attribute.defined_by = defined_by;
         if let Some(b) = buckets {
             attribute

@@ -340,7 +340,8 @@ class Backend:
                     break
         problems: list[str] = []
         for attribute in odd.attributes:
-            if attribute.name in reasons and not attribute.derived and attribute.source[0] != "missing":
+            # Measured, by a probe or worked out from what is measured.
+            if attribute.name in reasons and attribute.source[0] != "missing":
                 problems.append(f"{attribute.name} is measured, but {reasons[attribute.name]}")
         for module in odd.modules:
             for condition in module.conditions():

@@ -221,9 +221,12 @@ class OddAttribute:
         """The concepts a derived categorical of the taxonomy is defined by
         (rain intensity: the rainfall rate), whether or not they are
         measured; :attr:`derived_from` when it is worked out in code."""
+        native = list(self._core.defined_by)
+        if native:
+            return native
         if _code_derived(self.probe):
             return self.derived_from
-        return list(self._core.defined_by)
+        return []
 
     @property
     def derived_from(self) -> list[str]:
