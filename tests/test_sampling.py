@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -590,3 +591,205 @@ def test_an_effect_reads_a_categorical_cause_at_its_label(tmp_path: Path) -> Non
         low, high = rules.range("sight_m", {"rain": label})
         assert low <= _written(case, "scenario.sight_m") <= high, (label, case.overrides)
     assert seen == {"none", "light", "heavy"}
+
+
+def test_a_values_table_is_a_rule() -> None:
+    """A categorical attribute's knob table is a rule: a uniform distribution
+    at each label, reading the label drawn (issue #40)."""
+    sampler = OddSampler(odd(), controls=CONTROLS, seed=5, backend=backend())
+    rules = sampler.knob_rules
+    assert rules is not None and rules.quantities == ["env_rain"]
+    assert rules.basis("env_rain", "values")["kind"] == "expert"
+    assert rules.range("env_rain", {"rain": "light"}) == (1.0, 30.0)
+    seen = set()
+    for case in sampler.sample(60):
+        label = case.values["rain"]
+        seen.add(label)
+        low, high = {"none": (0, 0), "light": (1, 30), "heavy": (70, 100)}[label]
+        written = _written(case, "env.rain")
+        assert low <= written <= high, (label, case.overrides)
+        assert case.quantities["env_rain"] == written
+        # Written where the knob always was, at the case's own quantile: a
+        # parameter of the case, like an effect's.
+        assert [o.split("=")[0] for o in case.overrides] == ["env.rain", "scenario.gap"]
+        assert set(case.values) == {"rain", "gap", "quantile(env_rain)"}
+        at = case.values["quantile(env_rain)"]
+        assert written == pytest.approx(low + at * (high - low))
+    assert seen == {"none", "light", "heavy"}
+    assert sampler.table_quantities == ["env_rain"]
+    # The flaky search moves it: it is a dimension of the space.
+    assert openodd.ParameterSpace.of(sampler).numeric["quantile(env_rain)"] == (0.0, 1.0)
+    # The same seed writes the same values.
+    first = OddSampler(odd(), controls=CONTROLS, seed=5, backend=backend()).sample(10)
+    again = OddSampler(odd(), controls=CONTROLS, seed=5, backend=backend()).sample(10)
+    assert [c.overrides for c in first] == [c.overrides for c in again]
+
+
+def test_a_rule_of_the_tables_name_is_followed_instead(tmp_path: Path) -> None:
+    """A quantity of the knob's name (``env.rain`` -> ``env_rain``) in the
+    backend's rules -- the table measured -- writes the value instead."""
+    taxonomy = "TAXONOMY:\n  weather:\n    rain: [none, light, heavy]\n"
+    (tmp_path / "taxonomy.yaml").write_text(taxonomy)
+    (tmp_path / "rules.yaml").write_text(
+        "version: 3\ntaxonomy: taxonomy.yaml\nbasis: {kind: fitted}\n"
+        "inputs:\n  rain: {concept: weather.rain}\n"
+        "quantities:\n  env_rain:\n    parts:\n      p:\n"
+        "        at: {rain: [none, light, heavy]}\n"
+        "        uniform: {low: [0, 2, 5], high: [0, 3, 6]}\n"
+    )
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    b = Backend(probes={"rain": (lambda c: c.get("rain"), "")}, rules=rules)
+    o = openodd.load_openodd(taxonomy, bindings={"weather.rain": {"probe": "rain"}}, backend=b)
+    knob = OddKnob("env.rain", values={"none": 0, "light": [1, 30], "heavy": [70, 100]})
+    sampler = OddSampler(o, {"weather.rain": knob}, seed=2, backend=b)
+    assert sampler.knob_rules is None
+    for case in sampler.sample(30):
+        low, high = rules.range("env_rain", {"rain": case.values["weather.rain"]})
+        assert low <= _written(case, "env.rain") <= high
+
+
+def test_other_tables_are_not_rules() -> None:
+    """A numeric attribute's table (ranges replacing the interval drawn) and a
+    table of labels write what they always did."""
+    numeric = OddSampler(
+        odd(),
+        {"rain": OddKnob("env.rain", values={"none": "dry", "light": "wet", "heavy": "wet"}),
+         "gap": OddKnob("scenario.gap", values={"near": [2, 9], "far": [20, 35]})},
+        seed=1,
+        backend=Backend(),
+    )
+    assert numeric.knob_rules is None
+    for case in numeric.sample(20):
+        assert not case.quantities
+        assert any(o in ("env.rain=dry", "env.rain=wet") for o in case.overrides)
+
+
+def test_table_rule_names() -> None:
+    from openodd.sampler import table_rule_name
+
+    assert table_rule_name("environment.precipitation") == "environment_precipitation"
+    assert table_rule_name("a-b c") == "a_b_c"
+    assert table_rule_name("3d") == "_3d"
+
+
+def test_a_table_whose_key_is_the_attributes_name() -> None:
+    """An attribute ``rain`` with a knob ``rain``: the input the rule reads
+    is kept apart from the quantity it writes."""
+    o = openodd.load_openodd(ODD, bindings={"rain": {"probe": "rain"}}, backend=backend())
+    knob = OddKnob("rain", values={"none": 0, "light": [1, 30], "heavy": 90})
+    sampler = OddSampler(o, {"rain": knob}, seed=1, backend=backend())
+    assert sampler.knob_rules.quantities == ["rain"]
+    assert sampler.knob_rules.range("rain", {"rain_label": "heavy"}) == (90.0, 90.0)
+    for case in sampler.sample(10):
+        if case.values["rain"] == "heavy":
+            assert _written(case, "rain") == 90
+
+
+def test_an_integer_table_draws_among_the_integers_of_its_range() -> None:
+    """``integer`` keeps the table's ranges half-open: ``[1, 3)`` writes 1 or
+    2, each as likely, never 3."""
+    knob = OddKnob("env.rain", values={"none": 1.2, "light": [1, 3], "heavy": [70, 71]}, integer=True)
+    sampler = OddSampler(odd(), {"rain": knob}, controls=CONTROLS, seed=2, backend=backend())
+    written: dict[str, list[int]] = {"none": [], "light": [], "heavy": []}
+    for case in sampler.sample(200):
+        (w,) = [o for o in case.overrides if o.startswith("env.rain=")]
+        assert w.split("=")[1].isdigit()
+        written[case.values["rain"]].append(int(w.split("=")[1]))
+    assert set(written["none"]) == {1}  # a point: its integer, as the core writes it
+    assert set(written["light"]) == {1, 2}
+    assert 0.3 < written["light"].count(1) / len(written["light"]) < 0.7
+    assert set(written["heavy"]) == {70}
+
+
+def test_keys_that_read_the_same_keep_their_own_quantities() -> None:
+    """``env.rain`` and ``env_rain`` are one rule name: the second table
+    takes ``env_rain_2``, and each writes its own setting."""
+    odd2 = openodd.load_openodd(
+        "TAXONOMY:\n  rain: [none, heavy]\n  fog: [none, heavy]\n",
+        bindings={"rain": {"probe": "rain"}, "fog": {"probe": "rain"}},
+        backend=backend(),
+    )
+    knobs = {
+        "rain": OddKnob("env.rain", values={"none": 0, "heavy": 90}),
+        "fog": OddKnob("env_rain", values={"none": 5, "heavy": 50}),
+    }
+    sampler = OddSampler(odd2, knobs, seed=1, backend=backend())
+    assert sampler.table_quantities == ["env_rain", "env_rain_2"]
+    for case in sampler.sample(10):
+        assert _written(case, "env.rain") == {"none": 0, "heavy": 90}[case.values["rain"]]
+        assert _written(case, "env_rain") == {"none": 5, "heavy": 50}[case.values["fog"]]
+
+
+def test_table_rule_names_are_the_rules_names() -> None:
+    from openodd.sampler import table_rule_name
+
+    assert table_rule_name("environment.précipitation") == "environment_pr_cipitation"
+    assert table_rule_name("AND") == "AND_"
+    sampler = OddSampler(
+        odd(),
+        {"rain": OddKnob("AND", values={"none": 0, "light": [1, 30], "heavy": 90})},
+        controls=CONTROLS,
+        seed=1,
+        backend=backend(),
+    )
+    assert sampler.table_quantities == ["AND_"]
+
+
+def test_the_top_quantile_stays_inside_a_half_open_range() -> None:
+    """The flaky search may move a table's quantile to 1: ``[1, 30)`` still
+    writes less than 30."""
+    sampler = OddSampler(odd(), controls=CONTROLS, seed=1, backend=backend())
+    case = next(c for c in sampler.sample(30) if c.values["rain"] == "light")
+    moved = sampler._realize(
+        dataclasses.replace(case, values={**case.values, "quantile(env_rain)": 1.0}, quantities={})
+    )
+    assert 1 <= _written(moved, "env.rain") < 30
+
+
+def _rain_effect_rules(tmp_path: Path, extra: str = "") -> tuple[Any, Backend, Any]:
+    taxonomy = "TAXONOMY:\n  weather:\n    rain: [none, light, heavy]\n"
+    (tmp_path / "taxonomy.yaml").write_text(taxonomy)
+    (tmp_path / "rules.yaml").write_text(
+        "version: 3\ntaxonomy: taxonomy.yaml\nbasis: {kind: expert}\n"
+        "inputs:\n  rain: {concept: weather.rain}\n"
+        "quantities:\n  sight_m:\n    parts:\n      p:\n"
+        "        at: {rain: [none, light, heavy]}\n"
+        "        uniform: {low: [300, 150, 50], high: [400, 250, 100]}\n" + extra
+    )
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    b = Backend(probes={"rain": (lambda c: c.get("rain"), "")}, rules=rules)
+    o = openodd.load_openodd(taxonomy, bindings={"weather.rain": {"probe": "rain"}}, backend=b)
+    return rules, b, o
+
+
+def test_a_table_quantity_named_like_an_input_leaves_it_alone(tmp_path: Path) -> None:
+    """A table knob keyed ``rain`` writes quantity ``rain``; an effect reading
+    the backend's input ``rain`` still reads the label drawn."""
+    rules, b, o = _rain_effect_rules(tmp_path)
+    knob = OddKnob("rain", values={"none": 0, "light": [1, 30], "heavy": [70, 100]})
+    effects = [OddKnob("scenario.sight_m", quantity="sight_m")]
+    for case in OddSampler(o, {"weather.rain": knob}, seed=3, backend=b, effects=effects).sample(30):
+        low, high = rules.range("sight_m", {"rain": case.values["weather.rain"]})
+        assert low <= _written(case, "scenario.sight_m") <= high, case.overrides
+
+
+def test_a_suffixed_table_name_avoids_the_backends_quantities(tmp_path: Path) -> None:
+    rules, b, o = _rain_effect_rules(
+        tmp_path,
+        "  env_rain_2:\n    parts:\n      p:\n        at: {rain: [none, light, heavy]}\n"
+        "        uniform: {low: [0, 0, 0], high: [1, 1, 1]}\n",
+    )
+    taxonomy = "TAXONOMY:\n  weather:\n    rain: [none, light, heavy]\n    fog: [none, light, heavy]\n"
+    o = openodd.load_openodd(
+        taxonomy,
+        bindings={"weather.rain": {"probe": "rain"}, "weather.fog": {"probe": "rain"}},
+        backend=b,
+    )
+    knobs = {
+        "weather.rain": OddKnob("env.rain", values={"none": 0, "light": 1, "heavy": 2}),
+        "weather.fog": OddKnob("env_rain", values={"none": 5, "light": 6, "heavy": 7}),
+    }
+    effects = [OddKnob("scenario.x", quantity="env_rain_2")]
+    sampler = OddSampler(o, knobs, seed=1, backend=b, effects=effects)
+    assert sampler.table_quantities == ["env_rain", "env_rain_3"]
+    assert len(sampler.sample(5)) == 5

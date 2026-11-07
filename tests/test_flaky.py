@@ -26,8 +26,14 @@ def passes(case) -> bool:
     return case.values["gap"] > BOUNDARY
 
 
+#: Rain written as the simulator's labels: a table of labels is not a rule,
+#: so the space is gap and rain alone (a table of numbers would add its
+#: quantile, docs/rules.md "A knob's values table is a rule").
+RAIN = {"rain": OddKnob("env.rain", values={"none": "dry", "light": "wet", "heavy": "storm"})}
+
+
 def search(**kw) -> FlakySearch:
-    sampler = OddSampler(odd(), controls=CONTROLS, seed=3, backend=backend())
+    sampler = OddSampler(odd(), RAIN, controls=CONTROLS, seed=0, backend=backend())
     return FlakySearch(sampler, **kw)
 
 

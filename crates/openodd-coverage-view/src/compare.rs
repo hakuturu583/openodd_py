@@ -512,6 +512,7 @@ impl Comparison {
                 .filter_map(|c| self.split_case(c, side))
                 .collect(),
             axes: self.cases.axes.clone(),
+            quantity_axes: self.cases.quantity_axes.clone(),
             documents: match side {
                 Side::Base => self.split,
                 Side::Other => self.cases.documents - self.split,
