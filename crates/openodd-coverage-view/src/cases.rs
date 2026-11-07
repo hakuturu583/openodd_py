@@ -65,6 +65,10 @@ pub struct CaseRun {
     /// the rows within [`MAX_WINDOW`] seconds, `(t, attribute -> value)`,
     /// only the case's attributes and only values that are not null.
     pub start: Vec<(f64, IndexMap<String, Json>)>,
+    /// What its effects measured at the start, the same way, kept apart
+    /// from [`Self::start`] so each table is read in the order it was
+    /// written, whichever table the effects were written in.
+    pub effects: Vec<(f64, IndexMap<String, Json>)>,
 }
 
 /// How much of a run's start is kept to measure it by: the longest
@@ -80,13 +84,15 @@ impl CaseRun {
     /// `window` seconds (from t = 0) that has a value.
     pub fn measured(&self, window: f64) -> IndexMap<String, Json> {
         let mut out: IndexMap<String, Json> = IndexMap::new();
-        for (t, row) in &self.start {
-            if *t > window + 1e-9 {
-                break;
-            }
-            for (k, v) in row {
-                if !out.contains_key(k) {
-                    out.insert(k.clone(), v.clone());
+        for table in [&self.start, &self.effects] {
+            for (t, row) in table {
+                if *t > window + 1e-9 {
+                    break;
+                }
+                for (k, v) in row {
+                    if !out.contains_key(k) {
+                        out.insert(k.clone(), v.clone());
+                    }
                 }
             }
         }
@@ -137,7 +143,11 @@ pub const QUANTITY_COLUMN_PREFIX: &str = "quantity:";
 /// names with a value: the ODD's attributes (`odd.samples`) and the effects
 /// it measured (`effects.samples`, or `odd.samples` columns named
 /// `quantity:<name>`), in time order.
-fn start_samples(doc: &Json, wanted: &[&String]) -> Vec<(f64, IndexMap<String, Json>)> {
+fn start_samples(
+    doc: &Json,
+    wanted: &[&String],
+    effects: bool,
+) -> Vec<(f64, IndexMap<String, Json>)> {
     let odd = doc.pointer("/odd/samples");
     // An ODD attribute's measurement wins over an effect of the same name,
     // whichever table the effect was written in (its drawn value wins too).
@@ -146,8 +156,17 @@ fn start_samples(doc: &Json, wanted: &[&String]) -> Vec<(f64, IndexMap<String, J
         .flatten()
         .filter(|n| !n.starts_with(QUANTITY_COLUMN_PREFIX))
         .collect();
-    let mut out = table_samples(odd, "attributes", 3, false, &attributes, wanted);
-    let effects = table_samples(
+    if !effects {
+        let attributes_only: Vec<&String> = wanted
+            .iter()
+            .copied()
+            .filter(|n| attributes.contains(n))
+            .collect();
+        return table_samples(odd, "attributes", 3, false, &attributes, &attributes_only);
+    }
+    // The effects, in the order written: their own table's rows, or the
+    // ODD's rows' `quantity:` columns.
+    let separate = table_samples(
         doc.pointer("/effects/samples"),
         "quantities",
         1,
@@ -155,12 +174,21 @@ fn start_samples(doc: &Json, wanted: &[&String]) -> Vec<(f64, IndexMap<String, J
         &attributes,
         wanted,
     );
-    if !effects.is_empty() {
-        out.extend(effects);
-        // Stable: at one time, the ODD's row first.
-        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if !separate.is_empty() {
+        return separate;
     }
-    out
+    let quantities: Vec<String> = column_names(odd, "attributes")
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.strip_prefix(QUANTITY_COLUMN_PREFIX).map(String::from))
+        .filter(|n| !attributes.contains(n))
+        .collect();
+    let wanted_effects: Vec<&String> = wanted
+        .iter()
+        .copied()
+        .filter(|n| quantities.contains(n))
+        .collect();
+    table_samples(odd, "attributes", 3, false, &attributes, &wanted_effects)
 }
 
 /// A samples table's column names, as written (`key`: a string or `{name}`
@@ -588,7 +616,8 @@ impl CaseSet {
                     .unwrap_or("")
                     .to_string(),
                 flaky: case.get("flaky").filter(|f| f.is_object()).cloned(),
-                start: start_samples(doc, &values.keys().collect::<Vec<_>>()),
+                start: start_samples(doc, &values.keys().collect::<Vec<_>>(), false),
+                effects: start_samples(doc, &values.keys().collect::<Vec<_>>(), true),
             };
             // The space: each attribute's range or labels.
             for dim in case

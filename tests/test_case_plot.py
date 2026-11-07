@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -547,3 +547,40 @@ def test_a_null_effect_row_keeps_its_place_through_a_round_trip() -> None:
     back = openodd.move_effect_samples(there, "separate")
     again = openodd.move_effect_samples(back, "odd")
     assert again["odd"]["samples"]["rows"] == there["odd"]["samples"]["rows"]
+
+
+def test_a_clock_that_goes_back_reads_the_same_in_every_layout(tmp_path: Path) -> None:
+    """Each table is read in the order it was written: recording the effects,
+    and where, changes nothing of what the ODD's attributes measured."""
+    from test_sampling import _effects_setup
+
+    _, b, o = _effects_setup(tmp_path)
+    rain = {"weather.rainfall_rate": openodd.OddKnob("env.rain_mm_h", range=(0, 10))}
+    effects = [openodd.OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap")]
+    cases = openodd.OddSampler(o, rain, seed=5, backend=b, effects=effects).sample(6)
+
+    def campaign(table: Optional[str]) -> list[dict[str, Any]]:
+        docs = []
+        for case in cases:
+            kw: dict[str, Any] = {}
+            if table is not None:
+                kw = {"effects": {"vehicle_ahead_gap": lambda c: c["gap"]}, "effects_table": table}
+            collector = openodd.CoverageCollector([], odd=o, backend=b, **kw)
+            collector.record_case(case)
+            drawn = case.values["weather.rainfall_rate"]
+            context = {"rain": drawn + 1.0, "gap": 5.0}
+            collector.start(context, 0.0)
+            collector.tick(context, 0.2)
+            context.update(rain=drawn + 3.0, gap=9.0)
+            collector.tick(context, 0.1)  # the clock went back
+            collector.record_outcome(True)
+            docs.append(json.loads(json.dumps(collector.to_dict("cut_in"))))
+        return docs
+
+    def bias(docs: list[dict[str, Any]]) -> float:
+        drift = {a["attribute"]: a for a in CasePlot(docs).drift()["attributes"]}
+        return drift["weather.rainfall_rate"]["summary"]["bias"]
+
+    assert bias(campaign(None)) == pytest.approx(1.0, abs=1e-6)
+    assert bias(campaign("separate")) == pytest.approx(1.0, abs=1e-6)
+    assert bias(campaign("odd")) == pytest.approx(1.0, abs=1e-6)
