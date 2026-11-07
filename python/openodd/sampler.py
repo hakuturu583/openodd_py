@@ -522,6 +522,13 @@ class OddSampler:
                 if active is not None and quantity in active.quantities:
                     resolved.append((attribute, knob))
                 else:
+                    # Keys that read the same as a rule name (env.rain,
+                    # env_rain) each keep a quantity of their own.
+                    n = 2
+                    while quantity in table_parts:
+                        quantity = f"{table_rule_name(knob.key)}_{n}"
+                        n += 1
+                    knob = dataclasses.replace(knob, quantity=quantity)
                     table_parts[quantity] = (attribute.name, part)
                     self._tables[attribute.name] = (knob, "")
                 continue

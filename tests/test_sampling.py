@@ -698,3 +698,22 @@ def test_an_integer_table_draws_among_the_integers_of_its_range() -> None:
     assert set(written["light"]) == {1, 2}
     assert 0.3 < written["light"].count(1) / len(written["light"]) < 0.7
     assert set(written["heavy"]) == {70}
+
+
+def test_keys_that_read_the_same_keep_their_own_quantities() -> None:
+    """``env.rain`` and ``env_rain`` are one rule name: the second table
+    takes ``env_rain_2``, and each writes its own setting."""
+    odd2 = openodd.load_openodd(
+        "TAXONOMY:\n  rain: [none, heavy]\n  fog: [none, heavy]\n",
+        bindings={"rain": {"probe": "rain"}, "fog": {"probe": "rain"}},
+        backend=backend(),
+    )
+    knobs = {
+        "rain": OddKnob("env.rain", values={"none": 0, "heavy": 90}),
+        "fog": OddKnob("env_rain", values={"none": 5, "heavy": 50}),
+    }
+    sampler = OddSampler(odd2, knobs, seed=1, backend=backend())
+    assert sampler.table_quantities == ["env_rain", "env_rain_2"]
+    for case in sampler.sample(10):
+        assert _written(case, "env.rain") == {"none": 0, "heavy": 90}[case.values["rain"]]
+        assert _written(case, "env_rain") == {"none": 5, "heavy": 50}[case.values["fog"]]
