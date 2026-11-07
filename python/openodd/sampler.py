@@ -505,6 +505,9 @@ class OddSampler:
         # Attribute -> (the knob writing its table's quantity, the input the
         # rule reads the label by), for the tables the knob rules follow.
         self._tables: dict[str, tuple[OddKnob, str]] = {}
+        # Attribute -> the labels its table gives a whole number (``2``, not
+        # ``2.0`` or a range): written as that integer, as the table says.
+        self._table_ints: dict[str, set[str]] = {}
         resolved: list[tuple[Any, OddKnob]] = []
         for attribute in odd.attributes:
             control = backend.knob(attribute, controls)
@@ -515,6 +518,11 @@ class OddSampler:
                 continue
             part = _knob_values_part(attribute, knob)
             if part is not None:
+                self._table_ints[attribute.name] = {
+                    label
+                    for label, v in knob.values.items()
+                    if isinstance(v, int) and not isinstance(v, bool)
+                }
                 quantity = table_rule_name(knob.key)
                 # The core draws the label among those the table gives (its
                 # draws as they always were); the rule writes the value.
@@ -680,6 +688,13 @@ class OddSampler:
             else:
                 at = random.Random(f"{self._seed}:{case.index}:{name}").random()
             given = {rule_input: value_label(label)}
+            if value_label(label) in self._table_ints.get(name, ()):
+                # A whole number the table gives: written as the integer.
+                low, _high = self.knob_rules.range(q, given)
+                overrides = _write(
+                    dataclasses.replace(knob, integer=True), q, low, quantities, overrides
+                )
+                continue
             if knob.integer:
                 # Among the integers in [low, high), each as likely, as the
                 # core draws them.

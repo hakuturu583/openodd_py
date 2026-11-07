@@ -793,3 +793,22 @@ def test_a_suffixed_table_name_avoids_the_backends_quantities(tmp_path: Path) ->
     sampler = OddSampler(o, knobs, seed=1, backend=b, effects=effects)
     assert sampler.table_quantities == ["env_rain", "env_rain_3"]
     assert len(sampler.sample(5)) == 5
+
+
+def test_a_whole_number_in_a_table_is_written_as_one() -> None:
+    """``{none: 0, heavy: 90}`` writes ``0`` and ``90``, as the table says --
+    a setting that takes an integer (a lane count) gets one; a range and a
+    float stay floats."""
+    knob = OddKnob("env.rain", values={"none": 0, "light": [1, 30], "heavy": 90.0})
+    sampler = OddSampler(odd(), {"rain": knob}, controls=CONTROLS, seed=1, backend=backend())
+    seen = set()
+    for case in sampler.sample(40):
+        (w,) = [o.split("=", 1)[1] for o in case.overrides if o.startswith("env.rain=")]
+        label = case.values["rain"]
+        seen.add(label)
+        if label == "none":
+            assert w == "0"
+            assert case.quantities["env_rain"] == 0
+        else:
+            assert "." in w, w
+    assert seen == {"none", "light", "heavy"}
