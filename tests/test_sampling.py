@@ -688,14 +688,14 @@ def test_a_table_whose_key_is_the_attributes_name() -> None:
 def test_an_integer_table_draws_among_the_integers_of_its_range() -> None:
     """``integer`` keeps the table's ranges half-open: ``[1, 3)`` writes 1 or
     2, each as likely, never 3."""
-    knob = OddKnob("env.rain", values={"none": 0, "light": [1, 3], "heavy": [70, 71]}, integer=True)
+    knob = OddKnob("env.rain", values={"none": 1.2, "light": [1, 3], "heavy": [70, 71]}, integer=True)
     sampler = OddSampler(odd(), {"rain": knob}, controls=CONTROLS, seed=2, backend=backend())
     written: dict[str, list[int]] = {"none": [], "light": [], "heavy": []}
     for case in sampler.sample(200):
         (w,) = [o for o in case.overrides if o.startswith("env.rain=")]
         assert w.split("=")[1].isdigit()
         written[case.values["rain"]].append(int(w.split("=")[1]))
-    assert set(written["none"]) == {0}
+    assert set(written["none"]) == {1}  # a point: its integer, as the core writes it
     assert set(written["light"]) == {1, 2}
     assert 0.3 < written["light"].count(1) / len(written["light"]) < 0.7
     assert set(written["heavy"]) == {70}

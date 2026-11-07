@@ -682,9 +682,11 @@ class OddSampler:
                 # Among the integers in [low, high), each as likely, as the
                 # core draws them.
                 low, high = self.knob_rules.range(q, given)
-                first = math.ceil(low)
-                last = first if low == high else math.ceil(high) - 1
-                y = float(first + min(int(at * (last - first + 1)), max(last - first, 0)))
+                if low == high:
+                    y = float(int(low))  # a point: the core's integer of it
+                else:
+                    first, last = math.ceil(low), math.ceil(high) - 1
+                    y = float(first + min(int(at * (last - first + 1)), max(last - first, 0)))
             else:
                 y = self.knob_rules.quantile(q, given, at)
                 # [low, high): the top quantile stays below high.
