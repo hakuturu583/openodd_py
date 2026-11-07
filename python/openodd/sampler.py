@@ -689,10 +689,16 @@ class OddSampler:
                 at = random.Random(f"{self._seed}:{case.index}:{name}").random()
             given = {rule_input: value_label(label)}
             if value_label(label) in self._table_ints.get(name, ()):
-                # A whole number the table gives: written as the integer.
+                # A whole number the table gives: written as the integer --
+                # while its limits leave it one.
                 low, _high = self.knob_rules.range(q, given)
+                held = low if knob.limits is None else min(max(low, knob.limits[0]), knob.limits[1])
                 overrides = _write(
-                    dataclasses.replace(knob, integer=True), q, low, quantities, overrides
+                    dataclasses.replace(knob, integer=float(held).is_integer()),
+                    q,
+                    low,
+                    quantities,
+                    overrides,
                 )
                 continue
             if knob.integer:

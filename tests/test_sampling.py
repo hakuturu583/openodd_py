@@ -812,3 +812,11 @@ def test_a_whole_number_in_a_table_is_written_as_one() -> None:
         else:
             assert "." in w, w
     assert seen == {"none", "light", "heavy"}
+
+
+def test_a_whole_number_held_to_a_fractional_limit_stays_inside_it() -> None:
+    knob = OddKnob("env.rain", values={"none": 0, "light": 5, "heavy": 90}, limits=(0.5, 100))
+    sampler = OddSampler(odd(), {"rain": knob}, controls=CONTROLS, seed=1, backend=backend())
+    written = {c.values["rain"]: _written(c, "env.rain") for c in sampler.sample(40)}
+    assert written["none"] == 0.5
+    assert written["light"] == 5
