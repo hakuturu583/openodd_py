@@ -57,8 +57,10 @@ Where they are written is for the analysis to choose:
 one to the other in a file already written. The views read both: each effect
 measured is placed, and drifts, like an attribute -- drawn from
 `case.quantities`, measured from its column -- and its correction is the
-knob that wrote it (`scale`, `offset`) or its quantity's points
-(`drift_rules`). An effect no probe measured is left out of the drift view:
+knob that wrote it (`scale`, `offset`). `drift_rules` moves the points of a
+part reading a drawn attribute's input, so it does not correct an effect:
+a root of the network has no such points. An effect no probe measured is
+left out of the drift view:
 a CARLA weather field the rules give, written as it is drawn, has nothing to
 drift.
 

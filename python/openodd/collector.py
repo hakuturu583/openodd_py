@@ -155,7 +155,9 @@ def move_effect_samples(document: Mapping[str, Any], table: str) -> dict[str, An
         rows = []
         for row in odd_samples.get("rows") or []:
             values = [row[3 + i] if 3 + i < len(row) else None for i in moved]
-            if any(v is not None for v in values):
+            # Every tick the effects were measured on -- a null one too, a
+            # placeholder that keeps the rows of one time matched in turn.
+            if row[0] <= EFFECT_WINDOW + 1e-9 or any(v is not None for v in values):
                 rows.append([row[0], *values])
         keep = [i for i in range(len(attributes)) if i not in moved]
         odd_samples["attributes"] = [attributes[i] for i in keep]

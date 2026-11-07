@@ -535,3 +535,15 @@ def test_effect_rows_at_one_time_keep_each_measurement_when_moved() -> None:
     assert [row[-1] for row in moved["odd"]["samples"]["rows"]] == [10, 20]
     back = openodd.move_effect_samples(moved, "separate")
     assert back["effects"]["samples"]["rows"] == [[0.1, 10], [0.1, 20]]
+
+
+def test_a_null_effect_row_keeps_its_place_through_a_round_trip() -> None:
+    doc = {
+        "odd": {"samples": {"attributes": [{"name": "x"}], "rows": [[0.1, None, None, 1], [0.1, None, None, 2]]}},
+        "effects": {"samples": {"quantities": ["gap"], "rows": [[0.1, None], [0.1, 20]]}},
+    }
+    there = openodd.move_effect_samples(doc, "odd")
+    assert [row[-1] for row in there["odd"]["samples"]["rows"]] == [None, 20]
+    back = openodd.move_effect_samples(there, "separate")
+    again = openodd.move_effect_samples(back, "odd")
+    assert again["odd"]["samples"]["rows"] == there["odd"]["samples"]["rows"]
