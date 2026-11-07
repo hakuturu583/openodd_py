@@ -654,16 +654,22 @@ def test_a_fit_skips_what_a_categorical_cause_does_not_say() -> None:
 
 
 def test_rules_name_the_taxonomy_openodd_ships() -> None:
-    """``taxonomy: {bundled: default}``: the default ODD's taxonomy, built in."""
+    """``taxonomy: {bundled: default}``: the default ODD's taxonomy, built in,
+    under tier4/taxonomy's ids."""
+    rain = "environment_conditions.environment_conditions.weather.rain.rainfall_rate"
+    time = "environment_conditions.environment_conditions.illumination.time_of_day"
     rules = Rules.from_text(
         "version: 3\ntaxonomy: {bundled: default}\nbasis: {kind: expert}\n"
-        "inputs:\n  speed: {concept: dynamic.ego_speed, unit: km/h}\n"
-        "quantities:\n  gap:\n    parts:\n      p:\n        at: {speed: [0, 100]}\n"
-        "        uniform: {low: [2, 10], high: [10, 40]}\n"
+        f"inputs:\n  rain: {{concept: {rain}, unit: mm/h}}\n  time: {{concept: {time}}}\n"
+        "quantities:\n  carla_precipitation:\n    parts:\n      p:\n        at: {rain: [0, 10]}\n"
+        "        uniform: {low: [0, 60], high: [5, 80]}\n"
+        "  carla_sun_altitude:\n    parts:\n      p:\n        at: {time: [day, dusk, night, dawn]}\n"
+        "        uniform: {low: [15, -6, -30, -6], high: [90, 0, -6, 0]}\n"
     )
     assert rules.taxonomy is not None and rules.taxonomy[0] == "bundled:default"
-    assert rules.input_concepts == {"speed": ("dynamic.ego_speed", "km/h")}
-    assert rules.taxonomy_concepts["dynamic.ego_speed"]["kind"] == "number"
+    assert rules.input_concepts == {"rain": (rain, "mm/h"), "time": (time, "")}
+    assert rules.taxonomy_concepts[rain]["kind"] == "number"
+    assert rules.input_labels == {"time": ["day", "dusk", "night", "dawn"]}
 
 
 def test_a_backend_reads_a_categorical_input_at_its_label() -> None:

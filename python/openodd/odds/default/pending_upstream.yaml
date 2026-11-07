@@ -1,0 +1,12 @@
+# Concepts the default ODD measures that tier4/taxonomy does not declare yet.
+# Each is to be proposed upstream (`openodd-taxonomy-check` drafts the issue)
+# and, once upstream has it, moved into default.yaml under upstream's id.
+TAXONOMY:
+  scenery:
+    junction: boolean
+    location: [urban, nonurban, private]
+  dynamic:
+    # Upstream's traffic density is a flow rate (veh/h) past a point; a run
+    # measures how many vehicles are near the ego, which is not that.
+    nearby_vehicle_count: integer count
+    pedestrian_nearby: boolean
