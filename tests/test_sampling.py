@@ -418,6 +418,29 @@ def test_a_control_no_attribute_reads_is_an_effect(tmp_path: Path) -> None:
         assert not any(x.startswith("scenario.unused=") for x in case.overrides)
 
 
+def test_an_effect_is_written_through_its_scale_and_offset(tmp_path: Path) -> None:
+    """A quantity of a relative value written to a setting that takes the
+    absolute one: offset by what it is relative to, then held to the limits;
+    the case keeps the quantity the setting stands for."""
+    _, b, o = _effects_setup(tmp_path)
+    effects = [
+        OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap", offset=100.0, limits=(0, 200)),
+        OddKnob("scenario.half_gap", quantity="vehicle_ahead_gap", scale=0.5),
+    ]
+    rain = {"weather.rainfall_rate": OddKnob("env.rain_mm_h", range=(0, 10))}
+    for case in OddSampler(o, rain, seed=2, backend=b, effects=effects).sample(20):
+        gap = case.quantities["vehicle_ahead_gap"]
+        assert 2 <= gap <= 30
+        assert _written(case, "scenario.npc_gap_m") == pytest.approx(gap + 100.0)
+        assert _written(case, "scenario.half_gap") == pytest.approx(gap * 0.5)
+    # Held by the limits: what the case ran with is the quantity at the limit.
+    held = [OddKnob("scenario.npc_gap_m", quantity="vehicle_ahead_gap", offset=100.0, limits=(0, 110))]
+    for case in OddSampler(o, rain, seed=2, backend=b, effects=held).sample(20):
+        written = _written(case, "scenario.npc_gap_m")
+        assert written <= 110.0
+        assert case.quantities["vehicle_ahead_gap"] == pytest.approx(written - 100.0)
+
+
 def test_effects_need_rules_that_give_them(tmp_path: Path) -> None:
     rules, b, o = _effects_setup(tmp_path)
     with pytest.raises(ValueError, match="no quantity 'nope'"):

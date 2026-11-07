@@ -290,11 +290,14 @@ unit) as it would for any knob, and the knob writes the quantity's value at
 it: read through the rule input that stands for the attribute (`concept:`;
 an input of the attribute's name in version 2 rules), from the backend's
 active rules, at a quantile of its own per case and knob -- the same for the
-same seed. `limits` and `integer` apply to the value written; `values`,
-`scale` and `offset` are not used. A knob in config takes `quantity:` too
+same seed. The value is written as `value * scale + offset` -- a quantity
+of a relative speed written to a setting that takes the absolute one, with
+`offset` the speed it is relative to -- then held to `limits` and rounded by
+`integer`; `values` is not used. A knob in config takes `quantity:` too
 (`knobs_from_mapping`), and `Backend.manifest()` writes it. The case keeps
-the value written (`OddSample.quantities`, recorded as `case.quantities`), so
-a [case plot](case_plot.md) can place the runs by it.
+the quantity's value the setting was written from, held and rounded as it
+was (`OddSample.quantities`, recorded as `case.quantities`), so a
+[case plot](case_plot.md) can place the runs by it.
 
 **Fitting a knob's quantity.** A setting's quantity is fitted like any
 other ([Fitting to data](#fitting-to-data)), from rows that pair the real
