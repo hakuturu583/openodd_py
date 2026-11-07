@@ -528,7 +528,9 @@ class OddSampler:
                     # Keys that read the same as a rule name (env.rain,
                     # env_rain) each keep a quantity of their own.
                     n = 2
-                    while quantity in table_parts:
+                    while quantity in table_parts or (
+                        active is not None and quantity in active.quantities
+                    ):
                         quantity = f"{table_rule_name(knob.key)}_{n}"
                         n += 1
                     knob = dataclasses.replace(knob, quantity=quantity)
@@ -734,7 +736,10 @@ class OddSampler:
                 quantiles[q] = min(max(float(p), 0.0), 1.0)
             writers.setdefault(q, []).extend(k for k in self._effects if k.quantity == q)
         # A quantity already in the case is read at that value.
-        inputs.update(quantities)
+        # (Not the tables' quantities: the backend's rules do not read them,
+        # and one may share a name with an input of theirs.)
+        tables = set(self.table_quantities)
+        inputs.update({k: v for k, v in quantities.items() if k not in tables})
         for q in self._rules.order:
             if q not in writers:
                 continue

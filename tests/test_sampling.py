@@ -744,3 +744,52 @@ def test_the_top_quantile_stays_inside_a_half_open_range() -> None:
         dataclasses.replace(case, values={**case.values, "quantile(env_rain)": 1.0}, quantities={})
     )
     assert 1 <= _written(moved, "env.rain") < 30
+
+
+def _rain_effect_rules(tmp_path: Path, extra: str = "") -> tuple[Any, Backend, Any]:
+    taxonomy = "TAXONOMY:\n  weather:\n    rain: [none, light, heavy]\n"
+    (tmp_path / "taxonomy.yaml").write_text(taxonomy)
+    (tmp_path / "rules.yaml").write_text(
+        "version: 3\ntaxonomy: taxonomy.yaml\nbasis: {kind: expert}\n"
+        "inputs:\n  rain: {concept: weather.rain}\n"
+        "quantities:\n  sight_m:\n    parts:\n      p:\n"
+        "        at: {rain: [none, light, heavy]}\n"
+        "        uniform: {low: [300, 150, 50], high: [400, 250, 100]}\n" + extra
+    )
+    rules = openodd.Rules.read(tmp_path / "rules.yaml")
+    b = Backend(probes={"rain": (lambda c: c.get("rain"), "")}, rules=rules)
+    o = openodd.load_openodd(taxonomy, bindings={"weather.rain": {"probe": "rain"}}, backend=b)
+    return rules, b, o
+
+
+def test_a_table_quantity_named_like_an_input_leaves_it_alone(tmp_path: Path) -> None:
+    """A table knob keyed ``rain`` writes quantity ``rain``; an effect reading
+    the backend's input ``rain`` still reads the label drawn."""
+    rules, b, o = _rain_effect_rules(tmp_path)
+    knob = OddKnob("rain", values={"none": 0, "light": [1, 30], "heavy": [70, 100]})
+    effects = [OddKnob("scenario.sight_m", quantity="sight_m")]
+    for case in OddSampler(o, {"weather.rain": knob}, seed=3, backend=b, effects=effects).sample(30):
+        low, high = rules.range("sight_m", {"rain": case.values["weather.rain"]})
+        assert low <= _written(case, "scenario.sight_m") <= high, case.overrides
+
+
+def test_a_suffixed_table_name_avoids_the_backends_quantities(tmp_path: Path) -> None:
+    rules, b, o = _rain_effect_rules(
+        tmp_path,
+        "  env_rain_2:\n    parts:\n      p:\n        at: {rain: [none, light, heavy]}\n"
+        "        uniform: {low: [0, 0, 0], high: [1, 1, 1]}\n",
+    )
+    taxonomy = "TAXONOMY:\n  weather:\n    rain: [none, light, heavy]\n    fog: [none, light, heavy]\n"
+    o = openodd.load_openodd(
+        taxonomy,
+        bindings={"weather.rain": {"probe": "rain"}, "weather.fog": {"probe": "rain"}},
+        backend=b,
+    )
+    knobs = {
+        "weather.rain": OddKnob("env.rain", values={"none": 0, "light": 1, "heavy": 2}),
+        "weather.fog": OddKnob("env_rain", values={"none": 5, "light": 6, "heavy": 7}),
+    }
+    effects = [OddKnob("scenario.x", quantity="env_rain_2")]
+    sampler = OddSampler(o, knobs, seed=1, backend=b, effects=effects)
+    assert sampler.table_quantities == ["env_rain", "env_rain_3"]
+    assert len(sampler.sample(5)) == 5
