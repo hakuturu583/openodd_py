@@ -283,7 +283,7 @@ def test_units() -> None:
 
 
 def test_the_bundled_default_odd() -> None:
-    names = ["in_junction", "lanelet_location", "road_type", "drivable_area_type", "speed_limit_kph", "lane_count",
+    names = ["junction_type", "lanelet_location", "road_type", "drivable_area_type", "speed_limit_kph", "lane_count",
              "rainfall_rate_mm_h", "fog_visibility_range_m", "time_of_day", "ego_speed_kph",
              "nearby_vehicle_count", "pedestrian_nearby", "wind_speed_kmh", "cloud_cover",
              "road_surface_condition"]
@@ -303,6 +303,11 @@ def test_the_bundled_default_odd() -> None:
     assert sample[f"{weather}.rain.rain_intensity"] == "moderate_rain"
     assert sample[f"{weather}.fog.fog_level"] == "fog_medium"
     assert odd.sample({"wind_speed_kmh": 30.0})[f"{weather}.wind.wind_intensity"] == "moderate_wind"
+    # A junction by upstream's own concept: its kind inside one, no value outside.
+    junction = "scenery_elements.scenery_elements.scenery_element.drivable_area_geometry.junctions.intersection.junction_type"
+    assert odd.sample({"junction_type": "intersection"})[junction] == "intersection"
+    assert odd.sample({"junction_type": None})[junction] is None
+    assert not any(a.name == "scenery.junction" for a in odd.attributes)
     # Declared, and measured by no probe: a simulator may not bring them about.
     sources = {a.name: a.source[0] for a in odd.attributes}
     assert sources[f"{weather}.snow.snowfall_rate"] == "missing"

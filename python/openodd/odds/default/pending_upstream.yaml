@@ -3,7 +3,6 @@
 # and, once upstream has it, moved into default.yaml under upstream's id.
 TAXONOMY:
   scenery:
-    junction: boolean
     location: [urban, nonurban, private]
   dynamic:
     # Upstream's traffic density is a flow rate (veh/h) past a point; a run

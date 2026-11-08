@@ -57,7 +57,7 @@ def test_register_rejects_names_it_could_not_resolve() -> None:
 
 
 def _bundled_backend() -> openodd.Backend:
-    names = ["in_junction", "lanelet_location", "road_type", "drivable_area_type", "speed_limit_kph", "lane_count",
+    names = ["junction_type", "lanelet_location", "road_type", "drivable_area_type", "speed_limit_kph", "lane_count",
              "rainfall_rate_mm_h", "fog_visibility_range_m", "time_of_day", "ego_speed_kph",
              "nearby_vehicle_count", "pedestrian_nearby", "wind_speed_kmh", "cloud_cover",
              "road_surface_condition"]
