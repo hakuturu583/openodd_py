@@ -191,8 +191,8 @@ network access, in Python and in the browser alike. It stands in for
 tier4/taxonomy as a subset of it (the same ids and definitions, for the
 concepts openodd uses) until that can be named: converging then is changing
 this reference to its git source. The concepts the default ODD measures that
-tier4/taxonomy lacks yet (`pending_upstream.yaml`: junction, location, nearby
-vehicles and pedestrians) are not in it, so no rule's cause is one of them.
+tier4/taxonomy lacks yet (`pending_upstream.yaml`: location, nearby vehicles
+and pedestrians) are not in it, so no rule's cause is one of them.
 It is one OpenODD file, read on its own: one that `IMPORT`s others is refused, since its imports would be read from the working directory and its SHA-256 would not cover them.
 `Rules.version`, `Rules.taxonomy` (`(path or URL, sha256)`) and
 `Rules.input_concepts` (input → `(concept, unit)`) say what was read.

@@ -15,9 +15,15 @@ openodd: [default.yaml, pending_upstream.yaml]
 name: default
 text: Every attribute the framework measures; no restrictions.
 probes:
-  scenery.junction:
-    probe: in_junction
-    text: Ego inside a junction
+  scenery_elements.scenery_elements.scenery_element.drivable_area_geometry.junctions.intersection.junction_type:
+    probe: junction_type
+    values: [intersection]
+    cover_by: entries
+    min_stay: 2
+    # A lanelet tagged turn_direction is in an intersection (as a planned
+    # route and a sweep's is_junction read it); Lanelet2 tells no branch or
+    # merge, and outside a junction there is no value.
+    text: The kind of junction the ego is in (Lanelet2 turn_direction -> intersection)
   scenery.location:
     probe: lanelet_location
     values: [urban, nonurban, private]

@@ -87,6 +87,12 @@ TAXONOMY:
         zones_and_areas:
           area:
             drivable_area_type: [lane, shoulder, parking_space, mixed_pedestrian_and_vehicular_traffic]
+        drivable_area_geometry:
+          junctions:
+            intersection:
+              # Upstream's: a junction's kind, and nothing outside one -- a
+              # run there reads no value (not measured), not a label.
+              junction_type: [intersection, branch, merge]
         drivable_area_surface:
           road_surface_condition:
             - dry
