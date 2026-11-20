@@ -79,13 +79,9 @@ def test_the_upstream_taxonomy_reads() -> None:
 
 
 DEFAULT = Path(openodd.__file__).parent / "odds" / "default"
-# Where the bundled default ODD departs from upstream on purpose: upstream's
-# fog levels are told by a concept it does not declare (tier4/taxonomy#46).
-DEFAULT_EXCEPTIONS = {
-    "environment_conditions.environment_conditions.weather.fog.fog_level": (
-        "visibility_range", "fog_visibility_range",
-    ),
-}
+# Where the bundled default ODD departs from upstream on purpose: nowhere
+# since upstream's fog levels name the concept it declares (tier4/taxonomy#46).
+DEFAULT_EXCEPTIONS: dict[str, tuple[str, str]] = {}
 
 
 def _taxonomy(path: Path) -> dict:
