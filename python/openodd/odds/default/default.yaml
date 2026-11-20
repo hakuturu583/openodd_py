@@ -14,11 +14,11 @@
 # cannot names them (Backend.unsupported), and an ODD that measures or
 # restricts them is refused there (docs/python_odd.md).
 #
-# Upstream's ids are kept as they are, typos included (`oppsing_lanes`,
-# `trrafic_flow_rate`, where they appear), so an id matches upstream's
-# exactly. One exception: upstream's `fog_level` tells its levels by
-# `visibility_range`, which it does not declare (tier4/taxonomy#46); here they
-# are told by `fog_visibility_range`, the concept beside it.
+# Upstream's ids are kept exactly as they are, so an id matches upstream's.
+# This file follows tier4/taxonomy's devel at Issue #73 (after v0.3.0): its
+# literals are the renamed ones of tier4/taxonomy#57 (`gravel_covered`), and
+# its fog levels are told by `fog_visibility_range` as upstream's now are
+# (tier4/taxonomy#46).
 TAXONOMY:
   ego_vehicle:
     ego_vehicle:
@@ -99,7 +99,7 @@ TAXONOMY:
             - wet
             - snow_covered
             - black_ice
-            - gravel
+            - gravel_covered
             - cobblestone
             - standing_water
             - icy
